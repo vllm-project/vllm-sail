@@ -2,7 +2,6 @@
 """Channelwise Engram storage with upstream sharding, UVA and prefetch."""
 
 import torch
-from vllm.model_executor.utils import set_weight_attrs
 from vllm.models.deepseek_v41.nvidia.engram import ParallelEngramEmbedding
 
 
@@ -33,7 +32,7 @@ class ChannelwiseEngramEmbedding(ParallelEngramEmbedding):
         )
         # Keep the upstream parameter name and head-shard loader. The PPU
         # lookup distinguishes FP32 scales from exponent bytes by tensor dtype.
-        set_weight_attrs(self.weight_scale_inv, {"dummy_weight_value": 1.0})
+        self.weight_scale_inv.dummy_weight_value = 1.0
 
     def _allocate_weights(self):
         placement = {"device": "cpu", "pin_memory": True} if self.cpu_offload else {}
