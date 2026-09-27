@@ -66,9 +66,18 @@ def test_standard_quantization_delegates_without_rewriting_config(quant_module):
     assert calls[1][1] is checkpoint
 
 
-@pytest.mark.parametrize("model_type", ["deepseek_v41", "deepseek_v41_text"])
+@pytest.mark.parametrize(
+    "model_type,architectures",
+    [
+        ("deepseek_v41", ["DeepseekV41ForCausalLM"]),
+        ("deepseek_v41_text", []),
+        # SpeculativeConfig verifies this temporary config before rewriting
+        # it to deepseek_v41 / DSparkV41DraftModel.
+        ("deepseek_mtp", ["DeepseekV41ForCausalLM"]),
+    ],
+)
 def test_qlean_metadata_is_translated_without_editing_checkpoint(
-    quant_module, model_type
+    quant_module, model_type, architectures
 ):
     module, calls = quant_module
     cls = module.DeepseekV4FP8Config
@@ -81,7 +90,9 @@ def test_qlean_metadata_is_translated_without_editing_checkpoint(
     }
     assert (
         cls.override_quantization_method(
-            checkpoint, None, SimpleNamespace(model_type=model_type)
+            checkpoint,
+            None,
+            SimpleNamespace(model_type=model_type, architectures=architectures),
         )
         == "deepseek_v4_fp8"
     )
