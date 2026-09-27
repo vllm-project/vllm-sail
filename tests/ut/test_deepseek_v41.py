@@ -36,7 +36,11 @@ def quant_module(modules):
 
     modules("vllm.models.deepseek_v41.quant_config", DeepseekV4FP8Config=Upstream)
     modules("vllm.model_executor.layers.fused_moe", RoutedExperts=type("MoE", (), {}))
-    modules("vllm.model_executor.layers.linear", LinearBase=type("Linear", (), {}))
+    modules(
+        "vllm.model_executor.layers.linear",
+        LinearBase=type("Linear", (), {}),
+        UnquantizedLinearMethod=object,
+    )
     modules(
         "vllm.model_executor.layers.quantization.utils.quant_utils",
         is_layer_skipped=lambda **kwargs: False,
@@ -60,6 +64,36 @@ def test_standard_quantization_delegates_without_rewriting_config(quant_module):
         ("dispatch", layer, "model.ffn"),
     ]
     assert calls[1][1] is checkpoint
+
+
+@pytest.mark.parametrize("model_type", ["deepseek_v41", "deepseek_v41_text"])
+def test_qlean_metadata_is_translated_without_editing_checkpoint(
+    quant_module, model_type
+):
+    module, calls = quant_module
+    cls = module.DeepseekV4FP8Config
+    cls.__bases__[0].override_quantization_method = classmethod(lambda *args: None)
+    checkpoint = {
+        "quant_method": "mxfp4",
+        "expert_dtype": "mxfp4",
+        "fp8_channelwise_layers": ["layers.0.attn.wo_a"],
+        "ignore": ["layers.0.attn.compressor.wkv"],
+    }
+    assert (
+        cls.override_quantization_method(
+            checkpoint, None, SimpleNamespace(model_type=model_type)
+        )
+        == "deepseek_v4_fp8"
+    )
+    result = cls.from_config(checkpoint)
+    translated = calls[-1][1]
+    assert translated["quant_method"] == "fp8"
+    assert translated["activation_scheme"] == "dynamic"
+    assert translated["ignored_layers"] == checkpoint["ignore"]
+    assert result._checkpoint_channelwise_layers == checkpoint["fp8_channelwise_layers"]
+    assert (
+        checkpoint["quant_method"] == "mxfp4" and "activation_scheme" not in checkpoint
+    )
 
 
 @pytest.mark.upstream_source
@@ -167,7 +201,18 @@ def test_v41_selector_preserves_cuda_and_other_backends(modules):
         return config
 
     provider = modules(
-        "vllm.models.deepseek_v41.nvidia.model", _select_dsv4_attn_cls=original
+        "vllm.models.deepseek_v41.nvidia.model",
+        _select_dsv4_attn_cls=original,
+        _linear_scale_param_name=lambda *args: "weight_scale_inv",
+    )
+    original_scale = provider._linear_scale_param_name
+    draft = modules(
+        "vllm.models.deepseek_v41.nvidia.dspark",
+        _linear_scale_param_name=original_scale,
+    )
+    vl = modules(
+        "vllm.models.deepseek_v41.nvidia.vl_model",
+        _linear_scale_param_name=original_scale,
     )
     replacement = load_patch("vllm_sail/patch/enhancement/models/deepseek_v41.py")
     assert provider._select_dsv4_attn_cls is replacement._select_dsv4_attn_cls
@@ -175,8 +220,18 @@ def test_v41_selector_preserves_cuda_and_other_backends(modules):
     assert marker[replacement._TARGET] is original
     assert provider._select_dsv4_attn_cls(upstream) is ppu
     assert provider._select_dsv4_attn_cls(other) is other
+    config = SimpleNamespace(
+        quant_config=SimpleNamespace(fp8_channelwise_layers=["attn.wo_a"])
+    )
+    assert (
+        draft._linear_scale_param_name
+        is vl._linear_scale_param_name
+        is provider._linear_scale_param_name
+    )
+    assert draft._linear_scale_param_name(config, "fp4") == "weight_scale"
     platform.ppu = False
     assert provider._select_dsv4_attn_cls(upstream) is upstream
+    assert draft._linear_scale_param_name(config, "fp4") == "weight_scale_inv"
     with pytest.raises(RuntimeError, match="already patched"):
         load_patch("vllm_sail/patch/enhancement/models/deepseek_v41.py")
 
