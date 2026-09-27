@@ -609,6 +609,16 @@ def test_deepseek_config_preserves_dense_channelwise_patterns_for_mtp(modules):
         def apply_vllm_mapper(self, mapper):
             pass
 
+        @classmethod
+        def override_quantization_method(cls, *args):
+            return None
+
+        @classmethod
+        def from_config(cls, config):
+            return cls(is_checkpoint_fp8_serialized=config["quant_method"] == "fp8")
+
+    modules("vllm.models.deepseek_v41.quant_config", DeepseekV4FP8Config=Fp8Config)
+
     class LinearBase:
         pass
 
