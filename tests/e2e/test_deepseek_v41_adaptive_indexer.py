@@ -37,7 +37,8 @@ def test_device_lengths_flattened_logits_graph_replay(compress_ratio):
     )
 
     # Same total budget; CPU plans [3,3], device reallocates to [5,1] or [1,5].
-    capacity, tokens, block_size, heads, dim = 8, 6, 128, 64, 128
+    # SAIL FP8 paged logits requires 64-token pages.
+    capacity, tokens, block_size, heads, dim = 8, 6, 64, 64, 128
     builder = object.__new__(DeepseekV32IndexerMetadataBuilder)
     builder.vllm_config = SimpleNamespace(
         speculative_config=SimpleNamespace(enable_adaptive_verification=True)
@@ -48,7 +49,7 @@ def test_device_lengths_flattened_logits_graph_replay(compress_ratio):
     )
     builder.decode_lens_buffer = torch.zeros(capacity, dtype=torch.int32, device="cuda")
     builder.expanded_block_table_buffer = torch.zeros(
-        capacity, 2, dtype=torch.int32, device="cuda"
+        capacity, 4, dtype=torch.int32, device="cuda"
     )
     builder.arange_buffer = torch.arange(capacity, dtype=torch.int32, device="cuda")
     cpu_lens = torch.tensor([3, 3], dtype=torch.int32)
@@ -56,22 +57,22 @@ def test_device_lengths_flattened_logits_graph_replay(compress_ratio):
     starts = torch.tensor([0, 5], dtype=torch.int32, device="cuda")
     context = torch.tensor([127, 185], dtype=torch.int32, device="cuda")
     seq_lens = context + lens
-    table_cpu = torch.tensor([[2, 0], [3, 1]], dtype=torch.int32)
+    table_cpu = torch.tensor([[4, 0, 6, 2], [5, 1, 7, 3]], dtype=torch.int32)
     table = table_cpu.cuda()
     generator = torch.Generator().manual_seed(83)
     q_cpu = (torch.randn(capacity, 1, heads, dim, generator=generator) / 8).to(
         torch.float8_e4m3fn
     )
-    k_cpu = (torch.randn(4, block_size, dim, generator=generator) / 8).to(
+    k_cpu = (torch.randn(8, block_size, dim, generator=generator) / 8).to(
         torch.float8_e4m3fn
     )
-    scales_cpu = torch.rand(4, block_size, generator=generator) / 2 + 0.25
+    scales_cpu = torch.rand(8, block_size, generator=generator) / 2 + 0.25
     weight_cpu = torch.rand(capacity, heads, generator=generator) / heads
     packed = torch.cat(
         (k_cpu.view(torch.uint8).flatten(1), scales_cpu.view(torch.uint8).flatten(1)),
         dim=1,
     )
-    cache = packed.reshape(4, block_size, 1, dim + 4).cuda()
+    cache = packed.reshape(8, block_size, 1, dim + 4).cuda()
     q, weights = q_cpu.cuda(), weight_cpu.cuda()
     sms = get_num_sms()
 
@@ -91,8 +92,10 @@ def test_device_lengths_flattened_logits_graph_replay(compress_ratio):
         assert batch == capacity and not padding
         ends = (ends // compress_ratio).unsqueeze(-1)
         schedule = get_paged_mqa_logits_metadata(ends, block_size, sms, None)
+        # Match the model: 2D context lengths require external top-k masking.
+        # The logits kernel only promises values within each visible prefix.
         logits = fp8_paged_mqa_logits(
-            q, cache, weights, ends, blocks, schedule, 256, True
+            q, cache, weights, ends, blocks, schedule, 256, False
         )
         return ends, blocks, lengths, logits
 
@@ -132,5 +135,3 @@ def test_device_lengths_flattened_logits_graph_replay(compress_ratio):
             torch.testing.assert_close(
                 logits[row, :end], reference, rtol=0.01, atol=0.002
             )
-            assert torch.isneginf(logits[row, end:]).all()
-        assert torch.isneginf(logits[tokens:]).all()
