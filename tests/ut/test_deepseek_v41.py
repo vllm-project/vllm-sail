@@ -227,3 +227,39 @@ def test_v41_projection_preserves_weights_and_uses_bf16_helper(
     assert attn.wo_a.weight is loaded
     assert attn.forward_mqa is Upstream.forward_mqa
     assert attn._forward_prefill is Upstream._forward_prefill
+
+
+def test_v41_draft_inherits_its_own_loader_and_execution(modules):
+    class Upstream:
+        load_weights = object()
+        forward = object()
+
+    class SupportsQuant:
+        pass
+
+    mapper_args = []
+    mapper = object()
+
+    def make_mapper(*args):
+        mapper_args.append(args)
+        return mapper
+
+    modules("vllm.model_executor.models.interfaces", SupportsQuant=SupportsQuant)
+    modules(
+        "vllm.models.deepseek_v41.nvidia.dspark", DSparkDeepseekV4ForCausalLM=Upstream
+    )
+    modules(
+        "vllm.models.deepseek_v41.nvidia.model",
+        _make_deepseek_v4_weights_mapper=make_mapper,
+    )
+    draft = load_patch(
+        "vllm_sail/models/deepseek_v41/dspark.py"
+    ).DSparkDeepseekV41ForCausalLM
+    assert issubclass(draft, SupportsQuant)
+    assert (
+        draft.load_weights is Upstream.load_weights
+        and draft.forward is Upstream.forward
+    )
+    assert draft.hf_to_vllm_mapper is mapper
+    assert mapper_args == [("fp4", "weight_scale")]
+    assert draft.packed_modules_mapping["fused_wqa_wkv"] == ["wq_a", "wkv"]
