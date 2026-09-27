@@ -1,10 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 """PPU channelwise Engram storage and factory contracts."""
 
+import ast
 from types import SimpleNamespace
 
 import pytest
 
+from tests.support.source import ROOT, definition
 from tests.ut import test_ppu_kernel_capabilities as harness
 
 modules = harness.modules
@@ -118,3 +120,23 @@ def test_engram_factory_keeps_offload_and_original_layouts(modules):
     assert embedding._create_embedding(layout, 1) is original
     with pytest.raises(RuntimeError, match="already patched"):
         load_patch(path)
+
+
+@pytest.mark.upstream_source
+def test_engram_e8m0_lookup_body_matches_upstream(upstream_source_root):
+    class RemoveChannelwiseBranch(ast.NodeTransformer):
+        def visit_If(self, node):
+            if ast.unparse(node.test) == "scales.dtype.element_ty == tl.float32":
+                return node.orelse
+            return self.generic_visit(node)
+
+    local = definition(
+        ROOT / "vllm_sail/patch/enhancement/models/deepseek_v41_engram.py",
+        "_engram_lookup_kernel",
+    )
+    upstream = definition(
+        upstream_source_root / "vllm/models/deepseek_v41/common/engram.py",
+        "_engram_lookup_kernel",
+    )
+    local.decorator_list = local.decorator_list[1:]
+    assert ast.dump(RemoveChannelwiseBranch().visit(local)) == ast.dump(upstream)
