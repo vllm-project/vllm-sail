@@ -1,0 +1,114 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+"""Preserve V4.1 Engram lookup semantics for PPU FP32 per-row scales."""
+
+from vllm.config import get_current_vllm_config
+from vllm.platforms import current_platform
+from vllm.triton_utils import tl, triton
+
+from vllm_sail.patch.utils import PATCH_MARKER, patch
+
+_AFFECTED = ">=0.30.0,<0.31.0"
+_FACTORY = "vllm.models.deepseek_v41.nvidia.engram"
+
+
+@patch(
+    "vllm.models.deepseek_v41.common.engram",
+    reason="PPU channelwise Engram exports carry FP32 row scales rather than E8M0 block scales.",
+    affected_versions=_AFFECTED,
+    remove_when="Upstream Engram lookup supports FP32 scales alongside E8M0 scales.",
+)
+@triton.jit(
+    do_not_specialize=[
+        "vocab_start",
+        "vocab_end",
+        "num_rows",
+        "ids_stride_t",
+        "ids_stride_h",
+        "GRID",
+    ]
+)
+def _engram_lookup_kernel(
+    weight,
+    scales,
+    ids,
+    out,
+    vocab_start,
+    vocab_end,
+    num_rows,
+    ids_stride_t,
+    ids_stride_h,
+    HEAD_START: tl.constexpr,
+    LOCAL_HEADS: tl.constexpr,
+    TOTAL_HEADS: tl.constexpr,
+    DIM: tl.constexpr,
+    QUANT_BLOCK: tl.constexpr,
+    BLOCK_R: tl.constexpr,
+    GRID,
+):
+    """Gather fp8 rows, apply their ue8m0 block scales, write bf16.
+
+    Only this rank's heads are read; padded heads write zeros for all-gather.
+    `weight`/`scales` may address pinned host memory through UVA.
+    """
+    cols = tl.arange(0, DIM)
+    scale_cols = cols // QUANT_BLOCK
+    for base in tl.range(tl.program_id(0) * BLOCK_R, num_rows, GRID * BLOCK_R):
+        rows = base + tl.arange(0, BLOCK_R)
+        valid = rows < num_rows
+        head = HEAD_START + rows % LOCAL_HEADS
+        token = (rows // LOCAL_HEADS).to(tl.int64)
+        index = tl.load(
+            ids + token * ids_stride_t + head * ids_stride_h,
+            mask=valid & (head < TOTAL_HEADS),
+            other=-1,
+        ).to(tl.int64)
+        owned = valid & (head < TOTAL_HEADS)
+        owned &= (index >= vocab_start) & (index < vocab_end)
+        local = tl.where(owned, index - vocab_start, 0)
+        values = tl.load(
+            weight + local[:, None] * DIM + cols[None, :],
+            mask=owned[:, None],
+            other=0.0,
+        )
+        scale = tl.load(
+            scales + local[:, None] * (DIM // QUANT_BLOCK) + scale_cols[None, :],
+            mask=owned[:, None],
+            other=0,
+        )
+        # PPU MODIFICATION: begin
+        if scales.dtype.element_ty == tl.float32:
+            # PPU channelwise exports store real FP32 row scales.
+            scale = scale.to(tl.float32)
+        else:
+            # PPU MODIFICATION: end
+            # ue8m0 is a power of two, so its byte *is* the fp32 exponent field.
+            scale = (scale.to(tl.int32) << 23).to(tl.float32, bitcast=True)
+        tl.store(
+            out + rows[:, None] * DIM + cols[None, :],
+            (values.to(tl.float32) * scale).to(tl.bfloat16),
+            mask=valid[:, None],
+        )
+
+
+@patch(
+    _FACTORY, "Engram._create_embedding",
+    reason="Select FP32 row-scale storage for channelwise Engram while reusing CUDA offload and prefetch.",
+    affected_versions=_AFFECTED,
+    remove_when="The Engram embedding factory exposes quantization-aware backend registration.",
+)
+def _create_embedding(self, layout, layer_hash_index):
+    vllm_config = get_current_vllm_config()
+    quant = getattr(vllm_config.model_config.hf_config, "quantization_config", None) or {}
+    name = f"layers.{layout.layer_ids[layer_hash_index]}.engram.embed"
+    if current_platform.is_ppu() and name in (quant.get("fp8_channelwise_layers") or []):
+        from vllm_sail.models.deepseek_v41.engram import ChannelwiseEngramEmbedding
+
+        config = vllm_config.engram_config
+        return ChannelwiseEngramEmbedding(
+            layout.num_embeddings[layer_hash_index], layout.head_dim,
+            tuple(size for order in layout.primes[layer_hash_index] for size in order),
+            cpu_offload=config.cpu_offload, dp_shared_memory=config.dp_shared_memory,
+        )
+    original = getattr(_create_embedding, PATCH_MARKER)[f"{_FACTORY}.Engram._create_embedding"]
+    return original(self, layout, layer_hash_index)
