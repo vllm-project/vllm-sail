@@ -8,6 +8,47 @@ import pytest
 pytestmark = pytest.mark.ppu
 
 
+def _allocate_v41_indexer_cache(compress_ratio, dim):
+    import torch
+    from vllm.models.deepseek_v41.attention import DeepseekV4IndexerCache
+    from vllm.v1.kv_cache_interface import (
+        KVCacheLayout,
+        KVCacheTensor,
+        create_kv_cache_views,
+    )
+    from vllm.v1.worker.utils import select_common_block_size
+
+    # No weights/config construction is needed to exercise the model's actual
+    # cache-spec producer, backend selector and padded BLHNC allocation.
+    layer = SimpleNamespace(
+        head_dim=dim + 4,
+        dtype=torch.uint8,
+        cache_config=SimpleNamespace(block_size=128),
+        compress_ratio=compress_ratio,
+    )
+    config = SimpleNamespace(cache_config=SimpleNamespace(cache_dtype="fp8_ds_mla"))
+    spec = DeepseekV4IndexerCache.get_kv_cache_spec(layer, config)
+    backend = DeepseekV4IndexerCache.get_attn_backend(layer)
+    kernel_block = select_common_block_size(spec.block_size, [backend])
+    assert spec.block_size == kernel_block == 64 * compress_ratio
+    # Leave space for another layer's page between consecutive indexer pages.
+    stride = spec.page_size_bytes + 512
+    raw = torch.zeros(8 * stride, dtype=torch.uint8, device="cuda")
+    allocation = KVCacheTensor(
+        size=raw.numel(),
+        layers=["indexer"],
+        layer_stride=spec.page_size_bytes,
+        block_stride=stride,
+    )
+    views = create_kv_cache_views(
+        raw, spec, 8, KVCacheLayout.BLHNC, allocation, kernel_block
+    )
+    DeepseekV4IndexerCache.bind_kv_cache(layer, views[0])
+    assert layer.kv_cache.shape == (8, 64, dim + 4)
+    assert layer.kv_cache.stride(0) == stride
+    return layer.kv_cache.unsqueeze(-2)
+
+
 def test_adaptive_indexer_backend_gate():
     import vllm_sail
 
@@ -37,8 +78,12 @@ def test_device_lengths_flattened_logits_graph_replay(compress_ratio):
     )
 
     # Same total budget; CPU plans [3,3], device reallocates to [5,1] or [1,5].
-    # SAIL FP8 paged logits requires 64-token pages.
-    capacity, tokens, block_size, heads, dim = 8, 6, 64, 64, 128
+    # Use the real V4.1 cache spec/backend/allocation path. Hard-coding a
+    # 64-row tensor here hid the model's unsupported 128-row C1 pages.
+    capacity, tokens, heads, dim = 8, 6, 64, 128
+    cache = _allocate_v41_indexer_cache(compress_ratio, dim)
+    block_size = cache.shape[1]
+    assert block_size == 64
     builder = object.__new__(DeepseekV32IndexerMetadataBuilder)
     builder.vllm_config = SimpleNamespace(
         speculative_config=SimpleNamespace(enable_adaptive_verification=True)
@@ -72,7 +117,7 @@ def test_device_lengths_flattened_logits_graph_replay(compress_ratio):
         (k_cpu.view(torch.uint8).flatten(1), scales_cpu.view(torch.uint8).flatten(1)),
         dim=1,
     )
-    cache = packed.reshape(8, block_size, 1, dim + 4).cuda()
+    cache.copy_(packed.reshape(8, block_size, 1, dim + 4))
     q, weights = q_cpu.cuda(), weight_cpu.cuda()
     sms = get_num_sms()
 

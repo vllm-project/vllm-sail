@@ -41,6 +41,7 @@ EXPECTED_MODULES = {
     "deepseek_v4_compressor",
     "deepseek_v41",
     "deepseek_v41_engram",
+    "deepseek_v41_indexer",
     "kimi_k3",
     "llama4",
     "moe_marlin_gate",
