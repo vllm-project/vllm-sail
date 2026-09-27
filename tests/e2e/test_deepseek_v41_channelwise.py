@@ -8,7 +8,8 @@ import pytest
 pytestmark = pytest.mark.ppu
 
 
-def test_channelwise_dense_loading_and_per_token_activation(monkeypatch):
+@pytest.mark.parametrize("input_size", [256, 576])
+def test_channelwise_dense_loading_and_per_token_activation(monkeypatch, input_size):
     import torch
     from compressed_tensors.quantization import QuantizationArgs
     from vllm.config import VllmConfig, set_current_vllm_config
@@ -45,9 +46,9 @@ def test_channelwise_dense_loading_and_per_token_activation(monkeypatch):
             layer = torch.nn.Module()
             scheme.create_weights(
                 layer,
-                256,
+                input_size,
                 [128],
-                256,
+                input_size,
                 128,
                 torch.bfloat16,
                 weight_loader=lambda param, value: param.copy_(value),
@@ -58,11 +59,13 @@ def test_channelwise_dense_loading_and_per_token_activation(monkeypatch):
             scheme.process_weights_after_loading(layer)
             assert isinstance(scheme.fp8_linear, PPUDeepGemmFP8ScaledMMLinearKernel)
             assert layer.weight.dtype == torch.float8_e4m3fn
-            assert layer.weight.shape == (128, 256)
+            assert layer.weight.shape == (128, input_size)
             x = torch.tensor([0.5, -1.0, 2.0], dtype=torch.bfloat16)
-            x = x[:, None].expand(3, 256).contiguous()
+            x = x[:, None].expand(3, input_size).contiguous()
             actual = scheme.apply_weights(layer, x)
-            expected = (x[:, :1].float() * 512 * scales.T).to(torch.bfloat16)
+            expected = (x[:, :1].float() * (2 * input_size) * scales.T).to(
+                torch.bfloat16
+            )
             torch.testing.assert_close(actual, expected, rtol=0.01, atol=0.01)
     finally:
         torch.set_default_dtype(previous_dtype)
