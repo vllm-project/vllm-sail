@@ -12,6 +12,39 @@ modules = harness.modules
 load_patch = harness.load_patch
 
 
+@pytest.mark.upstream_source
+@pytest.mark.parametrize("ppu", [False, True])
+@pytest.mark.parametrize("record_bytes", [528, 584])
+def test_cache_gather_dispatch_after_preload(
+    modules, upstream_source_root, ppu, record_bytes
+):
+    calls = []
+    modules("vllm.platforms", current_platform=SimpleNamespace(is_ppu=lambda: ppu))
+    modules(
+        "vllm.utils.import_utils", has_cutedsl=lambda: True, has_humming=lambda: True
+    )
+    provider = modules("vllm.utils.import_utils")
+    cache = modules(
+        "vllm.models.deepseek_v41.common.ops.cache_utils",
+        has_cutedsl=provider.has_cutedsl,
+        V41_BYTES_PER_TOKEN=528,
+        V41_QUANT_BLOCK=32,
+        dequantize_and_gather_k_cache_triton=lambda *a, **kw: calls.append("triton"),
+    )
+    modules(
+        "vllm.models.deepseek_v4.nvidia.ops.dequant_gather_k_cutedsl",
+        _DEQUANT_GATHER_K_CACHE_CUTEDSL_KERNEL=lambda **kw: calls.append("cute"),
+    )
+    gather = function(
+        upstream_source_root / "vllm/models/deepseek_v41/common/ops/cache_utils.py",
+        "dequantize_and_gather_k_cache",
+        cache.__dict__,
+    )
+    load_patch("vllm_sail/patch/enhancement/import_gates.py")
+    gather(None, SimpleNamespace(shape=(4, 64, record_bytes)), None, None, None, 64, 3)
+    assert calls == ["triton" if ppu else "cute"]
+
+
 @pytest.fixture
 def quant_module(modules):
     calls = []
