@@ -615,14 +615,24 @@ def test_deepseek_config_preserves_dense_channelwise_patterns_for_mtp(modules):
 
         @classmethod
         def from_config(cls, config):
-            return cls(is_checkpoint_fp8_serialized=config["quant_method"] == "fp8")
+            return cls(
+                is_checkpoint_fp8_serialized=config["quant_method"] == "fp8",
+                ignored_layers=config.get("ignored_layers", []),
+            )
 
     modules("vllm.models.deepseek_v41.quant_config", DeepseekV4FP8Config=Fp8Config)
 
     class LinearBase:
         pass
 
-    modules("vllm.config", get_current_vllm_config=lambda: None)
+    modules(
+        "vllm.config",
+        get_current_vllm_config=lambda: types.SimpleNamespace(
+            model_config=types.SimpleNamespace(
+                hf_config=types.SimpleNamespace(model_type="deepseek_v4")
+            )
+        ),
+    )
     modules(
         "vllm.platforms", current_platform=types.SimpleNamespace(is_ppu=lambda: True)
     )
@@ -631,7 +641,11 @@ def test_deepseek_config_preserves_dense_channelwise_patterns_for_mtp(modules):
         RoutedExperts=type("RoutedExperts", (), {}),
         UnquantizedFusedMoEMethod=object,
     )
-    modules("vllm.model_executor.layers.linear", LinearBase=LinearBase)
+    modules(
+        "vllm.model_executor.layers.linear",
+        LinearBase=LinearBase,
+        UnquantizedLinearMethod=object,
+    )
     modules("vllm.model_executor.layers.quantization", QuantizationMethods=str)
     modules("vllm.model_executor.layers.quantization.fp8", Fp8Config=Fp8Config)
     modules("vllm.model_executor.layers.quantization.mxfp4", Mxfp4MoEMethod=object)
