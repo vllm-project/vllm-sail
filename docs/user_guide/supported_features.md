@@ -79,6 +79,7 @@ tests do not establish device correctness or full-model support.
 | --- | --- |
 | Dense and MoE models | Upstream vLLM architectures using the applicable PPU operators and backends |
 | DeepSeek V4 | Model, MTP and DSpark registrations, with PPU attention, routing and cache paths |
+| DeepSeek V4.1 | Upstream CUDA target and DSpark models with PPU FlashMLA, delayed mHC and mixed-precision checkpoint overrides; see the format constraints below |
 | MiniMax M3 | Optional model registrations, quantization mapping and native attention-related operations |
 | Qwen hybrid models | GDN attention and selected quantization and speculative-decoding adaptations |
 | Kimi K3 | KDA attention and native MLA/cache operations |
@@ -88,6 +89,32 @@ Model registration and kernel availability are separate checks. Record the exact
 checkpoint revision, quantization, context length, parallelism and SDK when
 reporting a successful model run. Newly compiled model-specific operations need
 numerical and model-level validation on each target device.
+
+### DeepSeek V4.1 checkpoint formats
+
+The PPU path reuses upstream V4.1 model execution, shared KV metadata and DSpark
+loading. Select `--moe-backend ppu_deep_gemm` and set `VLLM_USE_DEEP_GEMM=1` for
+MXFP4 routed experts. Dense precision follows the checkpoint:
+
+| Checkpoint | Dense layers | Engram embedding |
+| --- | --- | --- |
+| FP8 with `weight_block_size: [32, 32]` and `expert_dtype: fp4` | Upstream MXFP8 loading and BF16 emulation; this increases resident dense-weight memory by default | Upstream FP8 values with E8M0 block scales |
+| MXFP4 with an explicit `fp8_channelwise_layers` list | Listed layers use PPU FP8 kernels with FP32 per-output-channel weight scales and dynamic per-token activation scales; ignored and unlisted dense layers stay unquantized | A listed `engram.embed` uses FP8 values and one FP32 scale per row |
+
+The mixed-format override accepts `expert_dtype: mxfp4` and normalizes the
+resolved target and draft configs to upstream's `fp4` spelling. It does not
+rewrite checkpoint files or requantize weights. Per-layer precision lists must
+include all shards of a fused projection; partial matches are rejected.
+
+For host-resident Engram tables use `--engram-config '{"cpu_offload":true}'`.
+Channelwise Engram supports the upstream sharding, UVA lookup and prefetch path;
+its `dp_shared_memory` mode is not implemented. DSpark adaptive verification
+requires full CUDA graphs in upstream vLLM, so disable adaptive verification
+when isolating failures with `--enforce-eager`.
+
+These format adaptations do not establish checkpoint accuracy or full-model
+qualification. Requantizing block-scaled FP8 into per-channel FP8 is lossy;
+validate generated outputs and task accuracy for the exported checkpoint.
 
 ## Selecting a backend
 
