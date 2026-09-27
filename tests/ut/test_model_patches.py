@@ -39,6 +39,7 @@ EXPECTED_MODULES = {
     "deepseek_v4_cache",
     "deepseek_v4_metadata",
     "deepseek_v4_compressor",
+    "deepseek_v41",
     "kimi_k3",
     "llama4",
     "moe_marlin_gate",

@@ -33,6 +33,7 @@ from vllm_sail.patch.enhancement.models import (
     deepseek_v4_cache,  # noqa: F401
     deepseek_v4_compressor,  # noqa: F401
     deepseek_v4_metadata,  # noqa: F401
+    deepseek_v41,  # noqa: F401
     kimi_k3,  # noqa: F401
     llama4,  # noqa: F401
     moe_marlin_gate,  # noqa: F401

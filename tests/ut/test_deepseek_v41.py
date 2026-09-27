@@ -150,3 +150,80 @@ def test_mxfp8_registration_precedes_cuda_and_supports_explicit_emulation(module
     linear_kernels._register_first(ppu, "mxfp8")
     linear_kernels._register_first(ppu, "mxfp8")
     assert upstream._POSSIBLE_MXFP8_KERNELS["cuda"] == [ppu, cuda]
+
+
+def test_v41_selector_preserves_cuda_and_other_backends(modules):
+    upstream, ppu, other = (type(name, (), {}) for name in ("Upstream", "PPU", "Other"))
+    platform = SimpleNamespace(ppu=True)
+    modules(
+        "vllm.platforms", current_platform=SimpleNamespace(is_ppu=lambda: platform.ppu)
+    )
+    modules(
+        "vllm.models.deepseek_v41.nvidia.flashmla", DeepseekV4FlashMLAAttention=upstream
+    )
+    modules("vllm_sail.models.deepseek_v41.flashmla", DeepseekV41FlashMLAAttention=ppu)
+
+    def original(config):
+        return config
+
+    provider = modules(
+        "vllm.models.deepseek_v41.nvidia.model", _select_dsv4_attn_cls=original
+    )
+    replacement = load_patch("vllm_sail/patch/enhancement/models/deepseek_v41.py")
+    assert provider._select_dsv4_attn_cls is replacement._select_dsv4_attn_cls
+    marker = getattr(provider._select_dsv4_attn_cls, replacement.PATCH_MARKER)
+    assert marker[replacement._TARGET] is original
+    assert provider._select_dsv4_attn_cls(upstream) is ppu
+    assert provider._select_dsv4_attn_cls(other) is other
+    platform.ppu = False
+    assert provider._select_dsv4_attn_cls(upstream) is upstream
+    with pytest.raises(RuntimeError, match="already patched"):
+        load_patch("vllm_sail/patch/enhancement/models/deepseek_v41.py")
+
+
+@pytest.mark.parametrize("dequant_at_load", [True, False])
+def test_v41_projection_preserves_weights_and_uses_bf16_helper(
+    modules, dequant_at_load
+):
+    calls = []
+    loaded = SimpleNamespace(element_size=lambda: 2 if dequant_at_load else 1)
+    bf16 = loaded if dequant_at_load else object()
+    modules(
+        "vllm.model_executor.layers.quantization.utils.mxfp8_utils",
+        dequant_mxfp8_to_bf16=lambda *args: bf16,
+    )
+    modules(
+        "vllm.models.deepseek_v4.nvidia.ops.o_proj",
+        deep_gemm_fp8_o_proj=lambda *args, **kwargs: calls.append((args, kwargs)),
+    )
+
+    class Upstream:
+        forward_mqa = object()
+        _forward_prefill = object()
+
+    modules(
+        "vllm.models.deepseek_v41.nvidia.flashmla", DeepseekV4FlashMLAAttention=Upstream
+    )
+    modules("vllm_sail.models.deepseek_v4.flashmla", DeepseekV4FlashMLAAttention=object)
+    modules("vllm.platforms", current_platform=SimpleNamespace(is_ppu=lambda: True))
+    module = load_patch("vllm_sail/models/deepseek_v41/flashmla.py")
+    attn = module.DeepseekV41FlashMLAAttention()
+    attn.__dict__.update(
+        _o_proj_block_size=32,
+        wo_a=SimpleNamespace(weight=loaded, weight_scale=object()),
+        wo_b=object(),
+        rotary_emb=SimpleNamespace(cos_sin_cache=object()),
+        n_local_groups=2,
+        n_local_heads=16,
+        nope_head_dim=448,
+        rope_head_dim=64,
+        o_lora_rank=1024,
+    )
+    o, pos = object(), object()
+    attn._o_proj(o, pos)
+    args, kwargs = calls.pop()
+    assert args[:2] == (o, pos) and args[3].weight is bf16 and args[4] is attn.wo_b
+    assert kwargs["heads_per_group"] == 8 and kwargs["einsum_recipe"] == (1, 1, 32)
+    assert attn.wo_a.weight is loaded
+    assert attn.forward_mqa is Upstream.forward_mqa
+    assert attn._forward_prefill is Upstream._forward_prefill
