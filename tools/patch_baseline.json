@@ -192,6 +192,7 @@
   "vllm.models.deepseek_v4.nvidia.flashmla.flash_mla_with_kvcache": "689288c764f20ced631c8c92556e1dd0ecc255bf5a42bd62e10ac3a0385a2ccd",
   "vllm.models.deepseek_v4.nvidia.model._select_dsv4_attn_cls": "de6e01e08bfa00193f8a2a66f2fbe3cfed8637d731cfb57f7835af3401002a28",
   "vllm.models.deepseek_v41.common.engram._engram_lookup_kernel": "additive",
+  "vllm.models.deepseek_v41.common.ops.cache_utils.has_cutedsl": "3a8a381051873fd39fb434d0d8d26f422dc1de6c9b42b8ba136a2a9862b57337",
   "vllm.models.deepseek_v41.nvidia.dspark._linear_scale_param_name": "635ae8b2f0e34ed7d756a2f37f1523dfc8f6624c0c07f56695f72f95d2f167c4",
   "vllm.models.deepseek_v41.nvidia.engram.Engram._create_embedding": "f3485dd12821fc7b94b194f80e4e1fd352d2aaaad12a7dbb8b46161b14fb69d5",
   "vllm.models.deepseek_v41.nvidia.model._linear_scale_param_name": "635ae8b2f0e34ed7d756a2f37f1523dfc8f6624c0c07f56695f72f95d2f167c4",
