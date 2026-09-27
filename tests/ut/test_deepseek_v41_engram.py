@@ -14,16 +14,23 @@ load_patch = harness.load_patch
 @pytest.mark.parametrize("offload", [False, True])
 def test_engram_channelwise_storage_keeps_real_fp32_scales(modules, offload):
     allocations = []
-    attrs = []
+
+    def allocate(*shape, **kwargs):
+        allocations.append((shape, kwargs))
+        return SimpleNamespace()
+
+    def set_weight_attrs(weight, attrs):
+        for key, value in attrs.items():
+            assert not hasattr(weight, key), key
+            setattr(weight, key, value)
+
     modules(
         "torch",
-        empty=lambda *shape, **kwargs: allocations.append((shape, kwargs)),
+        empty=allocate,
         float8_e4m3fn="fp8",
         float32="fp32",
     )
-    modules(
-        "vllm.model_executor.utils", set_weight_attrs=lambda *args: attrs.append(args)
-    )
+    modules("vllm.model_executor.utils", set_weight_attrs=set_weight_attrs)
 
     class Upstream:
         lookup = object()
@@ -34,6 +41,7 @@ def test_engram_channelwise_storage_keeps_real_fp32_scales(modules, offload):
             self.cpu_offload = kwargs["cpu_offload"]
             assert kwargs["block_size"] == dim
             self.weight, self.weight_scale_inv = self._allocate_weights()
+            set_weight_attrs(self.weight_scale_inv, {"dummy_weight_value": 127})
 
     modules("vllm.models.deepseek_v41.nvidia.engram", ParallelEngramEmbedding=Upstream)
     cls = load_patch(
@@ -43,7 +51,7 @@ def test_engram_channelwise_storage_keeps_real_fp32_scales(modules, offload):
     assert [item[0] for item in allocations] == [(10, 256), (10, 1)]
     assert allocations[1][1]["dtype"] == "fp32"
     assert (allocations[1][1].get("device") == "cpu") is offload
-    assert attrs[-1][1] == {"dummy_weight_value": 1.0}
+    assert embedding.weight_scale_inv.dummy_weight_value == 1.0
     assert (
         embedding.lookup is Upstream.lookup and embedding._storage is Upstream._storage
     )
