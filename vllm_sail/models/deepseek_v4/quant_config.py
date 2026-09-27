@@ -45,7 +45,9 @@ class DeepseekV4FP8Config(UpstreamDeepseekV4FP8Config):
         )
         if method is not None or not isinstance(hf_quant_cfg, dict):
             return method
-        # PPU mixed-precision MTP drafts rewrite the model type.
+        # SpeculativeConfig temporarily rewrites V4.1 to deepseek_mtp before
+        # quantization validation, retaining its target architecture until
+        # the later DSpark setup restores deepseek_v41.
         model_type = getattr(hf_config, "model_type", None)
         architectures = getattr(hf_config, "architectures", None) or []
         is_v4_like = model_type in (
@@ -53,7 +55,13 @@ class DeepseekV4FP8Config(UpstreamDeepseekV4FP8Config):
             "deepseek_v4_text",
             "deepseek_v41",
             "deepseek_v41_text",
-        ) or (model_type == "deepseek_mtp" and "DeepSeekV4MTPModel" in architectures)
+        ) or (
+            model_type == "deepseek_mtp"
+            and any(
+                name in architectures
+                for name in ("DeepSeekV4MTPModel", "DeepseekV41ForCausalLM")
+            )
+        )
         if (
             current_platform.is_ppu()
             and hf_quant_cfg.get("quant_method") == "mxfp4"
