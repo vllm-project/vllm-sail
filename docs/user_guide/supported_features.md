@@ -112,6 +112,13 @@ its `dp_shared_memory` mode is not implemented. DSpark adaptive verification
 requires full CUDA graphs in upstream vLLM, so disable adaptive verification
 when isolating failures with `--enforce-eager`.
 
+If multimodal encoder profiling crashes in the CPU MKL cosine path
+(`vmsCos` / `libmkl_gnu_thread`), retry with `OMP_NUM_THREADS=1` and
+`MKL_NUM_THREADS=1` set before starting vLLM. This is a process-level workaround
+for the affected SAIL PyTorch environment, not a change to the vision model.
+Verify both encoder profiling and an actual image request; passing a standalone
+CPU cosine test does not establish that the worker startup path is safe.
+
 These format adaptations do not establish checkpoint accuracy or full-model
 qualification. Requantizing block-scaled FP8 into per-channel FP8 is lossy;
 validate generated outputs and task accuracy for the exported checkpoint.
