@@ -93,8 +93,8 @@ def test_export_dispatch_preserves_bf16_and_per_layer_precision(
         CompressedTensorsW8A8Fp8=lambda **kwargs: kwargs,
     )
     dispatch = function(
-        "vllm_sail/models/deepseek_v4/quant_config.py",
-        "DeepseekV4FP8Config.get_quant_method",
+        "vllm_sail/models/deepseek_v41/quant_config.py",
+        "DeepseekV41FP8Config.get_quant_method",
         {
             "LinearBase": Linear,
             "is_layer_skipped": matcher,
@@ -103,9 +103,7 @@ def test_export_dispatch_preserves_bf16_and_per_layer_precision(
         },
     )
     config = SimpleNamespace(
-        fp8_channelwise_layers=["attn.wq_a"],
-        ignored_layers=[],
-        _checkpoint_channelwise_layers=[
+        fp8_channelwise_layers=[
             "layers.0.attn.wq_a",
             "layers.0.attn.wkv",
             "layers.14.engram.wkv",
@@ -133,6 +131,6 @@ def test_export_dispatch_preserves_bf16_and_per_layer_precision(
         "model.markov_head.head",
     ):
         assert dispatch(config, Linear(), prefix) == "bf16"
-    config._checkpoint_channelwise_layers.remove("layers.0.attn.wkv")
+    config.fp8_channelwise_layers.remove("layers.0.attn.wkv")
     with pytest.raises(ValueError, match="some but not all shards"):
         dispatch(config, Linear(), "language_model.model.layers.0.attn.fused_wqa_wkv")

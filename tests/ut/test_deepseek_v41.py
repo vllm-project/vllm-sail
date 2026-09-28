@@ -79,15 +79,15 @@ def quant_module(modules):
         is_layer_skipped=lambda **kwargs: False,
     )
     modules("vllm.platforms", current_platform=SimpleNamespace(is_ppu=lambda: True))
-    return load_patch("vllm_sail/models/deepseek_v4/quant_config.py"), calls
+    return load_patch("vllm_sail/models/deepseek_v41/quant_config.py"), calls
 
 
 def test_standard_quantization_delegates_without_rewriting_config(quant_module):
     module, calls = quant_module
-    cls = module.DeepseekV4FP8Config
+    cls = module.DeepseekV41FP8Config
     checkpoint = {"quant_method": "fp8", "weight_block_size": [32, 32]}
     hf = SimpleNamespace(model_type="deepseek_v41")
-    assert cls.override_quantization_method(checkpoint, None, hf) == "upstream-method"
+    assert cls.override_quantization_method(checkpoint, None, hf) == "deepseek_v41_fp8"
     config = cls.from_config(checkpoint)
     layer = object()
     assert config.get_quant_method(layer, "model.ffn") == "upstream-kernel"
@@ -113,7 +113,7 @@ def test_qlean_metadata_is_translated_without_editing_checkpoint(
     quant_module, model_type, architectures
 ):
     module, calls = quant_module
-    cls = module.DeepseekV4FP8Config
+    cls = module.DeepseekV41FP8Config
     cls.__bases__[0].override_quantization_method = classmethod(lambda *args: None)
     checkpoint = {
         "quant_method": "mxfp4",
@@ -127,17 +127,162 @@ def test_qlean_metadata_is_translated_without_editing_checkpoint(
             None,
             SimpleNamespace(model_type=model_type, architectures=architectures),
         )
-        == "deepseek_v4_fp8"
+        == "deepseek_v41_fp8"
     )
     result = cls.from_config(checkpoint)
     translated = calls[-1][1]
     assert translated["quant_method"] == "fp8"
     assert translated["activation_scheme"] == "dynamic"
     assert translated["ignored_layers"] == checkpoint["ignore"]
-    assert result._checkpoint_channelwise_layers == checkpoint["fp8_channelwise_layers"]
+    assert result.fp8_channelwise_layers == checkpoint["fp8_channelwise_layers"]
     assert (
         checkpoint["quant_method"] == "mxfp4" and "activation_scheme" not in checkpoint
     )
+
+
+@pytest.mark.parametrize("quant_method", ["fp8", "mxfp4"])
+@pytest.mark.parametrize(
+    "ppu,model_type,architectures",
+    [
+        (False, "deepseek_v41", ["DeepseekV41ForCausalLM"]),
+        (True, "deepseek_v4", ["DeepseekV4ForCausalLM"]),
+        (True, "deepseek_v4_text", []),
+        (True, "deepseek_mtp", ["DeepSeekV4MTPModel"]),
+        (True, "deepseek_mtp", ["DeepSeekMTPModel"]),
+        (True, "other", []),
+    ],
+)
+def test_v41_quant_override_leaves_other_models_and_platforms_untouched(
+    quant_module, quant_method, ppu, model_type, architectures
+):
+    module, calls = quant_module
+    module.current_platform.is_ppu = lambda: ppu
+    assert (
+        module.DeepseekV41FP8Config.override_quantization_method(
+            {
+                "quant_method": quant_method,
+                "fp8_channelwise_layers": ["layers.0.attn.wq_a"],
+            },
+            None,
+            SimpleNamespace(model_type=model_type, architectures=architectures),
+        )
+        is None
+    )
+    assert calls == []
+
+
+@pytest.mark.parametrize("ppu", [False, True])
+def test_quant_registration_is_lazy_idempotent_and_preserves_v4(modules, ppu):
+    calls = []
+    modules("vllm.logger", init_logger=lambda _: SimpleNamespace(debug=lambda *a: None))
+    modules("vllm.platforms", current_platform=SimpleNamespace(is_ppu=lambda: ppu))
+    modules(
+        "vllm.model_executor.layers.quantization",
+        QUANTIZATION_METHODS=[],
+        register_quantization_config=lambda name: lambda cls: calls.append((name, cls)),
+    )
+    mixed = type("Mixed", (), {"get_name": staticmethod(lambda: "mixed_precision_w4")})
+    v4 = type("V4", (), {})
+    v41 = type("V41", (), {"get_name": staticmethod(lambda: "deepseek_v41_fp8")})
+    modules(
+        "vllm_sail.model_executor.layers.quantization.mixed_precision_w4",
+        MixedPrecisionW4Config=mixed,
+    )
+    modules("vllm_sail.models.deepseek_v4.quant_config", DeepseekV4FP8Config=v4)
+    modules("vllm_sail.models.deepseek_v41.quant_config", DeepseekV41FP8Config=v41)
+    registry = load_patch("vllm_sail/registry/quant_config/__init__.py")
+    assert calls == []
+    registry.register()
+    registry.register()
+    assert calls == [("mixed_precision_w4", mixed)] + (
+        [("deepseek_v4_fp8", v4), ("deepseek_v41_fp8", v41)] if ppu else []
+    )
+
+
+@pytest.mark.upstream_source
+@pytest.mark.parametrize("quant_method", ["fp8", "deepseek_v4_fp8", "mxfp4"])
+@pytest.mark.parametrize(
+    "model_type,architectures,expected",
+    [
+        ("deepseek_v41", ["DeepseekV41ForCausalLM"], "deepseek_v41_fp8"),
+        ("deepseek_v41_text", [], "deepseek_v41_fp8"),
+        ("deepseek_mtp", ["DeepseekV41ForCausalLM"], "deepseek_v41_fp8"),
+        ("deepseek_v4", ["DeepseekV4ForCausalLM"], "deepseek_v4_fp8"),
+    ],
+)
+def test_upstream_model_config_selects_model_specific_quantization(
+    quant_module,
+    modules,
+    upstream_source_root,
+    quant_method,
+    model_type,
+    architectures,
+    expected,
+):
+    """Exercise upstream recognition and override ordering, not a reimplemented selector."""
+    from typing import Literal, cast, get_args
+
+    module, _ = quant_module
+    cls = module.DeepseekV41FP8Config
+    upstream = modules("vllm.models.deepseek_v41.quant_config").DeepseekV4FP8Config
+    assert cls.__bases__ == (upstream,)
+    upstream.override_quantization_method = classmethod(
+        function(
+            upstream_source_root / "vllm/models/deepseek_v41/quant_config.py",
+            "DeepseekV4FP8Config.override_quantization_method",
+            {},
+        )
+    )
+    v4 = load_patch("vllm_sail/models/deepseek_v4/quant_config.py").DeepseekV4FP8Config
+    platform = module.current_platform
+    platform.supported_quantization = ["fp8", "mxfp4", "deepseek_v4_fp8"]
+    verified = []
+    platform.verify_quantization = verified.append
+    registry = {}
+    names = list(platform.supported_quantization)
+    register = function(
+        upstream_source_root / "vllm/model_executor/layers/quantization/__init__.py",
+        "register_quantization_config",
+        {
+            "QUANTIZATION_METHODS": names,
+            "_CUSTOMIZED_METHOD_TO_QUANT_CONFIG": registry,
+            "QuantizationConfig": upstream,
+            "current_platform": platform,
+        },
+    )
+    register(cls.get_name())(cls)
+    assert cls.get_name() in platform.supported_quantization
+    registry["deepseek_v4_fp8"] = v4
+    no_override = SimpleNamespace(override_quantization_method=lambda *a, **kw: None)
+    quant = SimpleNamespace(
+        QUANTIZATION_METHODS=names,
+        QuantizationMethods=Literal["fp8", "mxfp4", "deepseek_v4_fp8"],
+        DEPRECATED_QUANTIZATION_METHODS=[],
+        get_quantization_config=lambda name: registry.get(name, no_override),
+    )
+    verify = function(
+        upstream_source_root / "vllm/config/model.py",
+        "ModelConfig._verify_quantization",
+        {
+            "me_quant": quant,
+            "get_args": get_args,
+            "cast": cast,
+            "current_platform": platform,
+        },
+    )
+    checkpoint = {"quant_method": quant_method}
+    if quant_method == "mxfp4":
+        checkpoint["fp8_channelwise_layers"] = ["layers.0.attn.wq_a"]
+    config = SimpleNamespace(
+        quantization=None,
+        model_arch_config=SimpleNamespace(quantization_config=checkpoint),
+        hf_config=SimpleNamespace(model_type=model_type, architectures=architectures),
+    )
+    verify(config)
+    assert config.quantization == expected
+    assert verified == [expected]
+    assert registry[config.quantization] is (cls if expected == cls.get_name() else v4)
+    assert checkpoint["quant_method"] == quant_method
 
 
 @pytest.mark.upstream_source
