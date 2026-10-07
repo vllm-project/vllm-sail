@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Upstream DeepSeek V4/V4.1 quantization with PPU mixed-precision extensions."""
+"""Upstream DeepSeek V4 quantization with PPU mixed-precision extensions."""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING
 from vllm.model_executor.layers.fused_moe import RoutedExperts
 from vllm.model_executor.layers.linear import LinearBase, UnquantizedLinearMethod
 from vllm.model_executor.layers.quantization.utils.quant_utils import is_layer_skipped
-from vllm.models.deepseek_v41.quant_config import (
+from vllm.models.deepseek_v4.quant_config import (
     DeepseekV4FP8Config as UpstreamDeepseekV4FP8Config,
 )
 from vllm.platforms import current_platform
@@ -20,23 +20,13 @@ if TYPE_CHECKING:
 
 
 class DeepseekV4FP8Config(UpstreamDeepseekV4FP8Config):
-    """Keep upstream model recognition, MXFP8 loading and expert dispatch."""
+    """Keep upstream V4 model recognition, FP8 loading and expert dispatch."""
 
     def __init__(
         self, *args, fp8_channelwise_layers: list[str] | None = None, **kwargs
     ):
         super().__init__(*args, **kwargs)
         self.fp8_channelwise_layers = fp8_channelwise_layers or []
-        self._checkpoint_channelwise_layers = None
-        self._checkpoint_ignored_layers = []
-        # The V4.1 multimodal wrapper has no class-level packed mapping.
-        # Copy rather than mutate the base class's shared default dictionary.
-        self.packed_modules_mapping = {
-            **getattr(self, "packed_modules_mapping", {}),
-            "gate_up_proj": ["w1", "w3"],
-            "fused_wqa_wkv": ["wq_a", "wkv"],
-            "fused_wkv_wgate": ["wkv", "wgate"],
-        }
 
     @classmethod
     def override_quantization_method(cls, hf_quant_cfg, user_quant, hf_config=None):
@@ -45,22 +35,12 @@ class DeepseekV4FP8Config(UpstreamDeepseekV4FP8Config):
         )
         if method is not None or not isinstance(hf_quant_cfg, dict):
             return method
-        # SpeculativeConfig temporarily rewrites V4.1 to deepseek_mtp before
-        # quantization validation, retaining its target architecture until
-        # the later DSpark setup restores deepseek_v41.
+        # V4 MTP mixed exports retain their architecture while the speculative
+        # config temporarily uses deepseek_mtp as the model type.
         model_type = getattr(hf_config, "model_type", None)
         architectures = getattr(hf_config, "architectures", None) or []
-        is_v4_like = model_type in (
-            "deepseek_v4",
-            "deepseek_v4_text",
-            "deepseek_v41",
-            "deepseek_v41_text",
-        ) or (
-            model_type == "deepseek_mtp"
-            and any(
-                name in architectures
-                for name in ("DeepSeekV4MTPModel", "DeepseekV41ForCausalLM")
-            )
+        is_v4_like = model_type in ("deepseek_v4", "deepseek_v4_text") or (
+            model_type == "deepseek_mtp" and "DeepSeekV4MTPModel" in architectures
         )
         if (
             current_platform.is_ppu()
@@ -87,8 +67,6 @@ class DeepseekV4FP8Config(UpstreamDeepseekV4FP8Config):
         }
         result = super().from_config(dense_config)
         result.fp8_channelwise_layers = list(config["fp8_channelwise_layers"])
-        result._checkpoint_channelwise_layers = list(result.fp8_channelwise_layers)
-        result._checkpoint_ignored_layers = list(dense_config["ignored_layers"])
         return result
 
     def apply_vllm_mapper(self, hf_to_vllm_mapper: WeightsMapper) -> None:
@@ -114,37 +92,18 @@ class DeepseekV4FP8Config(UpstreamDeepseekV4FP8Config):
             and isinstance(layer, LinearBase)
             and self.fp8_channelwise_layers
         ):
-            patterns = self.fp8_channelwise_layers
-            ignored = self.ignored_layers
-            match_mode = "substring"
-            if self._checkpoint_channelwise_layers is not None:
-                from vllm.config import get_current_vllm_config
-
-                hf = get_current_vllm_config().model_config.hf_config
-                if getattr(hf, "model_type", None) in (
-                    "deepseek_v41",
-                    "deepseek_v41_text",
-                ):
-                    from vllm_sail.models.deepseek_v41.config import (
-                        checkpoint_layer_name,
-                    )
-
-                    prefix = checkpoint_layer_name(prefix, hf.num_hidden_layers)
-                    patterns = self._checkpoint_channelwise_layers
-                    ignored = self._checkpoint_ignored_layers
-                    match_mode = "suffix"
             if is_layer_skipped(
                 prefix=prefix,
-                ignored_layers=ignored,
+                ignored_layers=self.ignored_layers,
                 fused_mapping=self.packed_modules_mapping,
-                match_mode=match_mode,
+                match_mode="substring",
             ):
                 return UnquantizedLinearMethod()
             matched = is_layer_skipped(
                 prefix=prefix,
-                ignored_layers=patterns,
+                ignored_layers=self.fp8_channelwise_layers,
                 fused_mapping=self.packed_modules_mapping,
-                match_mode=match_mode,
+                match_mode="substring",
             )
             # PPU MODIFICATION: begin
             # 0.31's cross-layer ``context_wkv_proj`` is populated from every
@@ -186,9 +145,6 @@ class DeepseekV4FP8Config(UpstreamDeepseekV4FP8Config):
                 )
                 layer.scheme = scheme
                 return CompressedTensorsLinearMethod(self)
-            # Mixed exports explicitly enumerate every quantized dense layer.
-            # Unlisted layers have BF16 weights and no FP8 scale to load.
-            return UnquantizedLinearMethod()
         return super().get_quant_method(layer, prefix)
 
     def is_mxfp4_quant(self, prefix, layer):

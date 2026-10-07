@@ -233,7 +233,20 @@ def test_upstream_model_config_selects_model_specific_quantization(
             {},
         )
     )
+
+    class UpstreamV4(upstream):
+        pass
+
+    UpstreamV4.override_quantization_method = classmethod(
+        function(
+            upstream_source_root / "vllm/models/deepseek_v4/quant_config.py",
+            "DeepseekV4FP8Config.override_quantization_method",
+            {},
+        )
+    )
+    modules("vllm.models.deepseek_v4.quant_config", DeepseekV4FP8Config=UpstreamV4)
     v4 = load_patch("vllm_sail/models/deepseek_v4/quant_config.py").DeepseekV4FP8Config
+    assert v4.__bases__ == (UpstreamV4,)
     platform = module.current_platform
     platform.supported_quantization = ["fp8", "mxfp4", "deepseek_v4_fp8"]
     verified = []
