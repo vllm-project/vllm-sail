@@ -101,6 +101,25 @@ MXFP4 routed experts. Dense precision follows the checkpoint:
 | FP8 with `weight_block_size: [32, 32]` and `expert_dtype: fp4` | Upstream MXFP8 loading and BF16 emulation; this increases resident dense-weight memory by default | Upstream FP8 values with E8M0 block scales |
 | MXFP4 with an explicit `fp8_channelwise_layers` list | Listed layers use PPU FP8 kernels with FP32 per-output-channel weight scales and dynamic per-token activation scales; ignored and unlisted dense layers stay unquantized | A listed `engram.embed` uses FP8 values and one FP32 scale per row |
 
+Original block32 dense weights enter upstream's MXFP8 ModelOpt path when
+`weight_block_size` is `[32, 32]` and the resolved expert dtype selects E8M0
+scales. Loading expands checkpoint scales to per-row `[1, 32]` scales without
+changing their encoded bytes. PPU dense selection chooses the generic
+[MXFP8 emulation](#mxfp8-dense-emulation) path. For grouped `wo_a`, upstream's
+BMM selector also falls back to emulation because its native MXFP8 DeepGEMM
+kernel requires Blackwell.
+
+The PPU output projection honors both upstream dequantization settings. It
+reuses the BF16 weight produced during loading by default; if load-time
+dequantization is disabled, it dequantizes the still-FP8 weight locally in each
+forward. It then uses upstream inverse RoPE and grouped BF16 BMM. The model
+retains the MXFP8 scale granularity and does not reinterpret it as block128.
+
+Per-channel FP8 dense layers do not use the blockwise K128 condition and keep
+their original K, including the TP4 shared-expert K576 shape. Blockwise FP8
+retains its own K128 requirement; neither path adds padding along K.
+DeepGEMM availability, BF16 output and N64 alignment gates still apply.
+
 The mixed-format override accepts `expert_dtype: mxfp4` and normalizes the
 resolved target and draft configs to upstream's `fp4` spelling. It does not
 rewrite checkpoint files or requantize weights. Per-layer precision lists must

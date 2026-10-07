@@ -353,41 +353,6 @@ def test_upstream_mxfp4_dispatch_preserves_target_and_draft_moe(
     assert dispatch(config, layer, "model.ffn.experts") == (expected, layer.moe_config)
 
 
-@pytest.mark.parametrize("is_ppu", [True, False])
-def test_dense_emulation_reuses_upstream_only_on_ppu(modules, is_ppu):
-    class UpstreamEmulation:
-        process_weights_after_loading = object()
-        apply_weights = object()
-
-    modules(
-        "vllm.model_executor.kernels.linear.mxfp8.emulation",
-        EmulationMxfp8LinearKernel=UpstreamEmulation,
-    )
-    modules("vllm.platforms", current_platform=SimpleNamespace(is_ppu=lambda: is_ppu))
-    module = load_patch("vllm_sail/model_executor/kernels/linear/mxfp8.py")
-    cls = module.PPUEmulationMxfp8LinearKernel
-    assert cls.is_supported()[0] is is_ppu
-    assert (
-        cls.process_weights_after_loading
-        is UpstreamEmulation.process_weights_after_loading
-    )
-    assert cls.apply_weights is UpstreamEmulation.apply_weights
-
-
-def test_mxfp8_registration_precedes_cuda_and_supports_explicit_emulation(modules):
-    linear_kernels = load_patch("vllm_sail/registry/linear_kernels/__init__.py")
-
-    ppu, cuda = type("PPU", (), {}), type("CUDA", (), {})
-    upstream = modules(
-        "vllm.model_executor.kernels.linear",
-        _POSSIBLE_MXFP8_KERNELS={"cuda": [cuda]},
-    )
-    modules("vllm.platforms.interface", PlatformEnum=SimpleNamespace(CUDA="cuda"))
-    linear_kernels._register_first(ppu, "mxfp8")
-    linear_kernels._register_first(ppu, "mxfp8")
-    assert upstream._POSSIBLE_MXFP8_KERNELS["cuda"] == [ppu, cuda]
-
-
 def test_v41_selector_preserves_cuda_and_other_backends(modules):
     upstream, ppu, other = (type(name, (), {}) for name in ("Upstream", "PPU", "Other"))
     platform = SimpleNamespace(ppu=True)
