@@ -1,0 +1,224 @@
+name: Perf Regression
+
+# Nightly PPU performance-regression workflow (CI plan PART 6, category 5).
+#
+# Runs the kernel perf suite in tests/e2e/perf on both supported chips in
+# parallel via the ppu-scheduler-action:
+#   * kernel lane  -> tests/e2e/perf/test_kernel_perf.py (operator latency/TFLOPS)
+#
+# Matrix: 2 chips (ZW-810E cap80 / ZW-M890P cap89) x 1 suite = 2 independent
+# lanes, fail-fast=false so one regression never cancels the rest. Each lane
+# compares against tests/e2e/perf/baselines/<chip>/<suite>.json:
+#   > 10% relative regression -> WARN (job summary only)
+#   > 25% relative regression -> the pytest case FAILs -> the lane fails, and
+#                                the comparison table is printed to the log and
+#                                the GitHub job summary by perf_regression.sh.
+#
+# Baseline lifecycle:
+#   * First run on a chip writes a "pending" baseline (never fails) and uploads
+#     it as an artifact. A human reviews, flips status to "confirmed" and
+#     commits it into tests/e2e/perf/baselines/<chip>/ (never auto-committed).
+#   * Dispatch with update_baseline=true (or the weekly refresh) passes
+#     --update-baseline, which rolls each metric's median over the last 7 runs.
+#
+# Schedule is deliberately offset from e2e-ppu.yaml (18:00 UTC) to 20:00 UTC so
+# the two nightlies do not contend for the same PPU node pool.
+#
+# Runner labels (confirmed with infra):
+#   810E: board-type=OAM-810E  (existing label, verified by e2e-ppu)
+#   M890P: board-type=ZW-M890P
+
+on:
+  workflow_dispatch:
+    inputs:
+      build_run_id:
+        description: "PPU CI build run to reuse (blank = resolve latest successful)"
+        required: false
+        default: ""
+        type: string
+      image:
+        description: Runtime container image the PPU pod runs
+        required: true
+        default: reg.docker.alibaba-inc.com/ai-tmp/llm:pytorch2.13.0-ubuntu24.04-cuda13.0-vllm0.27.0-py312-ppu202609111952
+        type: string
+      update_baseline:
+        description: "Pass --update-baseline to roll the per-chip medians (use with caution)"
+        required: false
+        default: false
+        type: boolean
+
+  # Nightly at 20:00 UTC = 04:00 CST (offset from e2e-ppu.yaml's 18:00 UTC).
+  schedule:
+    - cron: "0 20 * * *"
+
+permissions:
+  contents: read
+  # Downloading an artifact produced by another run needs the actions:read scope.
+  actions: read
+
+concurrency:
+  group: perf-regression-${{ github.ref }}-${{ inputs.build_run_id || github.run_id }}
+  cancel-in-progress: false
+
+jobs:
+  # ==============================================================
+  # prepare: resolve the build_run_id supplying the PPU wheels
+  # ==============================================================
+  prepare:
+    name: Resolve build
+    runs-on: k8s-runner-group-cpu-thead
+    timeout-minutes: 10
+    container:
+      image: ${{ inputs.image || 'reg.docker.alibaba-inc.com/ai-tmp/llm:pytorch2.13.0-ubuntu24.04-cuda13.0-vllm0.27.0-py312-ppu202609111952' }}
+    outputs:
+      build_run_id: ${{ steps.resolve.outputs.build_run_id }}
+    steps:
+      - name: Disable internal GitHub mirror rewrite
+        shell: bash
+        run: |
+          for scope in system global; do
+            echo "=== ${scope} insteadOf before ==="
+            git config --${scope} --get-regexp '^url\..*\.insteadof$' 2>/dev/null || true
+            while IFS= read -r section; do
+              [ -n "${section}" ] || continue
+              git config --${scope} --unset-all "${section}.insteadOf" 2>/dev/null || true
+            done < <(git config --${scope} --get-regexp '^url\..*\.insteadof$' 2>/dev/null | awk '$2 ~ /github\.com/ {sub(/\.insteadof$/, "", $1); print $1}')
+          done
+
+      - name: Check out vLLM SAIL
+        uses: actions/checkout@v4
+        with:
+          github-server-url: https://github.com
+
+      - name: Resolve build run id
+        id: resolve
+        shell: bash
+        env:
+          INPUT_BUILD_RUN_ID: ${{ inputs.build_run_id }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -Eeuo pipefail
+          if [[ -n "${INPUT_BUILD_RUN_ID}" ]]; then
+            echo "Using supplied build_run_id=${INPUT_BUILD_RUN_ID}"
+            echo "build_run_id=${INPUT_BUILD_RUN_ID}" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # Nightly schedule or blank dispatch: reuse the newest successful
+          # PPU CI build so the perf lane measures fresh wheels without a rebuild.
+          base="https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/workflows/build-ppu-wheels.yaml/runs"
+          hdr_auth="Authorization: Bearer ${GH_TOKEN}"
+          hdr_accept="Accept: application/vnd.github+json"
+          parse_id() {
+            python3 -c 'import sys,json;r=json.load(sys.stdin).get("workflow_runs",[]);print(r[0]["id"] if r else "")'
+          }
+          run_id="$(curl -fsSL -H "${hdr_auth}" -H "${hdr_accept}" \
+            "${base}?status=success&per_page=1&branch=${GITHUB_REF_NAME}" | parse_id || true)"
+          if [[ -z "${run_id}" ]]; then
+            echo "no successful PPU CI build on branch ${GITHUB_REF_NAME}; trying any branch"
+            run_id="$(curl -fsSL -H "${hdr_auth}" -H "${hdr_accept}" \
+              "${base}?status=success&per_page=1" | parse_id || true)"
+          fi
+          if [[ -z "${run_id}" ]]; then
+            echo "::error::perf regression could not resolve a successful PPU CI build"
+            exit 1
+          fi
+          echo "Resolved latest successful PPU CI build_run_id=${run_id}"
+          echo "build_run_id=${run_id}" >> "$GITHUB_OUTPUT"
+
+  # ==============================================================
+  # perf: dual-chip x (kernel | model) parallel regression lanes
+  # ==============================================================
+  perf:
+    name: perf ${{ matrix.chip }} ${{ matrix.suite }}
+    needs: prepare
+    runs-on: k8s-runner-group-cpu-thead
+    timeout-minutes: ${{ matrix.timeout + 30 }}
+    container:
+      image: ${{ inputs.image || 'reg.docker.alibaba-inc.com/ai-tmp/llm:pytorch2.13.0-ubuntu24.04-cuda13.0-vllm0.27.0-py312-ppu202609111952' }}
+    strategy:
+      # All 4 lanes run independently; one regression must not cancel the rest.
+      fail-fast: false
+      matrix:
+        include:
+          # --- 810E kernel (cap80 + generic ppu; cap89 auto-skip by conftest)
+          - chip: 810e
+            board: OAM-810E
+            nproc: 8
+            suite: kernel
+            test_path: tests/e2e/perf/test_kernel_perf.py
+            model_path: ""
+            timeout: 60
+          # --- 890P kernel (cap89 + generic ppu; cap80 auto-skip by conftest)
+          - chip: 890p
+            board: ZW-M890P
+            nproc: 8
+            suite: kernel
+            test_path: tests/e2e/perf/test_kernel_perf.py
+            model_path: ""
+            timeout: 60
+
+    steps:
+      - name: Disable internal GitHub mirror rewrite
+        shell: bash
+        run: |
+          for scope in system global; do
+            echo "=== ${scope} insteadOf before ==="
+            git config --${scope} --get-regexp '^url\..*\.insteadof$' 2>/dev/null || true
+            while IFS= read -r section; do
+              [ -n "${section}" ] || continue
+              git config --${scope} --unset-all "${section}.insteadOf" 2>/dev/null || true
+            done < <(git config --${scope} --get-regexp '^url\..*\.insteadof$' 2>/dev/null | awk '$2 ~ /github\.com/ {sub(/\.insteadof$/, "", $1); print $1}')
+          done
+
+      - name: Check out vLLM SAIL
+        uses: actions/checkout@v4
+        with:
+          github-server-url: https://github.com
+
+      - name: Download CI-built wheels
+        uses: actions/download-artifact@v4
+        with:
+          name: ppu-wheels-${{ needs.prepare.outputs.build_run_id }}
+          path: wheels
+          run-id: ${{ needs.prepare.outputs.build_run_id }}
+          repository: ${{ github.repository }}
+          github-token: ${{ github.token }}
+
+      - name: Verify wheel manifest
+        shell: bash
+        run: |
+          python scripts/ci/ppu_wheel_manifest.py verify wheels
+
+      - name: Run perf regression (${{ matrix.chip }} ${{ matrix.suite }})
+        uses: t-head/ppu-scheduler-action@main
+        with:
+          image: ${{ inputs.image || 'reg.docker.alibaba-inc.com/ai-tmp/llm:pytorch2.13.0-ubuntu24.04-cuda13.0-vllm0.27.0-py312-ppu202609111952' }}
+          nnodes: 0
+          nproc_per_node: ${{ matrix.nproc }}
+          namespace: ppu-sched
+          node_selector: board-type=${{ matrix.board }}
+          timeout_minutes: ${{ matrix.timeout }}
+          cleanup_policy: always
+          job_suffix: perf-${{ matrix.chip }}-${{ matrix.suite }}
+          source_dir: /workspace/source
+          artifact_paths: wheels/**
+          extra_env: SUITE=${{ matrix.suite }},TEST_PATH=${{ matrix.test_path }},PYTEST_MARKER=perf,MODEL_PATH=${{ matrix.model_path }},RESULTS_DIR=/mnt/wl_nas/devops/${{ github.run_id }}-${{ github.run_attempt }}/perf-${{ matrix.chip }}-${{ matrix.suite }},WHEELS_DIR=/workspace/source/wheels,VLLM_USE_RUST_FRONTEND=0,VLLM_USE_RUST_BENCH=0,UPDATE_BASELINE=${{ inputs.update_baseline && '1' || '0' }}
+          container_options: |
+            privileged: true
+            host_ipc: true
+            host_network: true
+            shm_size: 32Gi
+          command: cd /workspace/source && bash scripts/ci/perf_regression.sh
+
+      - name: Upload perf artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ppu-perf-${{ matrix.chip }}-${{ matrix.suite }}-${{ github.run_id }}
+          path: |
+            /wl_nas/devops/${{ github.run_id }}-${{ github.run_attempt }}/perf-${{ matrix.chip }}-${{ matrix.suite }}/*.xml
+            /wl_nas/devops/${{ github.run_id }}-${{ github.run_attempt }}/perf-${{ matrix.chip }}-${{ matrix.suite }}/*.log
+            /wl_nas/devops/${{ github.run_id }}-${{ github.run_attempt }}/perf-${{ matrix.chip }}-${{ matrix.suite }}/report/**
+            /wl_nas/devops/${{ github.run_id }}-${{ github.run_attempt }}/perf-${{ matrix.chip }}-${{ matrix.suite }}/baselines/**
+          if-no-files-found: warn
+          retention-days: 30
