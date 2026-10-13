@@ -18,6 +18,7 @@ MODELS = ROOT / "scripts" / "ci" / "ppu_e2e_models.json"
 MODEL_WORKFLOW = ROOT / ".github" / "workflows" / "_ppu-model-tests.yaml"
 ACCURACY_WORKFLOW = ROOT / ".github" / "workflows" / "_ppu-accuracy-tests.yaml"
 DEBUG_WORKFLOW = ROOT / ".github" / "workflows" / "ppu-debug.yaml"
+OPS_CONFIG = ROOT / "scripts" / "ci" / "ppu_ops_tests.json"
 
 
 def _load_select():
@@ -286,6 +287,22 @@ def test_accuracy_workflow_is_call_only_and_uses_docker_runner() -> None:
     assert 'ppu_runtime_container.sh" model-accuracy' in text
     assert "ppu-scheduler-action" not in text
     assert text.count("actions/download-artifact@v4") == 1
+
+
+def test_legacy_device_lanes_are_mapped_to_pr49_workflows() -> None:
+    assert not (ROOT / ".github" / "workflows" / "e2e-ppu.yaml").exists()
+    catalog = json.loads(OPS_CONFIG.read_text())
+    tests = {entry["test"] for entry in catalog["test_catalog"]}
+    assert {
+        "tests/e2e/kernels/test_acext_moe_numeric.py",
+        "tests/e2e/kernels/test_deepgemm_numeric.py",
+        "tests/e2e/kernels/test_flash_attn_numeric.py",
+        "tests/e2e/kernels/test_flash_mla_numeric.py",
+        "tests/e2e/kernels/test_pla_numeric.py",
+    } <= tests
+    assert _workflow(ACCURACY_WORKFLOW)["jobs"]["accuracy"]["runs-on"] == (
+        "8-ppu-m890p"
+    )
 
 
 def test_debug_workflow_is_the_only_accuracy_entrypoint() -> None:

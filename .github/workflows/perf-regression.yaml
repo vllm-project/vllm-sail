@@ -22,11 +22,11 @@ name: Perf Regression
 #   * Dispatch with update_baseline=true (or the weekly refresh) passes
 #     --update-baseline, which rolls each metric's median over the last 7 runs.
 #
-# Schedule is deliberately offset from e2e-ppu.yaml (18:00 UTC) to 20:00 UTC so
-# the two nightlies do not contend for the same PPU node pool.
+# Schedule is deliberately set to 20:00 UTC so it does not contend with other
+# PPU device validation lanes.
 #
-# Runner labels (confirmed with infra):
-#   810E: board-type=OAM-810E  (existing label, verified by e2e-ppu)
+# Runner labels (confirmed with infra and used by the PR49 ops workflow):
+#   810E: board-type=OAM-810E
 #   M890P: board-type=ZW-M890P
 
 on:
@@ -48,7 +48,7 @@ on:
         default: false
         type: boolean
 
-  # Nightly at 20:00 UTC = 04:00 CST (offset from e2e-ppu.yaml's 18:00 UTC).
+  # Nightly at 20:00 UTC = 04:00 CST.
   schedule:
     - cron: "0 20 * * *"
 
@@ -106,7 +106,7 @@ jobs:
           fi
           # Nightly schedule or blank dispatch: reuse the newest successful
           # PPU CI build so the perf lane measures fresh wheels without a rebuild.
-          base="https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/workflows/build-ppu-wheels.yaml/runs"
+          base="https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/workflows/ppu-build-and-test.yaml/runs"
           hdr_auth="Authorization: Bearer ${GH_TOKEN}"
           hdr_accept="Accept: application/vnd.github+json"
           parse_id() {
