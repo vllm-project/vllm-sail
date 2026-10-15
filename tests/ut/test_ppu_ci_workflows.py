@@ -451,32 +451,56 @@ def test_debug_structure():
     assert config["name"] == "PPU debug"
     assert set(config[True]) == {"workflow_dispatch"}
     inputs = config[True]["workflow_dispatch"]["inputs"]
-    assert set(inputs) == {"build_run_id", "target", "models"}
+    assert set(inputs) == {
+        "build_run_id",
+        "target",
+        "models",
+        "accuracy_models",
+    }
     assert inputs["build_run_id"]["type"] == "string"
     assert inputs["build_run_id"]["required"] is True
     assert inputs["target"]["type"] == "choice"
-    assert inputs["target"]["options"] == ["both", "pin-ut", "model-tests"]
+    assert inputs["target"]["options"] == [
+        "both",
+        "pin-ut",
+        "model-tests",
+        "accuracy-tests",
+    ]
     assert inputs["target"]["default"] == "both"
     assert inputs["models"]["type"] == "string"
     assert inputs["models"]["default"] == "qwen3.8-27b-m890p"
+    assert inputs["accuracy_models"]["type"] == "string"
+    assert inputs["accuracy_models"]["default"] == "qwen3.8-flash-next"
     assert "concurrency" not in config
     jobs = config["jobs"]
-    assert set(jobs) == {"pin-unit-tests", "model-tests"}
-    for job_id, excluded, target in (
-        ("pin-unit-tests", "model-tests", "_ppu-pin-ut.yaml"),
-        ("model-tests", "pin-ut", "_ppu-model-tests.yaml"),
-    ):
+    expected_jobs = {
+        "pin-unit-tests": (
+            "inputs.target == 'both' || inputs.target == 'pin-ut'",
+            "_ppu-pin-ut.yaml",
+            {},
+        ),
+        "model-tests": (
+            "inputs.target == 'both' || inputs.target == 'model-tests'",
+            "_ppu-model-tests.yaml",
+            {"models": "${{ inputs.models }}"},
+        ),
+        "accuracy-tests": (
+            "inputs.target == 'accuracy-tests'",
+            "_ppu-accuracy-tests.yaml",
+            {"models": "${{ inputs.accuracy_models }}"},
+        ),
+    }
+    assert set(jobs) == set(expected_jobs)
+    for job_id, (condition, target, extra_inputs) in expected_jobs.items():
         job = jobs[job_id]
-        assert job["if"] == f"inputs.target != '{excluded}'"
+        assert job["if"] == condition
         assert "needs" not in job
         assert job["uses"] == f"./.github/workflows/{target}"
-        expected = {
+        assert job["with"] == {
             "pr_mode": False,
             "build_run_id": "${{ inputs.build_run_id }}",
+            **extra_inputs,
         }
-        if job_id == "model-tests":
-            expected["models"] = "${{ inputs.models }}"
-        assert job["with"] == expected
 
 
 def test_build_leaf_preserves_retry_identity_and_image_output():
