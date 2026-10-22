@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Dequantise INT8 MLA projections of GLM-5.3-Flash while loading.
+"""Dequantise INT8 / FP8-per-channel MLA projections of GLM-5.3-Flash on load.
 
 ``Glm5NextDecoderLayer`` builds ``Glm5NextMLAAttention`` with
 ``quant_config=None`` ("MLA projections are BF16 in checkpoint").  That holds
@@ -19,14 +19,17 @@ INT4-MoE/INT8-dense checkpoint: q_a 2171x, kv_a 1519x, q_b 1155x, o_proj
 1207x), the attention scores saturate and the residual stream grows from 0.008
 to ~2500 rms over the 11 DSA layers -> garbled first token.
 
-The replacement below is the upstream function with two additions:
+The replacement below is the upstream function with three additions:
 
 * ``int8`` weights are accepted by ``is_weight`` and dequantised with their
   per-channel scale (``weight.float() * scale``) before being handed to the
   parameter's ``weight_loader``;
-* when the target parameter is itself ``int8`` (a future model that passes
-  ``quant_config`` to the MLA attention), both the weight and its scale are
-  handed back to the regular quantised loader instead of being dequantised.
+* FP8 per-output-channel weights (Quark ``weight_scale`` with shape [out] or
+  [out, 1], used by FP8-PerChannel checkpoints) are dequantised row-wise
+  instead of being forced through the block-FP8 map;
+* when the target parameter is itself quantised (``weight_scale_inv`` or
+  ``weight_scale`` present), both the weight and its scale are handed back to
+  the regular quantised loader instead of being dequantised.
 
 The FP8 block-dequant path, the NoPE kv_a padding and the loading order are
 unchanged.
@@ -66,7 +69,7 @@ def _try_load_fp8_attn_proj(
     is_int8_weight = name.endswith(".weight") and tensor.dtype == torch.int8
     is_weight = is_fp8_weight or is_int8_weight
     # Need to accept both the DeepSeek-native ``weight_scale_inv`` and the Quark
-    # ``weight_scale`` names before feeding the shared block dequant below.
+    # ``weight_scale`` names before feeding the shared dequant below.
     is_scale = "weight_scale_inv" in name or name.endswith(".weight_scale")
     if not is_weight and not is_scale:
         return False
@@ -74,9 +77,11 @@ def _try_load_fp8_attn_proj(
     layer_prefix = name.rsplit(suffix, 1)[0]
     target_w = f"{layer_prefix}.{target_base}.weight"
     target_s = f"{layer_prefix}.{target_base}.weight_scale_inv"
-    # If the model actually kept this projection in FP8, let the normal path
-    # handle it (it has a weight_scale_inv param).
-    if target_s in params_dict:
+    target_s_pc = f"{layer_prefix}.{target_base}.weight_scale"
+    # If the model actually kept this projection quantised, let the normal path
+    # handle it: block-FP8 targets carry ``weight_scale_inv``, per-channel FP8
+    # targets carry ``weight_scale``.
+    if target_s in params_dict or target_s_pc in params_dict:
         return False
     # If the target module is natively int8-quantised, the regular quantised
     # loader must handle both the weight and its weight_scale.
@@ -100,6 +105,11 @@ def _try_load_fp8_attn_proj(
             raise ValueError(
                 f"unexpected int8 weight_scale shape {tuple(scale.shape)} for {name}"
             )
+        if scale.shape[0] != ckpt_weight.shape[0]:
+            raise ValueError(
+                f"int8 weight_scale has {scale.shape[0]} rows but weight has "
+                f"{ckpt_weight.shape[0]} for {name}"
+            )
         weight_bf16 = (ckpt_weight.to(torch.float32) * scale).to(torch.bfloat16)
         glm5next_model.logger.info(
             "dequantised int8 MLA projection %s%s -> bf16 %s",
@@ -108,10 +118,34 @@ def _try_load_fp8_attn_proj(
             tuple(weight_bf16.shape),
         )
     else:
-        block_size = ckpt_weight.shape[1] // ckpt_scale.shape[1]
-        weight_bf16 = glm5next_model._dequant_fp8_block(
-            ckpt_weight, ckpt_scale, block_size
+        scale = ckpt_scale.to(torch.float32)
+        out_dim = ckpt_weight.shape[0]
+        # FP8 per-output-channel (Quark ``weight_scale``, shape [out] or
+        # [out, 1]) is not block-FP8; multiplying by a 128x128 block map would
+        # materialise an out*in tensor and fail. Detect it by row count.
+        per_channel = (scale.dim() == 1 and scale.numel() == out_dim) or (
+            scale.dim() == 2 and scale.shape[1] == 1 and scale.shape[0] == out_dim
         )
+        if per_channel:
+            weight_bf16 = (ckpt_weight.to(torch.float32) * scale.reshape(-1, 1)).to(
+                torch.bfloat16
+            )
+            glm5next_model.logger.info(
+                "dequantised fp8 per-channel MLA projection %s%s -> bf16 %s",
+                layer_prefix,
+                suffix,
+                tuple(weight_bf16.shape),
+            )
+        elif scale.numel() == 1:
+            # FP8 per-tensor scale.
+            weight_bf16 = (ckpt_weight.to(torch.float32) * scale.reshape(())).to(
+                torch.bfloat16
+            )
+        else:
+            block_size = ckpt_weight.shape[1] // ckpt_scale.shape[1]
+            weight_bf16 = glm5next_model._dequant_fp8_block(
+                ckpt_weight, ckpt_scale, block_size
+            )
     # NoPE: pad kv_a rope portion (kv_lora_rank -> kv_lora_rank + qk_rope_head_dim).
     if is_kva and kv_a_pad_size > 0:
         pad = torch.zeros(
@@ -132,7 +166,7 @@ def _try_load_fp8_attn_proj(
 
 
 def install() -> None:
-    """Register the INT8-aware MLA projection loader once."""
+    """Register the INT8 / FP8-per-channel aware MLA projection loader once."""
     global _installed
     if _installed:
         return
@@ -151,13 +185,15 @@ def install() -> None:
             "values into the bf16 parameters (1155-2171x inflation) and silently "
             "drops the scales. That breaks every GLM-5.3-Flash layer of type "
             "deepseek_sparse_attention (first-token garbage) while KDA layers are "
-            "unaffected."
+            "unaffected. It also dequantises FP8 per-output-channel weights "
+            "(FP8-PerChannel checkpoints) row-wise; upstream's block-only map "
+            "materialises an out*in tensor and fails on those checkpoints."
         ),
         affected_versions=_AFFECTED,
         remove_when=(
             "upstream glm5next passes the quant config to Glm5NextMLAAttention for "
-            "INT8 checkpoints, or vllm-for-sail carries an equivalent load-time "
-            "int8 dequantisation."
+            "INT8 checkpoints, handles per-channel FP8 MLA projections, or "
+            "vllm-for-sail carries an equivalent load-time dequantisation."
         ),
     )(_try_load_fp8_attn_proj)
     _installed = True

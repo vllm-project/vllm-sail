@@ -1,10 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
-"""INT8 MLA projection dequantisation for GLM-5.3-Flash (no device required).
+"""INT8 / FP8-per-channel MLA projection dequantisation for GLM-5.3-Flash.
 
 The patch installs a replacement of
 ``vllm.models.glm5next.common.model._try_load_fp8_attn_proj``.  These tests
 exercise the replacement directly with fake parameters, so no GPU/PPU and no
-model weights are needed.
+model weights are needed.  The FP8 cases cover the per-output-channel,
+per-tensor and block-wise scale layouts.
 """
 
 from __future__ import annotations
@@ -191,3 +192,92 @@ def test_unrelated_names_are_ignored():
         0,
     )
     assert param.loads == []
+
+
+def test_fp8_per_channel_weight_and_scale_are_dequantised():
+    """FP8-PerChannel checkpoints use Quark ``weight_scale`` of shape [out, 1].
+
+    The upstream block-FP8 map would expand it to an out*in tensor and fail
+    (observed on the 890P MXFP4/FP8 checkpoint); the patch must dequantise it
+    row-wise.
+    """
+    weight = torch.randn(8, 16).to(torch.float8_e4m3fn)
+    scale = torch.rand(8, 1) * 1e-2
+    param = _FakeParam(torch.bfloat16)
+    params_dict = {f"{_PREFIX}.o_proj.weight": param}
+    buf, loaded = {}, set()
+
+    assert glm5next_model._try_load_fp8_attn_proj(
+        f"{_PREFIX}.o_proj.weight", weight, buf, params_dict, loaded, 0
+    )
+    assert glm5next_model._try_load_fp8_attn_proj(
+        f"{_PREFIX}.o_proj.weight_scale", scale, buf, params_dict, loaded, 0
+    )
+    assert loaded == {f"{_PREFIX}.o_proj.weight"}
+    loaded_weight, shard_id = param.loads[0]
+    assert shard_id is None
+    assert loaded_weight.dtype == torch.bfloat16
+    assert torch.equal(loaded_weight, (weight.float() * scale).to(torch.bfloat16))
+
+
+def test_fp8_per_channel_one_dimensional_scale_is_supported():
+    weight = torch.randn(4, 8).to(torch.float8_e4m3fn)
+    scale = torch.rand(4) * 1e-2
+    param = _FakeParam(torch.bfloat16)
+    params_dict = {f"{_PREFIX}.o_proj.weight": param}
+    buf, loaded = {}, set()
+
+    for name, tensor in (
+        (f"{_PREFIX}.o_proj.weight", weight),
+        (f"{_PREFIX}.o_proj.weight_scale", scale),
+    ):
+        glm5next_model._try_load_fp8_attn_proj(
+            name, tensor, buf, params_dict, loaded, 0
+        )
+
+    assert loaded == {f"{_PREFIX}.o_proj.weight"}
+    assert torch.equal(
+        param.loads[0][0], (weight.float() * scale.reshape(-1, 1)).to(torch.bfloat16)
+    )
+
+
+def test_fp8_per_tensor_scale_is_dequantised():
+    weight = torch.randn(4, 8).to(torch.float8_e4m3fn)
+    scale = torch.tensor(0.5)
+    param = _FakeParam(torch.bfloat16)
+    params_dict = {f"{_PREFIX}.o_proj.weight": param}
+    buf, loaded = {}, set()
+
+    for name, tensor in (
+        (f"{_PREFIX}.o_proj.weight", weight),
+        (f"{_PREFIX}.o_proj.weight_scale", scale),
+    ):
+        glm5next_model._try_load_fp8_attn_proj(
+            name, tensor, buf, params_dict, loaded, 0
+        )
+
+    assert loaded == {f"{_PREFIX}.o_proj.weight"}
+    loaded_weight, shard_id = param.loads[0]
+    assert shard_id is None
+    expected = (weight.float() * scale).to(torch.bfloat16)
+    assert torch.equal(loaded_weight, expected)
+
+
+def test_quantised_fp8_target_is_left_to_the_regular_loader():
+    """A target that carries ``weight_scale`` is natively quantised."""
+    weight = torch.randn(8, 16).to(torch.float8_e4m3fn)
+    scale = torch.rand(8, 1) * 1e-2
+    params_dict = {
+        f"{_PREFIX}.o_proj.weight": _FakeParam(torch.float8_e4m3fn),
+        f"{_PREFIX}.o_proj.weight_scale": _FakeParam(torch.float32),
+    }
+    buf, loaded = {}, set()
+
+    for name, tensor in (
+        (f"{_PREFIX}.o_proj.weight", weight),
+        (f"{_PREFIX}.o_proj.weight_scale", scale),
+    ):
+        assert not glm5next_model._try_load_fp8_attn_proj(
+            name, tensor, buf, params_dict, loaded, 0
+        )
+    assert buf == {}
