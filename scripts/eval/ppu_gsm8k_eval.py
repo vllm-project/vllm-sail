@@ -24,6 +24,7 @@ import argparse
 import json
 import os
 import re
+import secrets
 import signal
 import subprocess
 import sys
@@ -191,13 +192,64 @@ def start_vllm_server(
     return proc, log_path
 
 
+def unique_served_model_name(base: str) -> str:
+    """Return a run-unique served model name derived from ``base``.
+
+    The suffix is drawn from :func:`secrets.token_hex` so a lingering vLLM
+    process from a previous run cannot forge the identity even if it keeps
+    answering on the same port with the same catalog name.
+    """
+    return f"{base}-run-{secrets.token_hex(4)}"
+
+
+def _probe_models_endpoint(url: str, expected_served_name: str) -> bool:
+    """Return True iff ``/v1/models`` lists ``expected_served_name`` as ``id``.
+
+    HTTP 200 alone is not sufficient: a stale vLLM instance left running on
+    the same port -- even one serving the same catalog base name -- will
+    happily answer 200, so readiness is bound to the per-run nonce by
+    inspecting the JSON ``data`` list for an exact ``id`` match.
+    Malformed JSON, a missing ``data`` field, or any other mismatch returns
+    False so the caller keeps waiting instead of mis-attributing readiness.
+    """
+    try:
+        with urlopen(url, timeout=5) as resp:
+            if resp.status != 200:
+                return False
+            raw = resp.read()
+    except (URLError, OSError):
+        return False
+    try:
+        payload = json.loads(raw)
+    except (ValueError, TypeError):
+        return False
+    if not isinstance(payload, dict):
+        return False
+    data = payload.get("data")
+    if not isinstance(data, list):
+        return False
+    for item in data:
+        if isinstance(item, dict) and item.get("id") == expected_served_name:
+            return True
+    return False
+
+
 def wait_server_ready(
     proc: subprocess.Popen[bytes],
     log_path: Path,
+    *,
+    expected_served_name: str,
     port: int = 9985,
     timeout: int = SERVER_READY_TIMEOUT,
 ) -> None:
-    """Poll ``/v1/models`` + scan the log for fatal patterns."""
+    """Poll ``/v1/models`` + scan the log for fatal patterns.
+
+    Readiness is bound to the launched process *and* its unique served model
+    name: the loop keeps waiting until ``/v1/models`` returns 200 **and** the
+    JSON ``data[*].id`` list contains ``expected_served_name``.  A stale
+    service on the same port that still returns 200 (or returns the catalog
+    base name only) cannot pass this gate.
+    """
     deadline = time.monotonic() + timeout
     url = f"http://127.0.0.1:{port}/v1/models"
     while time.monotonic() < deadline:
@@ -216,15 +268,34 @@ def wait_server_ready(
                 )
         except OSError:
             pass
-        try:
-            with urlopen(url, timeout=5) as resp:
-                if resp.status == 200:
-                    return
-        except (URLError, OSError):
-            pass
+        if _probe_models_endpoint(url, expected_served_name):
+            return
         time.sleep(5)
     raise RuntimeError(
-        f"server not ready within {timeout}s.\nLog tail:\n{_log_tail(log_path)}"
+        f"server not ready within {timeout}s (expected served model "
+        f"{expected_served_name!r}).\nLog tail:\n{_log_tail(log_path)}"
+    )
+
+
+def _ensure_launched_server_alive(
+    proc: subprocess.Popen[bytes],
+    log_path: Path,
+    phase: str,
+) -> None:
+    """Fail loudly if the launched vLLM process has exited.
+
+    Called after readiness and the warm-up sleep, immediately before the
+    first evalscope request, so a crash during the post-ready window is
+    turned into an explicit error instead of silently falling through to
+    whatever lingering service happens to answer the port.
+    """
+    if proc.poll() is None:
+        return
+    tail = _log_tail(log_path)
+    raise RuntimeError(
+        f"vllm serve exited with code {proc.returncode} "
+        f"after readiness ({phase}); refusing to evaluate."
+        f"\nLog tail:\n{tail}"
     )
 
 
@@ -384,26 +455,42 @@ def run_accuracy_eval(  # noqa: C901
     wd = Path(work_dir) if work_dir else REPORTS_ROOT
     wd.mkdir(parents=True, exist_ok=True)
 
-    served = served_model_name or model_cfg["served_name"]
+    served_base = served_model_name or model_cfg["served_name"]
+    # Bind this run to a unique served-model identity so readiness and the
+    # eval client both reject any stale vLLM instance that lingers on the
+    # same port with a stable catalog name.  The golden identity below is
+    # keyed by chip + checkpoint_tail + benchmark, so this per-run suffix
+    # never leaks into the persisted golden contract.
+    unique_served = unique_served_model_name(served_base)
     flags = list(extra_serve_flags or model_cfg.get("extra_flags", []))
     log_path = wd / f"vllm_serve_{model_key}.log"
 
     # -- start server -------------------------------------------------
     server, log_path = start_vllm_server(
         model_id,
-        served_model_name=served,
+        served_model_name=unique_served,
         port=port,
         tp=tp,
         extra_flags=flags,
         log_path=log_path,
     )
     try:
-        wait_server_ready(server, log_path, port=port)
+        wait_server_ready(
+            server,
+            log_path,
+            port=port,
+            expected_served_name=unique_served,
+        )
         time.sleep(SERVER_POST_READY_SLEEP)
+        # A readiness probe only proves the server was alive at the time it
+        # answered; re-check right before the first eval request so a crash
+        # during the warm-up window fails the run instead of silently
+        # routing traffic to whatever still answers the port.
+        _ensure_launched_server_alive(server, log_path, phase="post-readiness warm-up")
 
         # -- run evalscope --------------------------------------------
         result_raw = run_evalscope(
-            served,
+            unique_served,
             port,
             gsm8k_path,
             limit=limit,
