@@ -23,7 +23,7 @@ fingerprint = "sha256:34692ac48c0dc502cf39ea0a331e6bc0773daa4ce33d98bfae61cdedae
 symbol = "vllm.platforms.interface.Platform"
 kind = "class"
 present = true
-fingerprint = "sha256:f351d5766d6112cda3f80d9b7268d2798fae3bdca86b23d9ab1964bc352a331c"
+fingerprint = "sha256:149f69fe0a705909e370fe931838c262fa0691c43de17e5a528f5845f2fe0d1e"
 
 [[key_interface]]
 symbol = "vllm.platforms.cuda.NvmlCudaPlatform"
@@ -47,7 +47,7 @@ fingerprint = "sha256:a7a2a11aa14d71e74281ae5b14ba89ea8d0833f028349f9699792439b6
 symbol = "vllm.v1.attention.backend.AttentionMetadataBuilder"
 kind = "class"
 present = true
-fingerprint = "sha256:8631f0ce2e3d059f07a073e53ff987048969bb39362054b0704677cefbab5081"
+fingerprint = "sha256:541e81fbf30b80d2d22409554c97e8d8be46af6866fc7dfdd7b23634c5bfb1d8"
 
 [[key_interface]]
 symbol = "vllm.v1.attention.backends.registry.AttentionBackendEnum"
@@ -119,7 +119,7 @@ kind = "module"
 module = "vllm/envs.py"
 symbol = "environment_variables"
 present = true
-fingerprint = "sha256:f688e6a2685fa8b8bc62827f5dfcb13282ab617fb38a23d17e2add26f450402c"
+fingerprint = "sha256:b290f6fa01a2478035878028c26e656a99bc831144ffcd7231c78989b4cab6ce"
 
 [[patch_target]]
 name = "vllm.lora.layers.utils.try_get_optimal_moe_config"
@@ -1415,7 +1415,7 @@ kind = "class"
 module = "vllm/model_executor/models/qwen3_moe.py"
 symbol = "Qwen3MoeDecoderLayer.__init__"
 present = true
-fingerprint = "sha256:abfe77e2d9e7a748d2e339c70525f2919785aca6232493338f492f14f49bbd73"
+fingerprint = "sha256:b820a8db23f74ac01326c95d2fe07a9aa8676ca23fd4284e89f342d5eb5728a3"
 
 [[patch_target]]
 name = "vllm.model_executor.models.qwen3_moe.Qwen3MoeModel.__init__"
@@ -2007,7 +2007,7 @@ kind = "module"
 module = "vllm/v1/attention/backends/mla/indexer.py"
 symbol = "get_paged_mqa_logits_metadata"
 present = true
-fingerprint = "sha256:8c56d4cc553b53b089cda895994b359df49475a88ff3f8a5b93b1f155b1aa95e"
+fingerprint = "sha256:8e658afea194ac1429d46be51d6def525250990c475a7f89d7412d027a7c3528"
 
 [[patch_target]]
 name = "vllm.v1.attention.backends.mla.prefill.flash_attn.FlashAttnPrefillBackend.__init__"
@@ -2175,7 +2175,7 @@ kind = "class"
 module = "vllm/v1/worker/gpu_model_runner.py"
 symbol = "GPUModelRunner.may_reinitialize_input_batch"
 present = true
-fingerprint = "sha256:c848a818701abc96fb1196e8c23ec0de4a34438865c462cbefbf12d44b4fb30b"
+fingerprint = "sha256:8e465bc8ebf9df3addc982adce665db1b312146a6de902875fcc6dfb6d48f653"
 
 [[patch_target]]
 name = "vllm.v1.worker.gpu_worker.Worker._scoped_allocator_max_split"

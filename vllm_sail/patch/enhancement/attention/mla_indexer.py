@@ -245,6 +245,7 @@ def _builder_init_body(self, *args, block_table_width: int, **kwargs) -> None:
     scheduler_config = self.vllm_config.scheduler_config
     parallel_config = self.vllm_config.parallel_config
     self.dcp_world_size = parallel_config.decode_context_parallel_size
+    self.tp_size = parallel_config.tensor_parallel_size
     self.dcp_rank = get_dcp_group().rank_in_group if self.dcp_world_size > 1 else 0
     self.pcp_world_size = parallel_config.prefill_context_parallel_size
     self.use_pcp = self.pcp_world_size > 1
@@ -411,8 +412,6 @@ def _builder_init_body(self, *args, block_table_width: int, **kwargs) -> None:
             dtype=torch.int32,
             device=self.device,
         )
-    self.indexer_decode_block_table_buffer: torch.Tensor | None = None
-    self._max_num_batched_tokens = scheduler_config.max_num_batched_tokens
     # DCP not supported yet
     self.supports_draft_decode_metadata_update = self.dcp_world_size == 1
 
@@ -449,16 +448,7 @@ def _build_body(
     dcp_local_seq_lens = common_attn_metadata.dcp_local_seq_lens
 
     compressed_slot_mapping = slot_mapping
-    indexer_block_table = block_table
     if self.compress_ratio > 1:
-        kernel_block_size = self.kernel_block_size
-        if (
-            kernel_block_size is not None
-            and self.kv_cache_spec.block_size != kernel_block_size
-            and self.kv_cache_spec.block_size % kernel_block_size == 0
-        ):
-            factor = self.kv_cache_spec.block_size // kernel_block_size
-            indexer_block_table = (block_table[:, ::factor] // factor).contiguous()
         padded_num_tokens = num_tokens
         local_slot_mapping = slot_mapping
         if self.use_pcp:
@@ -474,7 +464,7 @@ def _build_body(
             local_slot_mapping,
             query_start_loc,
             seq_lens,
-            indexer_block_table,
+            block_table,
             self.kv_cache_spec.num_states,
             self.compress_ratio,
             out=self.compressed_slot_mapping_buffer,
@@ -596,7 +586,7 @@ def _build_body(
                 seq_lens,
                 compressed_seq_lens,
                 compressed_seq_lens_cpu,
-                indexer_block_table,
+                block_table,
                 self.compress_ratio,
                 query_slice=query_slice,
                 skip_kv_gather=query_slice.start > 0,
@@ -608,11 +598,22 @@ def _build_body(
             # Skip when total_seq_lens is 0 (i.e., no compressed token).
             if metadata is not None:
                 chunks.append(metadata)
+        row_shard_sizes = None
+        if tp_prefill_row_sharding_supported(
+            self.vllm_config, self.dcp_world_size, self.use_pcp, self.tp_size
+        ):
+            row_shard_sizes = balanced_prefill_row_shard(
+                seq_lens_cpu[num_decodes:],
+                prefill_query_lens_cpu,
+                self.compress_ratio,
+                self.tp_size,
+            )
         prefill_metadata = DeepseekV32IndexerPrefillMetadata(
             chunks,
             max_prefill_seq_len=(
                 int(seq_lens_cpu[num_decodes:].max().item()) if num_prefills > 0 else 0
             ),
+            row_shard_sizes=row_shard_sizes,
         )
 
     decode_metadata = None
@@ -722,25 +723,6 @@ def _build_body(
                     max_decode_len=max_decode_len,
                 )
             )
-
-        if self.compress_ratio > 1:
-            kernel_block_size = self.kernel_block_size
-            if (
-                kernel_block_size is not None
-                and self.kv_cache_spec.block_size != kernel_block_size
-                and self.kv_cache_spec.block_size % kernel_block_size == 0
-            ):
-                factor = self.kv_cache_spec.block_size // kernel_block_size
-                compressed = block_table[:, ::factor] // factor
-                rows, cols = compressed.shape
-                if self.indexer_decode_block_table_buffer is None:
-                    self.indexer_decode_block_table_buffer = torch.zeros(
-                        (self._max_num_batched_tokens, cols),
-                        dtype=torch.int32,
-                        device=self.device,
-                    )
-                self.indexer_decode_block_table_buffer[:rows, :cols].copy_(compressed)
-                block_table = self.indexer_decode_block_table_buffer[:rows, :cols]
 
         # Flattening always returns a buffer view, including single-token
         # batches. Keep its address stable across varlen graph replays.

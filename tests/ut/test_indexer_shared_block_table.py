@@ -53,6 +53,9 @@ def producer():
             use_pcp=False,
             max_prefill_buffer_size=128,
             indexer_uses_fp4=fp4,
+            vllm_config=object(),
+            dcp_world_size=1,
+            tp_size=1,
             _prefill_split_seq_lens=lambda values: values,
             _split_indexer_prefill_chunks=split,
         )
@@ -63,6 +66,7 @@ def producer():
                 float32="float32",
             ),
             "envs": NS(VLLM_SPARSE_INDEXER_MAX_LOGITS_MB=1),
+            "tp_prefill_row_sharding_supported": lambda config, dcp, pcp, tp: False,
             "split_decodes_and_prefills": lambda *args, **kwargs: (0, 1, 0, 1),
             "DeepseekV32IndexerMetadata": Metadata,
             "DeepseekV32IndexerPrefillMetadata": lambda chunks, **kwargs: NS(
