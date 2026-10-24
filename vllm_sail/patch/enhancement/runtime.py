@@ -17,11 +17,8 @@ from vllm_sail.patch.bodies import bind_body
 from vllm_sail.patch.utils import patch
 
 
-def may_reinitialize_input_batch(
-    self, kv_cache_config: KVCacheConfig, kernel_block_sizes: list[int]
-) -> None:
-    """
-    Re-initialize the input batch if the block sizes are different from
+def may_reinitialize_input_batch(self, kv_cache_config: KVCacheConfig) -> None:
+    """Re-initialize the input batch if the block sizes are different from
     what it was originally created with. This happens when the final
     block size (determined after model loading) differs from the
     placeholder used during __init__, or when there are multiple
@@ -29,7 +26,7 @@ def may_reinitialize_input_batch(
 
     Args:
         kv_cache_config: The KV cache configuration.
-        kernel_block_sizes: The kernel block sizes for each KV cache group.
+
     """
     block_sizes = []
     max_num_blocks = []
@@ -53,7 +50,6 @@ def may_reinitialize_input_batch(
 
     if (
         block_sizes != self._init_block_sizes
-        or kernel_block_sizes != self._init_kernel_block_sizes
         or max_num_blocks != self._init_max_num_blocks
         or slot_mapping_modes != self._init_slot_mapping_modes
         or self.cp_kv_cache_interleave_size
@@ -63,7 +59,6 @@ def may_reinitialize_input_batch(
         # PPU MODIFICATION: end
     ):
         self._init_block_sizes = block_sizes
-        self._init_kernel_block_sizes = kernel_block_sizes
         self._init_max_num_blocks = max_num_blocks
         self._init_slot_mapping_modes = slot_mapping_modes
         self.cp_kv_cache_interleave_size = (
@@ -78,7 +73,6 @@ def may_reinitialize_input_batch(
                 device=self.device,
                 vocab_size=self.model_config.get_vocab_size(),
                 block_sizes=block_sizes,
-                kernel_block_sizes=kernel_block_sizes,
                 max_num_blocks_per_req=max_num_blocks,
                 num_spec_tokens=self.num_spec_tokens,
                 logitsprocs=self.input_batch.logitsprocs,
@@ -93,10 +87,6 @@ def may_reinitialize_input_batch(
     assert self._init_block_sizes == block_sizes, (
         f"InputBatch block_sizes {self._init_block_sizes} != "
         f"kv_cache block_sizes {block_sizes}"
-    )
-    assert self._init_kernel_block_sizes == kernel_block_sizes, (
-        f"InputBatch kernel_block_sizes {self._init_kernel_block_sizes} "
-        f"!= kv_cache kernel_block_sizes {kernel_block_sizes}"
     )
 
 

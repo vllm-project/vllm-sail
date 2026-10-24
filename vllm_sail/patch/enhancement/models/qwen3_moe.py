@@ -119,6 +119,7 @@ def decoder_layer_init(
     quant_config=_UNSET,
     prefix: str = "",
     is_fused_checkpoint_transposed: bool = False,
+    mrope_positions_factor: int = 4,
 ) -> None:
     if quant_config is not _UNSET:
         vllm_config = _with_quant_config(vllm_config, quant_config)
@@ -127,6 +128,7 @@ def decoder_layer_init(
         vllm_config=vllm_config,
         prefix=prefix,
         is_fused_checkpoint_transposed=is_fused_checkpoint_transposed,
+        mrope_positions_factor=mrope_positions_factor,
     )
 
 

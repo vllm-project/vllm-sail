@@ -745,7 +745,6 @@ def test_input_batch_reinitializes_when_only_context_length_changes(modules):
         ),
         max_encoder_len=0,
         _init_block_sizes=[],
-        _init_kernel_block_sizes=[],
         _init_max_num_blocks=[],
         _init_slot_mapping_modes=[],
         input_batch=types.SimpleNamespace(
@@ -764,10 +763,10 @@ def test_input_batch_reinitializes_when_only_context_length_changes(modules):
         cache_config=types.SimpleNamespace(use_replayssm=False),
     )
     old = runner.input_batch
-    runner.may_reinitialize_input_batch(types.SimpleNamespace(kv_cache_groups=[]), [])
+    runner.may_reinitialize_input_batch(types.SimpleNamespace(kv_cache_groups=[]))
     assert runner.input_batch is not old and runner.input_batch.max_model_len == 8192
     new = runner.input_batch
-    runner.may_reinitialize_input_batch(types.SimpleNamespace(kv_cache_groups=[]), [])
+    runner.may_reinitialize_input_batch(types.SimpleNamespace(kv_cache_groups=[]))
     assert runner.input_batch is new
 
 
