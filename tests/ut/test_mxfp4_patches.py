@@ -162,7 +162,7 @@ def _build_stub_vllm(
         state.upstream_make_quant_config.append(kwargs)
         return ("upstream-quant-config", kwargs)
 
-    def convert_weight(*args, activation=None):
+    def convert_weight(*args, activation=None, use_separated_a4w4=False):
         state.upstream_convert.append(args)
         return ("upstream-convert",)
 
@@ -630,6 +630,33 @@ def test_oracle_round_up_sizes_32_on_ppu_backends(
         "DEEPGEMM_MXFP4", 2881, 2881
     ) == (2881, 2881)
     assert state.upstream_round_up == [("DEEPGEMM_MXFP4", 2881, 2881)]
+
+
+@pytest.mark.parametrize("separated", [False, True])
+def test_weight_conversion_preserves_upstream_layout_choice(separated):
+    """Non-PPU backends must receive the caller's AITER layout selection."""
+    calls = []
+    expected = object()
+
+    def upstream(*args, **kwargs):
+        calls.append((args, kwargs))
+        return expected
+
+    convert = function(
+        MODULE_PATH,
+        "install._convert_weight",
+        dict(_ppu_backends=lambda _: (), _upstream_convert_weight=upstream),
+    )
+    tensors = tuple(object() for _ in range(5))
+    activation = object()
+    assert (
+        convert("AITER", *tensors, activation=activation, use_separated_a4w4=separated)
+        is expected
+    )
+    assert calls[0][1] == {
+        "activation": activation,
+        "use_separated_a4w4": separated,
+    }
 
 
 @pytest.mark.parametrize(

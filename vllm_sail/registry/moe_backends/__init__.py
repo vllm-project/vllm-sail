@@ -14,7 +14,7 @@ _REMOVE_WHEN = (
     "capturing module-level aliases before plugin registration."
 )
 
-# Module-scope consumers captured before plugin registration in vLLM 0.31.
+# Module-scope consumers captured before plugin registration at the pinned vLLM.
 _ORACLE_ALIAS_CONSUMERS = {
     "unquantized": {
         "select_unquantized_moe_backend": (
@@ -66,6 +66,7 @@ _ORACLE_ALIAS_CONSUMERS = {
     },
     "mxfp4": {
         "backend_to_kernel_cls": (
+            "vllm.model_executor.layers.quantization.mxfp4",
             "vllm.model_executor.layers.quantization.quark.quark_moe",
         ),
         "convert_gpt_oss_weight_to_mxfp4_moe_kernel_format": (
@@ -73,6 +74,7 @@ _ORACLE_ALIAS_CONSUMERS = {
             "vllm.model_executor.layers.quantization.quark.quark_moe",
         ),
         "convert_weight_to_mxfp4_moe_kernel_format": (
+            "vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe.compressed_tensors_moe_w4a4_mxfp4",
             "vllm.model_executor.layers.quantization.mxfp4",
             "vllm.model_executor.layers.quantization.online.mxfp4",
         ),

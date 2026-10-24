@@ -128,6 +128,7 @@ def rejection_sample(
     use_block_verification: bool = False,
     contexts: torch.Tensor | None = None,
     watermarking: torch.Tensor | None = None,
+    watermarking_skip_mask: torch.Tensor | None = None,
     watermark_key: int | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     assert target_logits.ndim == 2 and target_logits.stride(-1) == 1
@@ -141,9 +142,13 @@ def rejection_sample(
     assert watermark == (watermarking is not None) == (watermark_key is not None), (
         "contexts, watermarking and watermark_key must be set together."
     )
+    assert watermarking_skip_mask is None or watermark, (
+        "watermarking_skip_mask requires watermarking."
+    )
     contexts_stride = 0
     context_width = 1
     watermarking_bytes: torch.Tensor | None = None
+    watermarking_skip_mask_bytes: torch.Tensor | None = None
     watermark_key_0 = 0
     watermark_key_1 = 0
     if contexts is not None:
@@ -158,6 +163,12 @@ def rejection_sample(
         contexts_stride = contexts.stride(0)
         context_width = contexts.shape[-1]
         watermarking_bytes = watermarking.view(torch.uint8)
+        if watermarking_skip_mask is not None:
+            assert watermarking_skip_mask.shape == (num_logits,)
+            assert watermarking_skip_mask.dtype == torch.bool
+            if not watermarking_skip_mask.is_contiguous():
+                watermarking_skip_mask = watermarking_skip_mask.contiguous()
+            watermarking_skip_mask_bytes = watermarking_skip_mask.view(torch.uint8)
         watermark_key_0 = watermark_key & 0xFFFFFFFF
         watermark_key_1 = watermark_key >> 32
     draft_logits_stride_0 = 0
@@ -374,6 +385,7 @@ def rejection_sample(
         contexts,
         contexts_stride,
         watermarking_bytes,
+        watermarking_skip_mask_bytes,
         watermark_key_0,
         watermark_key_1,
         vocab_size,
@@ -383,6 +395,7 @@ def rejection_sample(
         USE_BLOCK_VERIFICATION=use_block_verification,
         CONTEXT_WIDTH=context_width,
         WATERMARK=watermark,
+        DEDUPLICATE_CONTEXTS=watermarking_skip_mask is not None,
     )
 
     # Insert the resampled tokens into the output sampled.

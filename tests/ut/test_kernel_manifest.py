@@ -60,9 +60,15 @@ def shipped() -> m.Manifest:
     return m.load()
 
 
-def test_upstream_ref_pins_a_vllm_tag(shipped: m.Manifest) -> None:
-    """Without a pinned ref, drift detection after a vLLM bump is impossible."""
-    assert shipped.upstream_ref.strip()
+def test_upstream_ref_matches_the_verified_vllm_commit(shipped: m.Manifest) -> None:
+    """Runtime compatibility and CI must select the same upstream source."""
+    pin = (
+        (Path(__file__).parents[2] / ".github/vllm-main-verified.commit")
+        .read_text()
+        .strip()
+    )
+    assert re.fullmatch(r"[0-9a-f]{40}", shipped.upstream_ref)
+    assert shipped.upstream_ref == pin
 
 
 def test_every_tier_and_hazard_is_declared(shipped: m.Manifest) -> None:

@@ -36,6 +36,13 @@ def compat(monkeypatch: pytest.MonkeyPatch) -> Iterator[types.ModuleType]:
 
     monkeypatch.delitem(sys.modules, "vllm_sail.compat", raising=False)
     module = importlib.import_module("vllm_sail.compat")
+    # The range-policy tests below exercise release-tag manifests. Exact main
+    # pins have a separate commit-identity contract.
+    from vllm_sail.native import manifest
+
+    monkeypatch.setattr(
+        manifest, "load", lambda: types.SimpleNamespace(upstream_ref="v0.31.0")
+    )
     yield module
     # Leave no cached copy behind: the next test may want a different stub.
     sys.modules.pop("vllm_sail.compat", None)
@@ -217,3 +224,49 @@ def test_check_is_cached_without_force(compat, monkeypatch: pytest.MonkeyPatch) 
     monkeypatch.setenv("VLLM_VERSION", "0.31.0")
     compat.check_vllm_compatibility()
     assert compat._checked is True
+
+
+PIN = "528772a4bf589fd52eec40bc8ca79c84d99206b5"
+
+
+def test_exact_main_pin_reads_the_packaged_kernel_metadata(compat, monkeypatch):
+    from vllm_sail.native import manifest
+
+    monkeypatch.setattr(
+        manifest, "load", lambda: types.SimpleNamespace(upstream_ref=PIN)
+    )
+    assert compat._verified_upstream_commit() == PIN
+
+
+def test_exact_main_pin_accepts_its_real_scm_version(compat, monkeypatch):
+    monkeypatch.delenv("VLLM_VERSION", raising=False)
+    monkeypatch.setattr(compat, "_verified_upstream_commit", lambda: PIN)
+    monkeypatch.setattr(
+        compat,
+        "installed_vllm_version",
+        lambda: f"0.30.1rc1.dev672+g{PIN}.d20261024.empty",
+    )
+    compat.check_vllm_compatibility(force=True)
+    assert compat._checked
+
+
+@pytest.mark.parametrize(
+    "version",
+    ["0.31.0", "0.31.1.dev1+g528772a", "0.31.1.dev1+g" + "a" * 40],
+)
+def test_exact_main_pin_rejects_missing_or_different_commit(
+    compat, monkeypatch, version
+):
+    monkeypatch.delenv("VLLM_VERSION", raising=False)
+    monkeypatch.setattr(compat, "_verified_upstream_commit", lambda: PIN)
+    monkeypatch.setattr(compat, "installed_vllm_version", lambda: version)
+    with pytest.raises(RuntimeError, match="requires verified vLLM commit"):
+        compat.check_vllm_compatibility(force=True)
+    assert not compat._checked
+
+
+def test_exact_main_pin_cannot_be_replaced_with_a_numeric_override(compat, monkeypatch):
+    monkeypatch.setattr(compat, "_verified_upstream_commit", lambda: PIN)
+    monkeypatch.setenv("VLLM_VERSION", "0.31.0")
+    with pytest.raises(RuntimeError, match="requires verified vLLM commit"):
+        compat.check_vllm_compatibility(force=True)

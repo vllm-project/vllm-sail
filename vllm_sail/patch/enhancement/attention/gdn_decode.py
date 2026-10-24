@@ -98,7 +98,9 @@ def __init__(self, *args, **kwargs):
         requested, use_pla=use_pla, pla_reason=pla_reason, cuda_reason=cuda_reason
     )
     self.gdn_decode_kernel = choice.active
-    self.enable_fused_gdn_decode = choice.active == "cuda"
+    self.enable_fused_gdn_spec_decode = (
+        choice.active == "cuda" and self.speculative_config is not None
+    )
     logger.info_once(
         "PPU GDN decode: requested=%s, active=%s, fallback_reason=%s",
         choice.requested,

@@ -80,7 +80,7 @@ class DeepSeekV4MTP(NvidiaDeepSeekV4MTP):
 
         # Pre-compute expert mapping ONCE.
         first_layer = next(iter(self.model.layers.values()))
-        if first_layer.mtp_block.ffn.use_mega_moe:
+        if first_layer.mtp_block.ffn.use_native_mega_moe:
             expert_mapping = make_deepseek_v4_expert_params_mapping(
                 self.config.n_routed_experts
             )

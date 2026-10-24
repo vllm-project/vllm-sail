@@ -237,6 +237,39 @@ def _forward(
         conv_state = conv_state.transpose(-1, -2)
 
     if (
+        self.kda_spec_decode_backend == "flashinfer"
+        and has_spec_decode
+        and m.num_prefills == 0
+        and m.num_decodes == 0
+    ):
+        assert self.decode_conv1d_weight is not None
+        assert self.decode_norm_weight is not None
+        assert spec_state_indices_tensor is not None
+        assert spec_query_start_loc is not None
+        assert num_accepted_tokens is not None
+        assert self.gate_lower_bound is not None
+        # "Packed" is FlashInfer's name for the varlen T>1 speculative path.
+        flashinfer_packed_fused_kda_decode(
+            x=mixed_qkv,
+            weight=self.decode_conv1d_weight,
+            conv_state=conv_state,
+            raw_gate=g1,
+            raw_beta=beta,
+            A_log=self.A_log,
+            dt_bias=self.dt_bias,
+            state_indices=spec_state_indices_tensor,
+            query_start_loc=spec_query_start_loc,
+            num_accepted_tokens=num_accepted_tokens,
+            state=recurrent_state,
+            output_gate=g2[:num_actual_tokens],
+            norm_weight=self.decode_norm_weight,
+            lower_bound=self.gate_lower_bound,
+            norm_eps=self.o_norm.eps,
+            output=core_attn_out[:, :num_actual_tokens],
+        )
+        return
+
+    if (
         self.kda_decode_backend != "triton"
         and self.decode_conv1d_weight is not None
         and self.decode_norm_weight is not None
@@ -680,6 +713,13 @@ def _init(
     self.projection_size = self.head_dim * self.num_heads
     self.local_projection_size = divide(self.projection_size, self.tp_size)
     self.conv_size = kda_config["short_conv_kernel_size"]
+    self.gate_lower_bound: float | None = kda_config.get("gate_lower_bound", None)
+    if self.gate_lower_bound is not None:
+        assert _KDA_GATE_LOGBOUND_MIN <= self.gate_lower_bound < 0, (
+            "KDA gate lower bound must be in "
+            f"[{_KDA_GATE_LOGBOUND_MIN}, 0). "
+            f"Got {self.gate_lower_bound}."
+        )
     assert kda_config.get("use_full_rank_gate", False), (
         "KimiK3DeltaAttention requires a full-rank gate"
     )
@@ -761,8 +801,28 @@ def _init(
         conv_state_dtype,
         recurrent_state_dtype,
     )
+    spec_decode_backend = (
+        additional_config.get("kda_spec_decode_backend", "auto")
+        if isinstance(additional_config, dict)
+        else "auto"
+    )
+    self.kda_spec_decode_backend = resolve_kda_spec_decode_backend(
+        spec_decode_backend,
+        self.local_num_heads,
+        self.head_dim,
+        self.conv_size,
+        self.num_spec,
+        vllm_config.model_config.dtype,
+        conv_state_dtype,
+        recurrent_state_dtype,
+        self.gate_lower_bound,
+        self.use_recoverssm,
+    )
     decode_conv1d_weight = None
-    if self.kda_decode_backend != "triton":
+    if (
+        self.kda_decode_backend != "triton"
+        or self.kda_spec_decode_backend == "flashinfer"
+    ):
         decode_conv1d_weight = torch.empty(
             3,
             self.conv_size,
@@ -786,14 +846,6 @@ def _init(
 
     self.A_log = nn.Parameter(torch.empty(self.local_num_heads, dtype=torch.float32))
     set_weight_attrs(self.A_log, {"weight_loader": a_log_weight_loader(0)})
-
-    self.gate_lower_bound: float | None = kda_config.get("gate_lower_bound", None)
-    if self.gate_lower_bound is not None:
-        assert _KDA_GATE_LOGBOUND_MIN <= self.gate_lower_bound < 0, (
-            "KDA gate lower bound must be in "
-            f"[{_KDA_GATE_LOGBOUND_MIN}, 0). "
-            f"Got {self.gate_lower_bound}."
-        )
 
     backend = (
         additional_config.get("kda_prefill_backend", "auto")
