@@ -6,7 +6,7 @@
 # tiers. vllm_sail/native/stubs.py registers each one so a call fails
 # with a named NotImplementedError instead of an AttributeError, and so
 # capability probes answer False instead of raising.
-# Upstream vLLM v0.31.0; compiled tiers a.
+# Upstream vLLM 528772a4bf589fd52eec40bc8ca79c84d99206b5; compiled tiers a.
 
 [[op]]
 namespace = "_C_custom_ar"

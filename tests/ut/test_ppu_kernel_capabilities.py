@@ -724,7 +724,11 @@ def test_deepep_factory_uses_bound_globals_and_quantized_protocol(
     )
     load_patch("vllm_sail/patch/enhancement/deepep.py")
     assert consumer.maybe_make_prepare_finalize is provider.maybe_make_prepare_finalize
-    moe = ns(moe_parallel_config=ns(use_all2all_kernels=False, dp_size=1))
+    moe = ns(
+        moe_parallel_config=ns(
+            use_all2all_kernels=False, use_passthrough_all2all=False, dp_size=1
+        )
+    )
     assert provider.maybe_make_prepare_finalize(moe, None) is None
     assert provider.maybe_make_prepare_finalize(
         moe, None, allow_new_interface=True

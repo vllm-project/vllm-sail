@@ -6,15 +6,16 @@
 :func:`vllm_version_is` from a hot path — vllm-ascend has 28 such call sites
 inside its model runner and attention code and calls it out as a mistake.
 
-The plugin targets the vLLM 0.31 release line. The exact rebased source is
-pinned in ``.github/vllm-release-tag.commit`` and
-``.github/vllm-main-verified.commit``; the native corpus pins the same release
-in ``csrc/upstream/manifest.toml``.
+Release-tag manifests use the release range below. Main checkpoints require
+the full source commit recorded in both ``.github/vllm-main-verified.commit``
+and ``csrc/upstream/manifest.toml``. The latter ships inside the wheel, so the
+same identity check works outside a source checkout.
 """
 
 from __future__ import annotations
 
 import os
+import re
 
 from vllm.logger import init_logger
 
@@ -27,6 +28,14 @@ MAX_VLLM_VERSION_EXCLUSIVE = "0.32.0"
 _checked = False
 
 
+def _verified_upstream_commit() -> str | None:
+    """Read the exact main pin from the same metadata shipped with the kernels."""
+    from vllm_sail.native.manifest import load
+
+    ref = load().upstream_ref
+    return ref if re.fullmatch(r"[0-9a-f]{40}", ref) else None
+
+
 def installed_vllm_version() -> str:
     """The installed vLLM version string.
 
@@ -34,7 +43,8 @@ def installed_vllm_version() -> str:
     because a vLLM installed from git reports a version like
     ``0.1.dev1+g4bdc8a788``, which no range check can interpret; developers set
     ``VLLM_VERSION`` to the release the checkout is based on. (Same mechanism as
-    ``vllm_ascend.utils``.)
+    ``vllm_ascend.utils``.) An exact main pin still requires the full commit
+    hash; a numeric override cannot establish its source identity.
     """
     override = os.getenv("VLLM_VERSION")
     if override:
@@ -101,15 +111,15 @@ def vllm_version_at_least(target: str) -> bool:
 
 
 def check_vllm_compatibility(*, force: bool = False) -> None:
-    """Validate the installed vLLM against the supported range.
+    """Validate the installed vLLM against its exact pin or release range.
 
     Called once from :func:`vllm_sail.register_out_of_tree`, before any patch is
     applied, so that a version mismatch produces an actionable error instead of
     an obscure ``AttributeError`` from a patch whose target has moved.
 
     Raises:
-        RuntimeError: The installed vLLM is outside the supported range, or its
-            version cannot prove that it is inside the range.
+        RuntimeError: The installed build cannot prove its exact main commit,
+            or a release-tag manifest's version falls outside its range.
     """
     global _checked
     if _checked and not force:
@@ -119,6 +129,22 @@ def check_vllm_compatibility(*, force: bool = False) -> None:
     _checked = False
 
     version = installed_vllm_version()
+    pin = _verified_upstream_commit()
+    if pin is not None:
+        # Main and release tags may live on different branches. SCM's numeric
+        # prefix then describes an older tag, while its full hash still names
+        # the source precisely. An abbreviation cannot establish this identity.
+        commit = re.search(r"(?:\+|\.)g([0-9a-f]{40})(?=\.|$)", version)
+        if commit is None or commit.group(1) != pin:
+            raise RuntimeError(
+                f"vllm-sail {_plugin_version()} requires verified vLLM commit "
+                f"{pin}, but the installed version is {version!r}. Build that "
+                "exact source with the full SCM commit hash and unset "
+                "VLLM_VERSION and VLLM_VERSION_OVERRIDE."
+            )
+        _checked = True
+        logger.debug("vllm-sail validated against vLLM commit %s", pin)
+        return
     key = _version_key(version)
     supported = f">={MIN_VLLM_VERSION},<{MAX_VLLM_VERSION_EXCLUSIVE}"
     explicit = os.getenv("VLLM_VERSION") is not None

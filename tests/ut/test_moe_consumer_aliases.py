@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import ast
 import importlib
-import os
 import subprocess
 import sys
 import textwrap
@@ -85,15 +84,67 @@ def _module_nodes(tree):
         pending.extend(ast.iter_child_nodes(node))
 
 
-def test_consumer_inventory_matches_vllm_source() -> None:
+@pytest.mark.parametrize(
+    ("consumer_name", "alias_name"),
+    [
+        (
+            "vllm.model_executor.layers.quantization.mxfp4",
+            "backend_to_kernel_cls",
+        ),
+        (
+            "vllm.model_executor.layers.quantization.compressed_tensors."
+            "compressed_tensors_moe.compressed_tensors_moe_w4a4_mxfp4",
+            "convert_weight_to_mxfp4_moe_kernel_format",
+        ),
+    ],
+)
+def test_new_mxfp4_consumers_call_replacement_after_registration(
+    monkeypatch, patch_utils_module, consumer_name, alias_name
+):
+    from vllm_sail.registry import moe_backends
+
+    aliases = moe_backends._ORACLE_ALIAS_CONSUMERS["mxfp4"]
+    monkeypatch.setattr(moe_backends, "_ORACLE_ALIAS_CONSUMERS", {"mxfp4": aliases})
+    monkeypatch.setitem(sys.modules, "vllm_sail.patch.utils", patch_utils_module)
+    for consumers in aliases.values():
+        for name in consumers:
+            monkeypatch.delitem(sys.modules, name, raising=False)
+
+    oracle_name = "vllm.model_executor.layers.fused_moe.oracle.mxfp4"
+    oracle = ModuleType(oracle_name)
+    consumer = ModuleType(consumer_name)
+    for name in aliases:
+
+        def original():
+            return "upstream"
+
+        def replacement():
+            return "ppu"
+
+        setattr(
+            replacement,
+            patch_utils_module.PATCH_MARKER,
+            {f"{oracle_name}.{name}": original},
+        )
+        setattr(oracle, name, replacement)
+        setattr(consumer, name, original)
+    monkeypatch.setitem(sys.modules, oracle_name, oracle)
+    monkeypatch.setitem(sys.modules, consumer_name, consumer)
+
+    moe_backends._rebind_loaded_oracle_aliases({"mxfp4": ModuleType("backend")})
+
+    assert getattr(consumer, alias_name)() == "ppu"
+    assert f"{consumer_name}.{alias_name}" in {
+        record.target for record in patch_utils_module.PATCH_REGISTRY
+    }
+
+
+@pytest.mark.upstream_source
+def test_consumer_inventory_matches_vllm_source(upstream_source_root: Path) -> None:
     """Discover oracle imports independently so a new consumer cannot hide."""
     from vllm_sail.registry.moe_backends import _ORACLE_ALIAS_CONSUMERS
 
-    if source := os.environ.get("VLLM_SOURCE_ROOT"):
-        vllm_root = Path(source).resolve() / "vllm"
-    else:
-        vllm = pytest.importorskip("vllm")
-        vllm_root = Path(vllm.__file__).resolve().parent
+    vllm_root = upstream_source_root / "vllm"
     source_root = vllm_root / "model_executor"
     expected: dict[tuple[str, str], set[str]] = {}
     for backend_name, aliases in _ORACLE_ALIAS_CONSUMERS.items():

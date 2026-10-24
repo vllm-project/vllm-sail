@@ -35,6 +35,10 @@ def _maybe_make_prepare_finalize_body(
     all2all_manager: Any | None = None,
     input_dtype: torch.dtype | None = None,
 ) -> FusedMoEPrepareAndFinalize | None:
+    if moe.moe_parallel_config.use_passthrough_all2all:
+        # The experts dispatch and combine themselves, in every EP topology.
+        return PassThroughPrepareAndFinalize()
+
     if not moe.moe_parallel_config.use_all2all_kernels:
         if not allow_new_interface:
             return None

@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Regression guards for the DSpark draft loader against the pinned v0.31.0.
+"""Regression guards for DeepSeek V4 draft loaders against the selected pin.
 
 ``vllm_sail/models/deepseek_v4/dspark.py`` does not subclass-and-override the
 upstream loader; it copies the body and rebinds it through ``bind_body``, so
@@ -7,8 +7,8 @@ every global the body reads is resolved in
 ``vllm.models.deepseek_v4.nvidia.dspark``. That makes the port silently
 version-coupled in both directions:
 
-* a name that only exists after v0.31.0 (``use_native_mega_moe``) raises
-  ``AttributeError`` on the pinned tag, before a single tensor is loaded;
+* a renamed MoE attribute raises ``AttributeError`` before a tensor is loaded
+  unless both the DSpark and MTP loaders follow the selected upstream;
 * a step that exists only in the port (the ``context_wkv_proj`` duplication)
   disappears the moment the body is refreshed from upstream, and the failure
   is silent -- the draft model predicts noise and the acceptance rate drops
@@ -129,31 +129,37 @@ def test_loader_globals_resolve_in_the_pinned_module(
 
 
 @pytest.mark.upstream_source
+@pytest.mark.parametrize(
+    "relative,name",
+    [
+        (DSPARK_REL, "load_weights"),
+        ("vllm_sail/models/deepseek_v4/mtp.py", "DeepSeekV4MTP.load_weights"),
+    ],
+)
 def test_loader_reads_only_moe_attributes_the_pin_defines(
     upstream_source_root: Path,
+    relative: str,
+    name: str,
 ) -> None:
     """``first_layer.ffn.<attr>`` must exist on the pinned ``DeepseekV4MoE``.
 
     ``use_native_mega_moe`` is a post-v0.31.0 rename of ``use_mega_moe``.
-    Reading the new name on the pinned tag aborts the whole load with
-    ``AttributeError`` and no draft weights are installed at all.
+    Both draft loaders must follow the rename; stale reads abort weight loading.
     """
-    body = definition(DSPARK, "load_weights")
+    body = definition(ROOT / relative, name)
     read = {
         node.attr
         for node in ast.walk(body)
         if isinstance(node, ast.Attribute)
         and isinstance(node.value, ast.Attribute)
         and node.value.attr == "ffn"
-        and isinstance(node.value.value, ast.Name)
-        and node.value.value.id == "first_layer"
     }
     assert read, "the loader is expected to branch on the draft MoE backend"
     moe = definition(upstream_source_root / UPSTREAM_MODEL, "DeepseekV4MoE")
     missing = read - _self_attributes(moe)
     assert not missing, (
         f"DeepseekV4MoE from {UPSTREAM_MODEL} assigns no {sorted(missing)}; "
-        "the port targets the v0.31.0 tag, not a later release"
+        f"{relative}:{name} must match the selected upstream pin"
     )
 
 
