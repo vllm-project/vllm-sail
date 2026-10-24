@@ -106,7 +106,14 @@ def load_patch(relative):
     return mod
 
 
-def test_optional_gates_rebind_preloaded_and_future_consumers(modules):
+@pytest.mark.parametrize(
+    "cute_consumer",
+    [
+        "vllm.models.deepseek_v4.common.ops.cache_utils",
+        "vllm.models.glm5next.nvidia.sparse_indexer",
+    ],
+)
+def test_optional_gates_rebind_preloaded_and_future_consumers(modules, cute_consumer):
     platform = types.SimpleNamespace(ppu=True, is_ppu=lambda: platform.ppu)
     modules("vllm.platforms", current_platform=platform)
 
@@ -114,7 +121,7 @@ def test_optional_gates_rebind_preloaded_and_future_consumers(modules):
         return True
 
     provider = modules("vllm.utils.import_utils", has_cutedsl=probe, has_humming=probe)
-    cute = modules("vllm.models.deepseek_v4.common.ops.cache_utils", has_cutedsl=probe)
+    cute = modules(cute_consumer, has_cutedsl=probe)
     humming = modules(
         "vllm.model_executor.layers.quantization.utils.humming.moe", has_humming=probe
     )
