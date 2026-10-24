@@ -158,20 +158,29 @@ PY
     export MAX_JOBS="${BUILD_JOBS}" CARGO_BUILD_JOBS="${BUILD_JOBS}"
     # Compile explicitly: pip hides successful backend output by default, and
     # a wheel's presence alone does not demonstrate a local Cargo build.
-    python setup.py build_rust --release --inplace \
+    python tools/build_rust.py --release \
         2>&1 | tee "${LOG_DIR}/vllm-rust-build.log"
-    python - <<'PY'
+    python - <<'RUST_ARTIFACTS'
+import runpy
 from pathlib import Path
 
 binary = Path("vllm/vllm-rs")
-extensions = list(Path("vllm").glob("_rust_tool_parser.*.so"))
-if not binary.is_file() or binary.stat().st_size == 0 or len(extensions) != 1:
+declared = runpy.run_path("tools/build_rust.py")["rust_py_extension_module_names"]()
+extensions = []
+for module in declared:
+    paths = list(Path("vllm").glob(f"{module}.*.so"))
+    if len(paths) != 1:
+        raise SystemExit(f"required local Rust extension was not built: {module}")
+    extensions.extend(paths)
+if not binary.is_file() or binary.stat().st_size == 0:
     raise SystemExit("required local Rust artifacts were not built")
+if set(Path("vllm").glob("_rust_*.so")) != set(extensions):
+    raise SystemExit("unexpected local Rust extensions outside upstream declarations")
 for artifact in (binary, *extensions):
     if artifact.stat().st_size == 0:
         raise SystemExit(f"empty Rust artifact: {artifact}")
     print(f"Local Rust artifact: {artifact} ({artifact.stat().st_size} bytes)")
-PY
+RUST_ARTIFACTS
     # Upstream setup.py packages these locally built artifacts without rebuilding.
     python -m pip wheel --verbose --no-build-isolation --no-deps \
         --wheel-dir "${VLLM_WHEEL_DIR}" .
