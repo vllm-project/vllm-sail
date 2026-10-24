@@ -36,7 +36,7 @@ PROTECTED_PACKAGES = (
 )
 
 
-def tree_digest(root):
+def tree_digest(root, *, exclude=()):
     root = Path(root).resolve()
     if not root.is_dir():
         raise ValueError(f"missing or empty image component: {root}")
@@ -51,6 +51,8 @@ def tree_digest(root):
         ancestors = ancestors | {resolved}
         for path in sorted(directory.iterdir()):
             relative = path.relative_to(root)
+            if relative.as_posix() in exclude:
+                continue
             if path.name == "__pycache__" or path.suffix in (".pyc", ".pyo"):
                 continue
             if path.is_symlink():
@@ -70,12 +72,39 @@ def tree_digest(root):
     return digest.hexdigest()
 
 
+def sdk_runtime_cache(sdk):
+    """Keep existing cached kernels immutable while permitting SDK JIT output."""
+    cache = Path(sdk).resolve() / "rtccache"
+    if cache.is_symlink():
+        raise ValueError(f"SDK runtime cache must not be a symlink: {cache}")
+    if not cache.exists():
+        return {}
+    if not cache.is_dir():
+        raise ValueError(f"SDK runtime cache must be a directory: {cache}")
+    result = {}
+    for path in sorted(cache.rglob("*")):
+        if path.is_symlink():
+            raise ValueError(f"SDK runtime cache contains a symlink: {path}")
+        if path.is_file():
+            digest = hashlib.sha256()
+            with path.open("rb") as stream:
+                for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                    digest.update(chunk)
+            result[path.relative_to(cache).as_posix()] = digest.hexdigest()
+    return result
+
+
 def snapshot(sdk, torch_root, torch_version, packages):
+    cache = sdk_runtime_cache(sdk)
     return {
         "stack_source": "image",
         "fingerprint_kind": "installed-tree-sha256",
         "sdk_path": str(Path(sdk).resolve()),
-        "sdk_sha256": tree_digest(sdk),
+        # HG runtime compilation appends kernels here during real device tests.
+        # Hash SDK components separately, retaining every existing cache entry
+        # below so replacement/deletion is still rejected by verification.
+        "sdk_sha256": tree_digest(sdk, exclude={"rtccache"}),
+        "sdk_runtime_cache": cache,
         "torch_path": str(Path(torch_root).resolve()),
         "torch_sha256": tree_digest(torch_root),
         "torch_version": torch_version,
@@ -84,12 +113,24 @@ def snapshot(sdk, torch_root, torch_version, packages):
 
 
 def verify_unchanged(before, after):
-    if before != after:
-        changed = sorted(
-            key
-            for key in before.keys() | after.keys()
-            if before.get(key) != after.get(key)
+    changed = {
+        key
+        for key in before.keys() | after.keys()
+        if key != "sdk_runtime_cache" and before.get(key) != after.get(key)
+    }
+    if "sdk_runtime_cache" in before or "sdk_runtime_cache" in after:
+        old_cache, new_cache = (
+            before.get("sdk_runtime_cache"),
+            after.get("sdk_runtime_cache"),
         )
+        if (
+            not isinstance(old_cache, dict)
+            or not isinstance(new_cache, dict)
+            or any(new_cache.get(name) != digest for name, digest in old_cache.items())
+        ):
+            changed.add("sdk_runtime_cache")
+    if changed:
+        changed = sorted(changed)
         raise ValueError(f"image stack changed: {', '.join(changed)}")
 
 

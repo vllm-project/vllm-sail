@@ -297,6 +297,50 @@ def test_image_stack_rejects_changes(image_stack, stack_trees, component):
         image_stack.verify_unchanged(before, after)
 
 
+def test_image_stack_allows_only_additive_sdk_runtime_cache(image_stack, stack_trees):
+    sdk, torch = stack_trees
+    cache = sdk / "rtccache" / "PPU0015"
+    cache.mkdir(parents=True)
+    existing = cache / "existing.bin"
+    existing.write_bytes(b"existing compiled kernel")
+    before = image_stack.snapshot(sdk, torch, "2.13.0", {"torch": "2.13.0"})
+    (cache / "new.bin").write_bytes(b"newly compiled kernel")
+    after = image_stack.snapshot(sdk, torch, "2.13.0", {"torch": "2.13.0"})
+    image_stack.verify_unchanged(before, after)
+    assert before["sdk_sha256"] == after["sdk_sha256"]
+
+    existing.write_bytes(b"replaced compiled kernel")
+    changed = image_stack.snapshot(sdk, torch, "2.13.0", {"torch": "2.13.0"})
+    with pytest.raises(ValueError, match="sdk_runtime_cache"):
+        image_stack.verify_unchanged(before, changed)
+    existing.unlink()
+    deleted = image_stack.snapshot(sdk, torch, "2.13.0", {"torch": "2.13.0"})
+    with pytest.raises(ValueError, match="sdk_runtime_cache"):
+        image_stack.verify_unchanged(before, deleted)
+
+
+def test_image_stack_does_not_exempt_torch_runtime_cache(image_stack, stack_trees):
+    sdk, torch = stack_trees
+    before = image_stack.snapshot(sdk, torch, "2.13.0", {"torch": "2.13.0"})
+    cache = torch / "rtccache"
+    cache.mkdir()
+    (cache / "replacement.so").write_bytes(b"different torch contents")
+    after = image_stack.snapshot(sdk, torch, "2.13.0", {"torch": "2.13.0"})
+    with pytest.raises(ValueError, match="torch_sha256"):
+        image_stack.verify_unchanged(before, after)
+
+
+def test_image_stack_rejects_sdk_runtime_cache_symlinks(
+    image_stack, stack_trees, tmp_path
+):
+    sdk, torch = stack_trees
+    cache = sdk / "rtccache"
+    cache.mkdir()
+    (cache / "outside").symlink_to(tmp_path, target_is_directory=True)
+    with pytest.raises(ValueError, match="runtime cache.*symlink"):
+        image_stack.snapshot(sdk, torch, "2.13.0", {"torch": "2.13.0"})
+
+
 def test_image_stack_constraints_protect_installed_and_absent_device_packages(
     image_stack,
 ):
