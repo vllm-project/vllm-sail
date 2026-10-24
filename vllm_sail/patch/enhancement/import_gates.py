@@ -64,6 +64,7 @@ _CONSUMERS = {
         "vllm.models.deepseek_v4.common.ops.fused_indexer_q",
         "vllm.model_executor.layers.sparse_attn_indexer",
         "vllm.models.deepseek_v41.common.ops.cache_utils",
+        "vllm.models.glm5next.nvidia.sparse_indexer",
     ),
     "has_humming": (
         "vllm.model_executor.kernels.linear.mixed_precision.humming",

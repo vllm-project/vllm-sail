@@ -23,7 +23,7 @@ fingerprint = "sha256:34692ac48c0dc502cf39ea0a331e6bc0773daa4ce33d98bfae61cdedae
 symbol = "vllm.platforms.interface.Platform"
 kind = "class"
 present = true
-fingerprint = "sha256:2ff88803a6f7deae6a34bc06975ead89b5b6288b021c1d9987975a44647eeead"
+fingerprint = "sha256:f351d5766d6112cda3f80d9b7268d2798fae3bdca86b23d9ab1964bc352a331c"
 
 [[key_interface]]
 symbol = "vllm.platforms.cuda.NvmlCudaPlatform"
@@ -53,13 +53,13 @@ fingerprint = "sha256:8631f0ce2e3d059f07a073e53ff987048969bb39362054b0704677cefb
 symbol = "vllm.v1.attention.backends.registry.AttentionBackendEnum"
 kind = "enum"
 present = true
-fingerprint = "sha256:e821496b87086f7284ce066628f698dd2b4c74f56e400df02b8b8e2ff2fb5555"
+fingerprint = "sha256:7754e7249f2dec1e3b385832a904e0293ea2e8101ebe6f1005d65b26642c4991"
 
 [[key_interface]]
 symbol = "vllm.v1.attention.backends.registry.register_backend"
 kind = "function"
 present = true
-fingerprint = "sha256:a36371a2811fa978706a863fcd2446f292b7267b9fade30fe050c4f238ce9562"
+fingerprint = "sha256:e7b6003f95c5f1e9b2f08b571d71d30e396c2fa09042b55cb09b8e48ea678188"
 
 [[key_interface]]
 symbol = "vllm.model_executor.kernels.linear.register_linear_kernel"
