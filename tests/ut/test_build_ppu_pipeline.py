@@ -145,7 +145,7 @@ def test_cargo_git_cli_is_exported_after_environment_setup(tmp_path, cargo_env):
     end = text.index("    # Follow the Rust toolchain pinned")
     assert text.index("source /usr/local/PPU_SDK/envsetup.sh") < start
     assert start < end < text.index("cargo --version")
-    assert end < text.index("python setup.py build_rust --release --inplace")
+    assert end < text.index("python tools/build_rust.py --release")
     (tmp_path / "env").write_text(cargo_env)
     preserved = {
         "GIT_CONFIG_GLOBAL": str(tmp_path / "git-config"),
@@ -187,11 +187,53 @@ def test_rust_build_is_explicit_before_wheel_packaging() -> None:
     required = text.index(
         "export VLLM_TARGET_DEVICE=empty VLLM_REQUIRE_RUST_FRONTEND=1"
     )
-    rust = text.index("python setup.py build_rust --release --inplace")
+    rust = text.index("python tools/build_rust.py --release")
     check = text.index("required local Rust artifacts were not built")
     wheel = text.index("python -m pip wheel --verbose")
     assert required < rust < check < wheel
     assert "vllm-rust-build.log" in text
+
+
+@pytest.mark.parametrize(
+    "declared,present,binary,expected",
+    [
+        ([], {}, b"frontend", True),
+        (["_rust_tool_parser"], {"_rust_tool_parser": b"bridge"}, b"frontend", True),
+        (["_rust_tool_parser"], {}, b"frontend", False),
+        ([], {"_rust_tool_parser": b"stale bridge"}, b"frontend", False),
+        ([], {}, None, False),
+        ([], {}, b"", False),
+        (["_rust_tool_parser"], {"_rust_tool_parser": b""}, b"frontend", False),
+    ],
+)
+def test_rust_artifact_gate_follows_upstream_declarations(
+    tmp_path: Path,
+    declared: list[str],
+    present: dict[str, bytes],
+    binary: bytes | None,
+    expected: bool,
+) -> None:
+    (tmp_path / "tools").mkdir()
+    (tmp_path / "tools/build_rust.py").write_text(
+        f"def rust_py_extension_module_names():\n    return {declared!r}\n"
+    )
+    output = tmp_path / "vllm"
+    output.mkdir()
+    if binary is not None:
+        (output / "vllm-rs").write_bytes(binary)
+    for module, contents in present.items():
+        (output / f"{module}.abi3.so").write_bytes(contents)
+    source = SCRIPT.read_text().split("python - <<'RUST_ARTIFACTS'\n", 1)[1]
+    source = source.split("\nRUST_ARTIFACTS\n", 1)[0]
+    result = subprocess.run(
+        [sys.executable, "-c", source],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+    )
+    assert (result.returncode == 0) == expected, result.stdout + result.stderr
+    if expected:
+        assert "Local Rust artifact: vllm/vllm-rs" in result.stdout
 
 
 def test_image_build_captures_the_pinned_image_stack_before_building():

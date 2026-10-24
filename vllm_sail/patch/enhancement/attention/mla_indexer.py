@@ -835,6 +835,7 @@ def _build_body(
         num_prefill_tokens=num_prefill_tokens,
         prefill=prefill_metadata,
         decode=decode_metadata,
+        block_table=common_attn_metadata.block_table_tensor,
     )
 
     return attn_metadata
