@@ -520,7 +520,7 @@ def _resolve_gdn_prefill_backend(
     * Blackwell (SM10.x) with ``head_k_dim == 128``;
 
     AITER FlyDSL GDN prefill kernels are chosen when:
-    * "aiter_flydsl" is requested; (opt-in only)
+    * "aiter_flydsl" is requested, or "auto" is requested on gfx942/gfx950;
     * ROCm AITER exposes the optimized VK prefill API and FlyDSL kernels;
     * the model uses BF16 activations with ``head_k_dim == head_v_dim == 128``.
     # PPU MODIFICATION: begin
@@ -557,24 +557,28 @@ def _resolve_gdn_prefill_backend(
                     "that VLLM_ROCM_USE_AITER=1, that this is a CDNA 3 or "
                     "newer GPU, and that the installed AITER exports them."
                 )
-            if head_k_dim != 128 or head_v_dim != 128:
+            reasons = _aiter_flydsl_unsupported_reasons(
+                vllm_config, head_k_dim, head_v_dim
+            )
+            if reasons:
                 logger.warning_once(
-                    "GDN prefill backend 'aiter_flydsl' was requested but "
-                    "linear head dims are K=%s V=%s; FlyDSL requires 128/128. "
+                    "GDN prefill backend 'aiter_flydsl' was requested but %s. "
                     "Falling back to Triton/FLA.",
-                    head_k_dim,
-                    head_v_dim,
-                )
-                return backend, "triton"
-            if vllm_config.model_config.dtype != torch.bfloat16:
-                logger.warning_once(
-                    "GDN prefill backend 'aiter_flydsl' was requested but "
-                    "model dtype is %s; FlyDSL requires bfloat16. "
-                    "Falling back to Triton/FLA.",
-                    vllm_config.model_config.dtype,
+                    "; ".join(reasons),
                 )
                 return backend, "triton"
             return backend, "aiter_flydsl"
+        if backend == "auto":
+            from vllm.platforms.rocm import on_mi3xx
+
+            if (
+                on_mi3xx()
+                and not _aiter_flydsl_unsupported_reasons(
+                    vllm_config, head_k_dim, head_v_dim
+                )
+                and rocm_aiter_ops.is_gdn_flydsl_prefill_available()
+            ):
+                return backend, "aiter_flydsl"
         return backend, "triton"
 
     if backend == "aiter_flydsl":

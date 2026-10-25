@@ -200,6 +200,7 @@ def test_deepseek_mapper_selection_is_instance_local() -> None:
     )
 
 
+@pytest.mark.parametrize("tp_rank", [0, 3])
 @pytest.mark.parametrize(
     "expert_dtype,channelwise_layers",
     [
@@ -211,11 +212,12 @@ def test_deepseek_mapper_selection_is_instance_local() -> None:
     ],
 )
 def test_deepseek_target_loader_filters_mtp_weights(
-    monkeypatch, expert_dtype, channelwise_layers
+    monkeypatch, expert_dtype, channelwise_layers, tp_rank
 ) -> None:
     """The target loader must not receive parameters owned by the draft model."""
     torch = pytest.importorskip("torch")
     pytest.importorskip("vllm")
+    from vllm.model_executor.model_loader import weight_utils
     from vllm.model_executor.models.utils import AutoWeightsLoader
     from vllm.models.deepseek_v4.nvidia import model as upstream
 
@@ -236,11 +238,21 @@ def test_deepseek_target_loader_filters_mtp_weights(
     body.get_expert_mapping = lambda: []
     layer = torch.nn.Module()
     layer.attn = torch.nn.Module()
-    layer.attn.attn_sink = torch.nn.Parameter(torch.zeros(1), requires_grad=False)
+    monkeypatch.setattr(weight_utils, "get_tensor_model_parallel_world_size", lambda: 4)
+    monkeypatch.setattr(weight_utils, "get_tensor_model_parallel_rank", lambda: tp_rank)
+    with torch.device("cpu"):
+        layer.attn.attn_sink = weight_utils.make_attention_sink(3, torch.float32)
+    registered_loader = layer.attn.attn_sink.weight_loader
+    sink_loads = []
+
+    def record_sink_load(param, loaded_weight):
+        sink_loads.append(loaded_weight)
+        registered_loader(param, loaded_weight)
+
+    layer.attn.attn_sink.weight_loader = record_sink_load
     body.layers = torch.nn.ModuleList([layer])
     target.model = body
     monkeypatch.setattr(upstream, "get_tensor_model_parallel_world_size", lambda: 4)
-    monkeypatch.setattr(upstream, "get_tensor_model_parallel_rank", lambda: 0)
     monkeypatch.setattr(upstream, "is_pp_missing_parameter", lambda *args: False)
 
     mapper = _make_deepseek_v4_weights_mapper(expert_dtype, channelwise_layers)
@@ -252,7 +264,9 @@ def test_deepseek_target_loader_filters_mtp_weights(
     ]
     loaded = AutoWeightsLoader(target).load_weights(weights, mapper=mapper)
     assert loaded == {"model.layers.0.attn.attn_sink"}
-    assert layer.attn.attn_sink.item() == 1.0
+    assert len(sink_loads) == 1 and sink_loads[0] is weights[0][1]
+    assert layer.attn.attn_sink[0].item() == tp_rank + 1
+    assert torch.isneginf(layer.attn.attn_sink[1:]).all()
 
 
 def test_dspark_draft_keeps_mtp_names_for_its_own_loader() -> None:

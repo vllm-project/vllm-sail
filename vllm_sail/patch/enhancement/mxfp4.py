@@ -432,6 +432,7 @@ def install() -> None:
         _cache_permute_indices: dict | None = None,
         activation=None,
         use_separated_a4w4: bool = False,
+        activation_key=None,
     ):
         if mxfp4_backend in _ppu_backends("bf16"):
             import vllm.envs as envs
@@ -479,6 +480,7 @@ def install() -> None:
             _cache_permute_indices,
             activation=activation,
             use_separated_a4w4=use_separated_a4w4,
+            activation_key=activation_key,
         )
 
     @patch(
