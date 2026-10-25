@@ -87,7 +87,7 @@
   "vllm.model_executor.layers.linear.dispatch_unquantized_gemm": "58a0612ca30793a2f22b64b35f0ff4970b503f4f0996a25018c9aefbaeab227d",
   "vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn.ChunkGatedDeltaRule.__init__": "ec7db6deda351657835aabfc97d0ee3681acb7f5e62a96a42f95a87c46938d32",
   "vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn.ChunkGatedDeltaRule.forward_pla": "additive",
-  "vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn.QwenGatedDeltaNetAttention.__init__": "df60779938d50565c4b22a00c1f8b4c0c27515ac3521bba0046c28e5ae57049f",
+  "vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn.QwenGatedDeltaNetAttention.__init__": "90530a34d7fbeda6a796c12ded6fb3908d65a2441c5b609b0a3e1e024c0f3bb4",
   "vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn.QwenGatedDeltaNetAttention._can_use_fused_gdn_mtp_decode": "6eb9a72664d314bff1f8889640ce003a13c12c98db49f8e4279c0a369ce22ca7",
   "vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn.QwenGatedDeltaNetAttention._fused_gdn_decode_unsupported_reason": "316fc4ec001f99550f4fb8e96066ca087712a5f78509885e36acd178df890026",
   "vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn._log_gdn_backend_decision": "3051b2f0fe1bfa3dacb61055b8d80441846ff9894dc29de255c3ca166f5760c5",
