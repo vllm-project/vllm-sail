@@ -23,7 +23,7 @@ fingerprint = "sha256:34692ac48c0dc502cf39ea0a331e6bc0773daa4ce33d98bfae61cdedae
 symbol = "vllm.platforms.interface.Platform"
 kind = "class"
 present = true
-fingerprint = "sha256:377cba3d9e9319aa2477d33ccd21308c80f94a71d0a914c3e43fa0ba0b100564"
+fingerprint = "sha256:24df93182d11072c17230d6a6b158ce874567cdbfc49cadb87ab38f987350928"
 
 [[key_interface]]
 symbol = "vllm.platforms.cuda.NvmlCudaPlatform"
@@ -119,7 +119,7 @@ kind = "module"
 module = "vllm/envs.py"
 symbol = "environment_variables"
 present = true
-fingerprint = "sha256:a49ba80f026357bc84bbffb74aeb13a93a434037f15b9db2932b405944b222da"
+fingerprint = "sha256:44be308f8c056f91047878b84e31e3b121270bbfc211a2462dfa6538ef3b35f3"
 
 [[patch_target]]
 name = "vllm.lora.layers.utils.try_get_optimal_moe_config"
