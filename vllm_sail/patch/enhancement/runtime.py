@@ -211,7 +211,7 @@ def rejection_sample(
         expanded_local_pos,
         temperature,
         vocab_size,
-        num_speculative_steps,
+        num_logits,
         BLOCK_SIZE=VOCAB_BLOCK_SIZE,
         HAS_DRAFT_LOGITS=has_draft_logits,
     )
@@ -282,7 +282,7 @@ def rejection_sample(
                 expanded_local_pos,
                 temperature,
                 vocab_size,
-                num_speculative_steps,
+                num_logits,
                 vocab_num_blocks,
                 BLOCK_SIZE=VOCAB_BLOCK_SIZE,
                 PADDED_VOCAB_NUM_BLOCKS=padded_vocab_num_blocks,

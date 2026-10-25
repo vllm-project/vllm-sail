@@ -22,6 +22,7 @@ Design: ``docs/developer_guide/kernels.md``.
 
 from __future__ import annotations
 
+import ast
 import re
 import shutil
 from collections.abc import Callable, Mapping, Sequence
@@ -570,7 +571,13 @@ def _op_name(text: str, kind: str) -> str | None:
 
 
 def _schema(text: str) -> str:
-    return "".join(_STRING_RE.findall(text)).strip()
+    """Decode ordinary quoted tokens before concatenating the runtime schema."""
+    try:
+        return "".join(
+            ast.literal_eval(match.group(0)) for match in _STRING_RE.finditer(text)
+        ).strip()
+    except (SyntaxError, ValueError) as exc:
+        raise PortError("cannot decode a binding schema string literal") from exc
 
 
 def _is_probe(schema: str) -> bool:

@@ -18,7 +18,7 @@ schema = 1
 
 # The exact upstream vLLM tag the corpus is translated from. Bumping this means
 # re-running tools/port_upstream_kernels.py and reviewing the diff.
-upstream_ref = "a97d19d7924a337dd0a89b71e7bcf1fdae3f9e18"
+upstream_ref = "c0b6f74bee518aeaf5d72b200a0216e72fbb5e7c"
 
 # Compiled tiers, in the order CMake receives them. `x` must never appear here.
 # Must stay above [tiers]: a bare key after a table header belongs to that table.
@@ -167,7 +167,6 @@ ops = [
     "gelu_new",
     "gelu_quick",
     "gelu_tanh_and_mul",
-    "masked_situ_and_mul",
     "masked_moe_activation",
     "situ_and_mul_quant",
     "mul_and_silu",

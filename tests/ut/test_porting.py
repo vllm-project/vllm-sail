@@ -847,6 +847,59 @@ def test_quotes_and_backslashes_survive_the_round_trip(
     assert stubs.load_schemas(path) == (op,)
 
 
+@pytest.mark.parametrize(
+    ("statement", "expected"),
+    [
+        (
+            r'ops.def("escaped_schema(str dtype=\"auto\") -> ()");',
+            'escaped_schema(str dtype="auto") -> ()',
+        ),
+        (
+            r'ops.def("escaped_schema(str label=\"" "auto\") -> ()");',
+            'escaped_schema(str label="auto") -> ()',
+        ),
+        (
+            r'ops.def("escaped_schema(str label=\"a\\\"b\") -> ()");',
+            r'escaped_schema(str label="a\"b") -> ()',
+        ),
+        (
+            r'ops.def("escaped_schema(str label=\"真武\") -> ()");',
+            'escaped_schema(str label="真武") -> ()',
+        ),
+    ],
+)
+def test_ported_stub_schema_decodes_cpp_default_literals(
+    tmp_path: Path,
+    upstream: Path,
+    kernel_manifest: m.Manifest,
+    statement: str,
+    expected: str,
+) -> None:
+    binding = upstream / "csrc/libtorch_stable/torch_bindings.cpp"
+    binding.write_text(
+        _MAIN_BINDINGS.replace(
+            '  ops.set_python_module("vllm._C");',
+            f'  {statement}\n  ops.set_python_module("vllm._C");',
+        ),
+        encoding="utf-8",
+    )
+    dest = tmp_path / "ported"
+    result = porting.port(
+        upstream, dest, kernel_manifest, translate=porting.recording_translator([])
+    )
+    extracted = next(op for op in result.excluded_ops if op.name == "escaped_schema")
+    assert extracted.schema == expected
+    loaded = next(
+        op
+        for op in stubs.load_schemas(dest / porting.EXCLUDED_OPS_NAME)
+        if op.name == "escaped_schema"
+    )
+    assert loaded == extracted
+    assert 'ops.def("copy_blocks(' in (
+        dest / "libtorch_stable/torch_bindings.cpp"
+    ).read_text(encoding="utf-8")
+
+
 def test_an_empty_exclusion_set_still_renders_a_readable_file(
     kernel_manifest: m.Manifest, tmp_path: Path
 ) -> None:

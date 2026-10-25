@@ -59,6 +59,31 @@ def test_group_quantization_has_one_compiled_owner_and_all_three_bindings():
         assert re.search(r'ops\.impl\(\s*"' + name + r'"', body)
 
 
+@pytest.mark.parametrize("kind", ["def", "impl"])
+def test_every_compiled_operator_has_a_generated_registration(kind):
+    """Check source registrations; native compilation/loading is a separate gate."""
+    corpus = manifest.load()
+    bodies = "\n".join(
+        (ROOT / entry.vendored).read_text() for entry in corpus.compiled()
+    )
+    # Keep quoted schemas intact while removing example registrations in comments.
+    bodies = re.sub(
+        r'"(?:\\.|[^"\\])*"|//[^\n]*|/\*.*?\*/',
+        lambda match: match[0] if match[0].startswith('"') else " ",
+        bodies,
+        flags=re.DOTALL,
+    )
+    suffix = r"\s*\(" if kind == "def" else '"'
+    registered = set(
+        re.findall(
+            r"\b\w+\s*\.\s*" + kind + r'\s*\(\s*"([A-Za-z_]\w*)' + suffix,
+            bodies,
+        )
+    )
+    declared = set(corpus.ops(corpus.compiled()))
+    assert declared <= registered, sorted(declared - registered)
+
+
 @pytest.mark.parametrize(
     "relative",
     [

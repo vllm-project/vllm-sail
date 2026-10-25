@@ -149,9 +149,22 @@ def test_install_records_real_target_and_reapplication_guard(
 
 
 @pytest.mark.upstream_source
-@pytest.mark.parametrize("unexpected_death", [False, True])
+@pytest.mark.parametrize(
+    "unexpected_death,rank_retired,engine_error",
+    [
+        (False, False, True),
+        (True, False, True),
+        (True, True, True),
+        (True, True, False),
+    ],
+)
 def test_real_output_loop_distinguishes_shutdown_from_engine_failure(
-    monkeypatch, shutdown_module, upstream_source_root, unexpected_death
+    monkeypatch,
+    shutdown_module,
+    upstream_source_root,
+    unexpected_death,
+    rank_retired,
+    engine_error,
 ):
     namespace = {"asyncio": asyncio}
     utils = upstream_source_root / "vllm/utils/async_utils.py"
@@ -161,15 +174,34 @@ def test_real_output_loop_distinguishes_shutdown_from_engine_failure(
     shutdown = function(path, "AsyncLLM.shutdown", namespace)
     start = function(path, "AsyncLLM._run_output_handler", namespace)
     modules(monkeypatch, cancel=namespace["cancel_task_threadsafe"])
-
-    class EngineDeadError(Exception):
-        pass
+    middleware = (
+        upstream_source_root / "vllm/entrypoints/serve/elastic_ep/middleware.py"
+    )
+    for name in ("get_elastic_ep_rank_retired", "set_elastic_ep_rank_retired"):
+        namespace[name] = function(middleware, name, namespace)
+    namespace["set_elastic_ep_rank_retired"](rank_retired)
+    assert namespace["get_elastic_ep_rank_retired"]() is rank_retired
+    for name in ("VLLMError", "VLLMServerError"):
+        namespace[name] = function(
+            upstream_source_root / "vllm/exceptions.py", name, namespace
+        )
+    EngineDeadError = function(
+        upstream_source_root / "vllm/v1/engine/exceptions.py",
+        "EngineDeadError",
+        namespace,
+    )
 
     async def scenario():
         loop = asyncio.get_running_loop()
-        errors, propagated = [], []
+        errors, notices, propagated = [], [], []
+        failure = (
+            EngineDeadError() if engine_error else ValueError("unexpected failure")
+        )
         namespace.update(
-            logger=NS(exception=lambda message: errors.append(message)),
+            logger=NS(
+                exception=lambda message: errors.append(message),
+                info=lambda message: notices.append(message),
+            ),
             envs=NS(VLLM_V1_OUTPUT_PROC_CHUNK_SIZE=1),
             shutdown_prometheus=lambda: None,
         )
@@ -207,7 +239,7 @@ def test_real_output_loop_distinguishes_shutdown_from_engine_failure(
         start(instance)
         await asyncio.sleep(0)
         if unexpected_death:
-            core.future.set_exception(EngineDeadError())
+            core.future.set_exception(failure)
         else:
             await asyncio.to_thread(
                 shutdown_module._wrap_shutdown(shutdown), instance, 0
@@ -217,10 +249,17 @@ def test_real_output_loop_distinguishes_shutdown_from_engine_failure(
         except asyncio.CancelledError:
             pass
         if unexpected_death:
-            assert errors == ["AsyncLLM output_handler failed."]
-            assert len(propagated) == 1 and isinstance(propagated[0], EngineDeadError)
+            assert propagated == [failure]
+            if rank_retired and engine_error:
+                assert errors == []
+                assert notices == [
+                    "[Elastic EP] Retired rank stopped receiving EngineCore outputs"
+                ]
+            else:
+                assert errors == ["AsyncLLM output_handler failed."]
+                assert notices == []
         else:
-            assert errors == [] and propagated == []
+            assert errors == [] and notices == [] and propagated == []
             assert instance.output_handler.cancelled()
 
     asyncio.run(scenario())

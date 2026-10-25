@@ -20,6 +20,9 @@ class Tensor:
     def stride(self, axis):
         return 1 if self._contiguous else 2
 
+    def size(self, axis):
+        return self.shape[axis]
+
     def new_empty(self, *shape, dtype):
         return Tensor(*shape, dtype=dtype)
 
