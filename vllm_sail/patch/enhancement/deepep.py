@@ -278,8 +278,8 @@ def _maybe_make_prepare_finalize_body(
             num_experts=moe.num_experts,
             hidden_size=moe.hidden_dim,
             num_dispatchers=all2all_manager.world_size,
-            x_bytes_per_token=dispatch_layout.x_bytes_per_token,
-            x_sf_bytes_per_token=dispatch_layout.x_sf_bytes_per_token,
+            dispatch_format=dispatch_layout.dispatch_format,
+            extra_payload_bytes_per_token=dispatch_layout.extra_payload_bytes_per_token,
         )
 
     elif moe.use_ag_rs_all2all_kernels and allow_new_interface:

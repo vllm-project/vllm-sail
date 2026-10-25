@@ -6,7 +6,7 @@
 # tiers. vllm_sail/native/stubs.py registers each one so a call fails
 # with a named NotImplementedError instead of an AttributeError, and so
 # capability probes answer False instead of raising.
-# Upstream vLLM 1c879919786497217b3b5fb0258d1d72f2442cb0; compiled tiers a.
+# Upstream vLLM 71e9320633219b3e94a2b0db70647bbfe4e330b9; compiled tiers a.
 
 [[op]]
 namespace = "_C_custom_ar"
@@ -44,6 +44,22 @@ reason = "hand-written mma.sync / ldmatrix / wmma; inline asm volatile PTX"
 namespace = "_C"
 name = "awq_marlin_repack"
 schema = "awq_marlin_repack(Tensor b_q_weight, SymInt size_k, SymInt size_n, int num_bits, bool is_a_8bit) -> Tensor"
+kind = "compute"
+tier = "unclaimed"
+reason = "not declared in csrc/upstream/manifest.toml"
+
+[[op]]
+namespace = "_C"
+name = "beam_allreduce"
+schema = "beam_allreduce(Tensor input, Tensor! output, int buffer_ptrs, Tensor! flags, int multicast_ptr, int world, int rank) -> ()"
+kind = "compute"
+tier = "unclaimed"
+reason = "not declared in csrc/upstream/manifest.toml"
+
+[[op]]
+namespace = "_C"
+name = "beam_allreduce_norm"
+schema = "beam_allreduce_norm(Tensor input, Tensor residual, Tensor? post_weight, Tensor? next_weight, Tensor! hidden, Tensor!? normalized, int buffer_ptrs, Tensor! flags, int multicast_ptr, int local_ptr, int world, int rank, float post_eps, float next_eps, float x_scale, float r_scale, bool post_norm, bool next_norm, bool scaled, bool one_shot, bool small_batch, Tensor? experts, Tensor? expert_weights, Tensor? permutation, float routed_scale) -> ()"
 kind = "compute"
 tier = "unclaimed"
 reason = "not declared in csrc/upstream/manifest.toml"

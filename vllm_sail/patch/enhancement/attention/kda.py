@@ -753,12 +753,11 @@ def _init(
         in_proj_output_sizes,
         replicated_shard_id=4,
         tp_size=self.tp_size,
+        padding_size=self.in_proj_padding,
         bias=False,
         quant_config=self.quant_config,
         prefix=in_proj_prefix,
     )
-    if self.in_proj_padding:
-        self.in_proj_qkvgfab.weight.data[-self.in_proj_padding :].zero_()
 
     self.f_b_proj = ColumnParallelLinear(
         self.head_dim,
@@ -862,9 +861,7 @@ def _init(
     self._flashkda_buffer_specs: (
         tuple[tuple[tuple[int, ...], torch.dtype], ...] | None
     ) = None
-    self._flashinfer_kda_output_spec: tuple[tuple[int, ...], torch.dtype] | None = (
-        None
-    )
+    self._flashinfer_kda_output_spec: tuple[tuple[int, ...], torch.dtype] | None = None
     self._checkpoint_exporter: FlashKDAPrefillCheckpointExporter | None = None
     if self.kda_prefill_backend == "flashkda":
         T = vllm_config.scheduler_config.max_num_batched_tokens
