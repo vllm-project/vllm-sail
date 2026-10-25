@@ -173,7 +173,9 @@ def test_compressor_uses_supported_kernel(modules, ppu, head, two_stage, expecte
         num_decode_tokens=1,
     )
     context = types.SimpleNamespace(
-        attn_metadata={"state": meta, "kv": object()}, cudagraph_runtime_mode="none"
+        attn_metadata={"state": meta, "kv": object()},
+        cudagraph_runtime_mode="none",
+        capturing=False,
     )
     cache = types.SimpleNamespace(shape=(2, 64, 2048), dtype="u8")
     cls = type("DeepseekCompressor", (), {"forward": lambda *a: None})
@@ -186,7 +188,13 @@ def test_compressor_uses_supported_kernel(modules, ppu, head, two_stage, expecte
         CompressorMetadata=object,
         Any=object,
         CUDAGraphMode=types.SimpleNamespace(FULL="full"),
-        torch=types.SimpleNamespace(uint8="u8", float8_e4m3fn="fp8"),
+        torch=types.SimpleNamespace(
+            uint8="u8",
+            float8_e4m3fn="fp8",
+            cuda=types.SimpleNamespace(
+                is_current_stream_capturing=lambda: context.capturing
+            ),
+        ),
         _SAVE_PARTIAL_STATES_KERNEL=kernel("save"),
         compress_norm_rope_store_triton=kernel("triton"),
         compress_norm_rope_store_two_stage_triton=kernel("two_stage"),
@@ -231,6 +239,7 @@ def test_compressor_uses_supported_kernel(modules, ppu, head, two_stage, expecte
         obj.forward(scores, object(), types.SimpleNamespace(cos_sin_cache=object()))
         assert [name for name, _ in calls] == ["save"]
         context.cudagraph_runtime_mode = "full"
+        context.capturing = True
         calls.clear()
         obj.forward(scores, object(), types.SimpleNamespace(cos_sin_cache=object()))
         assert [name for name, _ in calls] == ["save", expected]

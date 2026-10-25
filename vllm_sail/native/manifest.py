@@ -35,7 +35,7 @@ VENDOR_ROOT = "csrc/upstream"
 _BINDINGS_SUFFIX = "torch_bindings.cpp"
 
 # Upstream splits MoE into its own extension and op namespace; so do we.
-_MOE_PREFIX = "csrc/libtorch_stable/moe/"
+_MOE_PREFIXES = ("csrc/moe/", "csrc/libtorch_stable/moe/")
 
 
 class ManifestError(Exception):
@@ -59,7 +59,7 @@ class Entry:
     @property
     def is_moe(self) -> bool:
         """Whether this TU belongs to the MoE extension rather than the main one."""
-        return self.path.startswith(_MOE_PREFIX)
+        return self.path.startswith(_MOE_PREFIXES)
 
     @property
     def vendored(self) -> str:
