@@ -43,7 +43,7 @@ import vllm_sail.utils.deep_gemm as _ppu_deep_gemm
 from vllm_sail.patch.bodies import bind_body
 from vllm_sail.patch.utils import patch, patch_value
 
-_AFFECTED = ">=0.31.0,<0.32.0"
+_AFFECTED = ">=0.32.0,<0.33.0"
 _MODULE = "vllm.v1.attention.backends.mla.indexer"
 
 
@@ -607,7 +607,6 @@ def _build_body(
                 prefill_query_lens_cpu,
                 self.compress_ratio,
                 self.tp_size,
-                self.vllm_config.attention_config.indexer_tp_shard_min_rows,
             )
         prefill_metadata = DeepseekV32IndexerPrefillMetadata(
             chunks,

@@ -222,12 +222,12 @@ def forward(
         pdl_kwargs=pdl_kwargs,
     )
 
-    # A captured graph would replay the capture batch's skip decision.
+    # full graph cannot branch on per-step CPU metadata after capture
     if (
         current_platform.is_cuda()
         and self.head_dim == 512
         and self.compress_ratio == 128
-        and not torch.cuda.is_current_stream_capturing()
+        and forward_context.cudagraph_runtime_mode != CUDAGraphMode.FULL
         and state_metadata.c128_boundary is False
     ):
         return
@@ -326,7 +326,7 @@ patch(
         "shares CUDA identity but requires the Triton compressor. No "
         "compressor backend registration hook is available."
     ),
-    affected_versions=">=0.31.0,<0.32.0",
+    affected_versions=">=0.32.0,<0.33.0",
     remove_when="DeepseekCompressor selects compression through a backend capability hook.",
 )(bind_body(forward, _compressor))
 
@@ -339,6 +339,6 @@ patch(
         "identity, bypassing has_cutedsl and the PPU forward guard. PPU must "
         "register the common Triton warmup instead."
     ),
-    affected_versions=">=0.31.0,<0.32.0",
+    affected_versions=">=0.32.0,<0.33.0",
     remove_when="DeepseekCompressor gates warmup registration on backend capabilities.",
 )(bind_body(__init__, _compressor))

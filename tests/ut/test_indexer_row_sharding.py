@@ -111,7 +111,7 @@ def check_result(body, row_shard_case, compress_ratio, shard):
     assert result.prefill.row_shard_sizes is (shard_sizes if shard else None)
     assert len(shard_calls) == int(shard)
     if shard:
-        assert shard_calls[0] == (Values([17]), Values([8]), compress_ratio, 8, 37)
+        assert shard_calls[0] == (Values([17]), Values([8]), compress_ratio, 8)
     assert len(compressed_calls) == int(compress_ratio > 1)
     if compressed_calls:
         args, kwargs = compressed_calls[0]

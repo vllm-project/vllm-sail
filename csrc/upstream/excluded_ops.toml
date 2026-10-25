@@ -6,7 +6,7 @@
 # tiers. vllm_sail/native/stubs.py registers each one so a call fails
 # with a named NotImplementedError instead of an AttributeError, and so
 # capability probes answer False instead of raising.
-# Upstream vLLM c0b6f74bee518aeaf5d72b200a0216e72fbb5e7c; compiled tiers a.
+# Upstream vLLM 5df63a7203cdb9328d824a27b682e77c7b9928be; compiled tiers a.
 
 [[op]]
 namespace = "_C_custom_ar"
@@ -225,14 +225,6 @@ tier = "unclaimed"
 reason = "not declared in csrc/upstream/manifest.toml"
 
 [[op]]
-namespace = "_moe_C"
-name = "fused_globalize_align_block_size"
-schema = "fused_globalize_align_block_size(Tensor! topk_idx, Tensor psum,                     int rank_expert_offset, int global_num_experts,                     int local_num_experts, int block_size,                     Tensor! sorted_ids, Tensor! expert_ids,                     Tensor! num_tokens_post_pad,                     Tensor(a!)? scatter_idx=None) -> ()"
-kind = "compute"
-tier = "unclaimed"
-reason = "not declared in csrc/upstream/manifest.toml"
-
-[[op]]
 namespace = "_C"
 name = "fused_kda_chunk"
 schema = "fused_kda_chunk(Tensor qg, Tensor w, Tensor u, Tensor kg_t, Tensor aqk, Tensor decay, Tensor? initial_state, Tensor(a!)? final_state, Tensor! out, Tensor cu_seqlens, Tensor chunk_offsets, float scale, Tensor(b!)? group_state, int groups, Tensor(c!)? checkpoint_state=None, Tensor? checkpoint_offsets=None, Tensor? checkpoint_state_indices=None, Tensor(d!)? state_cache=None, Tensor? state_indices=None, Tensor? has_initial_state=None) -> ()"
@@ -252,22 +244,6 @@ reason = "not declared in csrc/upstream/manifest.toml"
 namespace = "_C"
 name = "fused_kda_prologue"
 schema = "fused_kda_prologue(Tensor q, Tensor k, Tensor v, Tensor raw_g, Tensor raw_beta, Tensor A_log, Tensor dt_bias, Tensor! qg, Tensor! w, Tensor! u, Tensor! kg_t, Tensor! aqk, Tensor! decay, Tensor cu_seqlens, Tensor chunk_indices, Tensor? conv_weight, Tensor(e!)? conv_state, Tensor? conv_state_indices, Tensor? conv_has_initial_state, float scale, float lower_bound) -> ()"
-kind = "compute"
-tier = "unclaimed"
-reason = "not declared in csrc/upstream/manifest.toml"
-
-[[op]]
-namespace = "_C"
-name = "fused_muse_spark_qknorm_rope_kv_insert"
-schema = "fused_muse_spark_qknorm_rope_kv_insert(Tensor! qkv, Tensor positions, int num_heads, int num_kv_heads, int head_dim, float eps, Tensor? cos_sin_cache, int rotary_dim, Tensor? slot_mapping, Tensor!? kv_cache, int block_size, str kv_cache_dtype, Tensor? k_scale=None, Tensor? v_scale=None, Tensor!? q_fp8_out=None, Tensor? q_scale=None) -> ()"
-kind = "compute"
-tier = "unclaimed"
-reason = "not declared in csrc/upstream/manifest.toml"
-
-[[op]]
-namespace = "_C"
-name = "fused_qknorm_rope_cache"
-schema = "fused_qknorm_rope_cache(Tensor! q_out, Tensor! k_out, Tensor! v_out, Tensor qkv, Tensor q_weight, Tensor k_weight, Tensor cos, Tensor sin, Tensor positions, Tensor slot_mapping, Tensor! k_cache, Tensor! v_cache, int head_dim, int num_q_heads, int num_kv_heads, int rotary_pairs, float epsilon, float norm_weight_bias, str kv_cache_dtype=\"auto\", Tensor? k_scale=None, Tensor? v_scale=None) -> ()"
 kind = "compute"
 tier = "unclaimed"
 reason = "not declared in csrc/upstream/manifest.toml"
@@ -508,14 +484,6 @@ reason = "inline asm volatile PTX"
 namespace = "_moe_C"
 name = "moe_wna16_marlin_gemm"
 schema = "moe_wna16_marlin_gemm(Tensor! a, Tensor? c_or_none,Tensor! b_q_weight, Tensor? b_bias_or_none,Tensor! b_scales, Tensor? a_scales, Tensor? global_scale, Tensor? b_zeros_or_none,Tensor! workspace,Tensor sorted_token_ids,Tensor! expert_ids, Tensor! num_tokens_past_padded,Tensor! topk_weights, int moe_block_size, int top_k, bool mul_topk_weights, int b_type_id,int size_m, int size_n, int size_k, bool use_atomic_add,bool use_fp32_reduce, bool is_zp_float,int thread_k, int thread_n, int blocks_per_sm) -> Tensor"
-kind = "compute"
-tier = "unclaimed"
-reason = "not declared in csrc/upstream/manifest.toml"
-
-[[op]]
-namespace = "_C"
-name = "muse_spark_mul_tanh_soft_cap"
-schema = "muse_spark_mul_tanh_soft_cap(Tensor! out, Tensor input, float multiplier, float soft_cap_temp) -> ()"
 kind = "compute"
 tier = "unclaimed"
 reason = "not declared in csrc/upstream/manifest.toml"

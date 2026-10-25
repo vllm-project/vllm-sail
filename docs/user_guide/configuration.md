@@ -89,11 +89,14 @@ root. The SAIL SDK's optional `model_prof` package adds iteration hooks.
 
 ## Version metadata
 
-Release installations should report their version directly. If a source build
-has ambiguous version metadata, `VLLM_VERSION` can state its actual upstream
-release base. For example, use `VLLM_VERSION=0.31.0` only for a checkout verified
-to be based on that release. This override changes the version check; it does
-not make an incompatible checkout supported.
+Commit-pinned installations must report the full source SHA recorded in the
+packaged kernel manifest. Leave `VLLM_VERSION` and `VLLM_VERSION_OVERRIDE` unset
+so the plugin can verify that identity.
+
+For release-tag metadata, `VLLM_VERSION` can state the actual release base when a
+source build reports an ambiguous version. Use `VLLM_VERSION=0.32.0` only for a
+checkout verified against that release. Commit-pinned installations still
+require their full source SHA.
 
 ## Inspect the active environment
 

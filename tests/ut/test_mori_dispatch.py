@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Keep MORI buffer geometry and dispatch flags consistent with quantization."""
+"""Check MORI release FP8/raw dispatch without a main-only FP4 flag."""
 
 from types import SimpleNamespace as NS
 
@@ -9,7 +9,7 @@ from tests.support.source import function
 
 PATCH = "vllm_sail/patch/enhancement/deepep.py"
 CASES = [
-    (True, True, True, True, "fp4", 128, 1, False),
+    (True, True, True, True, "fp8", 1, 4, True),
     (False, True, False, False, "fp8", 1, 4, True),
     (False, False, True, False, "fp8", 32, 4, True),
     (False, False, False, True, "fp8", 1, 4, True),
@@ -81,7 +81,6 @@ def check_dispatch(factory, case):
                 max_tokens_per_rank=256,
                 num_dispatchers=8,
                 use_fp8_dispatch=fp8,
-                use_fp4_dispatch=fp4,
             ),
         )
     ]

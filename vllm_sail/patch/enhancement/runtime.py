@@ -211,7 +211,7 @@ def rejection_sample(
         expanded_local_pos,
         temperature,
         vocab_size,
-        num_logits,
+        num_speculative_steps,
         BLOCK_SIZE=VOCAB_BLOCK_SIZE,
         HAS_DRAFT_LOGITS=has_draft_logits,
     )
@@ -282,7 +282,7 @@ def rejection_sample(
                 expanded_local_pos,
                 temperature,
                 vocab_size,
-                num_logits,
+                num_speculative_steps,
                 vocab_num_blocks,
                 BLOCK_SIZE=VOCAB_BLOCK_SIZE,
                 PADDED_VOCAB_NUM_BLOCKS=padded_vocab_num_blocks,
@@ -426,7 +426,7 @@ def _install(module, owner, attribute, body):
     target = attribute if owner is module else owner.__name__ + "." + attribute
     metadata = dict(
         reason="PPU must reinitialize batches on context-length changes and insert speculative tokens within one warp.",
-        affected_versions=">=0.31.0,<0.32.0",
+        affected_versions=">=0.32.0,<0.33.0",
         remove_when="Upstream includes the context-length invalidation and one-warp insertion fixes.",
     )
     patch(module.__name__, target, **metadata)(dispatch)

@@ -42,9 +42,6 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_moe_C, m) {
       "                     Tensor? maybe_expert_map,"
       "                     Tensor(a!)? scatter_idx=None) -> ()");
 
-#ifdef USE_CUDA
-#endif
-
   // Aligning the number of tokens to be processed by each expert such
   // that it is divisible by the block size, but for the batched case.
   m.def(
@@ -86,8 +83,6 @@ STABLE_TORCH_LIBRARY_IMPL(_moe_C, CUDA, m) {
   m.impl("topk_softplus_sqrt", TORCH_BOX(&topk_softplus_sqrt));
   m.impl("moe_sum", TORCH_BOX(&moe_sum));
   m.impl("moe_align_block_size", TORCH_BOX(&moe_align_block_size));
-#ifdef USE_CUDA
-#endif
   m.impl("batched_moe_align_block_size",
          TORCH_BOX(&batched_moe_align_block_size));
   m.impl("moe_lora_align_block_size", TORCH_BOX(&moe_lora_align_block_size));

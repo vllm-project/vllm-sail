@@ -174,14 +174,14 @@ def test_existing_platform_routes_remain_available(
 @pytest.mark.parametrize(
     "mi3xx,available,reasons,active",
     [
-        (True, True, [], "aiter_flydsl"),
+        (True, True, [], "triton"),
         (True, False, [], "triton"),
         (True, True, ["unsupported dtype"], "triton"),
         (True, True, ["unsupported head shape"], "triton"),
         (False, True, [], "triton"),
     ],
 )
-def test_rocm_auto_flydsl_requires_supported_hardware_model_and_kernel(
+def test_release_rocm_auto_remains_opt_in_for_flydsl(
     resolve, mi3xx, available, reasons, active
 ):
     result, warnings = resolve(
@@ -196,7 +196,7 @@ def test_rocm_auto_flydsl_requires_supported_hardware_model_and_kernel(
 @pytest.mark.parametrize(
     "options,active",
     [
-        ({}, "aiter_flydsl"),
+        ({}, "triton"),
         ({"head_k": 64}, "triton"),
         ({"head_v": 64}, "triton"),
         ({"dtype": "float16"}, "triton"),
@@ -205,19 +205,22 @@ def test_rocm_auto_flydsl_requires_supported_hardware_model_and_kernel(
         ({"mi3xx": False}, "triton"),
     ],
 )
-def test_real_flydsl_reasons_drive_upstream_and_copied_auto_routing(
+def test_real_release_resolvers_preserve_explicit_only_flydsl(
     upstream_source_root, resolve, copied, options, active
 ):
     path = (
         upstream_source_root
         / "vllm/model_executor/layers/mamba/gdn/qwen_gdn_linear_attn.py"
     )
-    helper = function(
-        path, "_aiter_flydsl_unsupported_reasons", {"torch": NS(bfloat16="bfloat16")}
+    # The release predates the main-only helper and automatic MI3xx route.
+    # Execute its actual resolver; do not install a replacement helper.
+    assert not any(
+        isinstance(node, ast.FunctionDef)
+        and node.name == "_aiter_flydsl_unsupported_reasons"
+        for node in ast.parse(path.read_text()).body
     )
     result, warnings = resolve(
         "rocm",
-        helper=helper,
         body=PATCH if copied else path,
         **({"mi3xx": True} | options),
     )

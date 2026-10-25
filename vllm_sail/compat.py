@@ -6,7 +6,7 @@
 :func:`vllm_version_is` from a hot path — vllm-ascend has 28 such call sites
 inside its model runner and attention code and calls it out as a mistake.
 
-Release-tag manifests use the release range below. Main checkpoints require
+Release-tag manifests use the release range below. Commit-pinned checkpoints require
 the full source commit recorded in both ``.github/vllm-main-verified.commit``
 and ``csrc/upstream/manifest.toml``. The latter ships inside the wheel, so the
 same identity check works outside a source checkout.
@@ -22,14 +22,14 @@ from vllm.logger import init_logger
 logger = init_logger(__name__)
 
 #: Inclusive lower bound / exclusive upper bound of the supported vLLM range.
-MIN_VLLM_VERSION = "0.31.0"
-MAX_VLLM_VERSION_EXCLUSIVE = "0.32.0"
+MIN_VLLM_VERSION = "0.32.0"
+MAX_VLLM_VERSION_EXCLUSIVE = "0.33.0"
 
 _checked = False
 
 
 def _verified_upstream_commit() -> str | None:
-    """Read the exact main pin from the same metadata shipped with the kernels."""
+    """Read the exact source pin from the metadata shipped with the kernels."""
     from vllm_sail.native.manifest import load
 
     ref = load().upstream_ref
