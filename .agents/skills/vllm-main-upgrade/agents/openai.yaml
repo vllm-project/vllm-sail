@@ -1,0 +1,3 @@
+interface:
+  display_name: "vLLM SAIL main upgrade"
+  short_description: "Advance pinned vLLM with tested checkpoint history"
