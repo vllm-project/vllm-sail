@@ -3,12 +3,15 @@
 
 from __future__ import annotations
 
+import ast
 import importlib.util
 import sys
 import types
 from pathlib import Path
 
 import pytest
+
+from tests.support.source import definition, function
 
 ROOT = Path(__file__).resolve().parents[2]
 OPTIONAL = ("ncclCommSuspend", "ncclCommResume")
@@ -60,7 +63,12 @@ def runtime(monkeypatch, patch_utils_module):
     class Library:
         exported_functions = [
             types.SimpleNamespace(name=name, restype=None, argtypes=[])
-            for name in ("ncclAllReduce", *OPTIONAL, "ncclCommQueryProperties")
+            for name in (
+                "ncclAllReduce",
+                *OPTIONAL,
+                "ncclGetLastError",
+                "ncclCommQueryProperties",
+            )
         ]
         path_to_library_cache = {}
         path_to_dict_mapping = {}
@@ -163,5 +171,106 @@ def test_repeated_and_distinct_libraries_keep_separate_symbol_caches(runtime):
     assert [f.name for f in alias.exported_functions] == [
         "ncclAllReduce",
         *OPTIONAL,
+        "ncclGetLastError",
         "ncclCommQueryProperties",
     ]
+
+
+@pytest.mark.parametrize("backend", ["ppu", "cuda", "rocm"])
+@pytest.mark.parametrize("present", [False, True])
+def test_diagnostic_symbol_is_optional_on_every_backend(runtime, backend, present):
+    runtime.platform.backend = backend
+    symbols = (*OPTIONAL, "ncclGetLastError") if present else OPTIONAL
+    library = runtime.library(symbols=symbols)
+    assert library.has_symbol("ncclAllReduce")
+    assert all(library.has_symbol(name) for name in OPTIONAL)
+    assert library.has_symbol("ncclGetLastError") is present
+
+
+@pytest.mark.upstream_source
+@pytest.mark.parametrize("copied", [False, True])
+@pytest.mark.parametrize("backend", ["cuda", "rocm"])
+@pytest.mark.parametrize("present", [False, True])
+def test_actual_provider_allows_missing_diagnostic_symbol(
+    runtime, upstream_source_root, copied, backend, present
+):
+    path = (
+        upstream_source_root / "vllm/distributed/device_communicators/pynccl_wrapper.py"
+    )
+    cls = definition(path, "NCCLLibrary")
+    (exported,) = [
+        node
+        for node in cls.body
+        if isinstance(node, ast.Assign)
+        and any(
+            getattr(target, "id", None) == "exported_functions"
+            for target in node.targets
+        )
+    ]
+    names = {
+        node.args[0].value
+        for node in ast.walk(exported)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "Function"
+    }
+    assert {"ncclAllReduce", "ncclGetLastError"} <= names
+    if not copied:
+        runtime.Library.__init__ = function(
+            path, "NCCLLibrary.__init__", vars(runtime.wrapper)
+        )
+    runtime.platform.backend = backend
+    symbols = (*OPTIONAL, "ncclGetLastError") if present else OPTIONAL
+    library = runtime.library(symbols=symbols)
+    assert library.has_symbol("ncclAllReduce")
+    assert library.has_symbol("ncclGetLastError") is present
+    assert all(library.has_symbol(name) for name in OPTIONAL)
+
+
+@pytest.mark.upstream_source
+@pytest.mark.parametrize(
+    "result,message,expected",
+    [
+        (7, None, None),
+        (7, b"device detail", "device detail"),
+        (7, b"\xff", "\ufffd"),
+        (0, b"unused", None),
+    ],
+)
+def test_actual_error_reporting_keeps_optional_details(
+    upstream_source_root, result, message, expected
+):
+    path = (
+        upstream_source_root / "vllm/distributed/device_communicators/pynccl_wrapper.py"
+    )
+    calls = []
+
+    def base(code):
+        calls.append(("base", code))
+        return b"base failure"
+
+    def last(comm):
+        calls.append(("last", comm))
+        return message
+
+    funcs = {"ncclGetErrorString": base}
+    if message is not None:
+        funcs["ncclGetLastError"] = last
+    library = types.SimpleNamespace(_funcs=funcs)
+    base_getter = function(path, "NCCLLibrary.ncclGetErrorString", {})
+    last_getter = function(path, "NCCLLibrary.ncclGetLastError", {})
+    library.ncclGetErrorString = lambda code: base_getter(library, code)
+    library.ncclGetLastError = lambda: last_getter(library)
+    check = function(path, "NCCLLibrary.NCCL_CHECK", {})
+    if result == 0:
+        check(library, result)
+        assert calls == []
+    else:
+        with pytest.raises(RuntimeError) as error:
+            check(library, result)
+        assert str(error.value) == "NCCL error: base failure" + (
+            "\nLast error:\n" + expected if expected is not None else ""
+        )
+        assert calls == [("base", 7)] + (
+            [("last", None)] if message is not None else []
+        )
