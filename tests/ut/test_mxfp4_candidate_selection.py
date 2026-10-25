@@ -40,6 +40,7 @@ def selection(
     batched=False,
     supports=lambda *_: True,
     upstream=None,
+    lora=False,
 ):
     calls, warnings = [], []
     native_keys = {b: "mxfp4" if b.name.endswith("MXFP4") else None for b in Backend}
@@ -107,16 +108,32 @@ def selection(
             upstream, "_backend_activation_key", namespace
         )
         function(PATCH, "_backend_activation_key", namespace)
+        constants = [
+            node
+            for node in ast.parse(upstream.read_text()).body
+            if isinstance(node, ast.Assign)
+            and any(
+                getattr(target, "id", None) == "TRTLLM_BACKENDS"
+                for target in node.targets
+            )
+        ]
+        assert len(constants) == 1
+        exec(
+            compile(ast.Module(body=constants, type_ignores=[]), str(upstream), "exec"),
+            namespace,
+        )
         for helper in (
             "_filter_by_activation",
             "_get_requested_backends",
             "_warn_on_bf16_fallback",
+            "_requested_kernel_cls",
             "_return_or_raise",
         ):
             function(upstream, helper, namespace)
     config = NS(
         moe_backend="explicit" if explicit else "auto",
         moe_parallel_config=NS(use_batched_activation_format=batched),
+        is_lora_enabled=lora,
     )
     result = function(PATCH, "select_mxfp4_moe_backend", namespace)(
         config, activation_key=requested
@@ -144,6 +161,21 @@ def test_emulation_uses_checkpoint_activation_without_bf16_warning():
     (backend, _), calls, warnings, format = selection([Backend.EMULATION])
     assert backend is Backend.EMULATION
     assert calls == [(backend, "weights", "fp8", format)]
+    assert not warnings
+
+
+@pytest.mark.upstream_source
+@pytest.mark.parametrize("lora", [False, True])
+def test_requested_kernel_helper_retains_the_ppu_candidate(real_oracle_source, lora):
+    (backend, _), calls, warnings, format = selection(
+        [Backend.PPU_DEEPGEMM_MXFP4_BF16],
+        explicit=True,
+        requested=None,
+        upstream=real_oracle_source,
+        lora=lora,
+    )
+    assert backend is Backend.PPU_DEEPGEMM_MXFP4_BF16
+    assert calls == [(backend, "weights", None, format)]
     assert not warnings
 
 

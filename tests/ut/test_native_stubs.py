@@ -91,6 +91,14 @@ def test_load_schemas_tolerates_an_ungenerated_file(tmp_path: Path) -> None:
     assert stubs.load_schemas(tmp_path / "excluded_ops.toml") == ()
 
 
+def test_generated_stub_schemas_parse_with_installed_torch() -> None:
+    torch = pytest.importorskip("torch")
+    schemas = stubs.load_schemas()
+    assert schemas, "the generated excluded-op schema inventory is empty"
+    for op in schemas:
+        torch._C.parse_schema(op.schema)
+
+
 @pytest.mark.parametrize(
     ("kind", "is_probe"),
     [("probe", True), ("compute", False), ("", False), ("capability", False)],
