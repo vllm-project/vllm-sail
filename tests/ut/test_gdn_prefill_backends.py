@@ -3,6 +3,8 @@
 
 import ast
 import inspect
+import sys
+from types import ModuleType
 from types import SimpleNamespace as NS
 
 import pytest
@@ -49,7 +51,7 @@ def test_e2e_platform_double_preserves_resolver_routes(
 
 
 @pytest.fixture
-def resolve():
+def resolve(monkeypatch):
     def run(
         device,
         backend="auto",
@@ -60,6 +62,10 @@ def resolve():
         available=True,
         pla=True,
         capability=89,
+        mi3xx=False,
+        unsupported_reasons=(),
+        helper=None,
+        body=PATCH,
     ):
         warnings = []
         platform = NS(
@@ -92,7 +98,19 @@ def resolve():
             "logger": NS(warning_once=lambda *args: warnings.append(args)),
             "_pla_prefill_supported": lambda _: pla,
         }
-        result = function(PATCH, "_resolve_gdn_prefill_backend", namespace)(config)
+
+        def reasons(candidate, key_dim, value_dim):
+            assert candidate is config
+            assert (key_dim, value_dim) == (head_k, head_v)
+            if helper is not None:
+                return helper(candidate, key_dim, value_dim)
+            return list(unsupported_reasons)
+
+        namespace["_aiter_flydsl_unsupported_reasons"] = reasons
+        rocm = ModuleType("vllm.platforms.rocm")
+        rocm.on_mi3xx = lambda: mi3xx
+        monkeypatch.setitem(sys.modules, rocm.__name__, rocm)
+        result = function(body, "_resolve_gdn_prefill_backend", namespace)(config)
         return result, warnings
 
     return run
@@ -113,7 +131,12 @@ def test_rocm_explicit_aiter_prefill_requires_importable_kernel(resolve):
     "shape", [{"head_k": 64}, {"head_v": 64}, {"dtype": "float16"}]
 )
 def test_rocm_unsupported_aiter_shapes_warn_and_fall_back(resolve, shape):
-    result, warnings = resolve("rocm", "aiter_flydsl", **shape)
+    result, warnings = resolve(
+        "rocm",
+        "aiter_flydsl",
+        unsupported_reasons=["unsupported configuration"],
+        **shape,
+    )
     assert result == ("aiter_flydsl", "triton")
     assert len(warnings) == 1
     assert "Falling back to Triton/FLA" in warnings[0][0]
@@ -145,6 +168,60 @@ def test_existing_platform_routes_remain_available(
 ):
     result, warnings = resolve(device, backend, **options)
     assert result == (backend, active)
+    assert not warnings
+
+
+@pytest.mark.parametrize(
+    "mi3xx,available,reasons,active",
+    [
+        (True, True, [], "aiter_flydsl"),
+        (True, False, [], "triton"),
+        (True, True, ["unsupported dtype"], "triton"),
+        (True, True, ["unsupported head shape"], "triton"),
+        (False, True, [], "triton"),
+    ],
+)
+def test_rocm_auto_flydsl_requires_supported_hardware_model_and_kernel(
+    resolve, mi3xx, available, reasons, active
+):
+    result, warnings = resolve(
+        "rocm", mi3xx=mi3xx, available=available, unsupported_reasons=reasons
+    )
+    assert result == ("auto", active)
+    assert not warnings
+
+
+@pytest.mark.upstream_source
+@pytest.mark.parametrize("copied", [False, True])
+@pytest.mark.parametrize(
+    "options,active",
+    [
+        ({}, "aiter_flydsl"),
+        ({"head_k": 64}, "triton"),
+        ({"head_v": 64}, "triton"),
+        ({"dtype": "float16"}, "triton"),
+        ({"head_k": 64, "dtype": "float16"}, "triton"),
+        ({"available": False}, "triton"),
+        ({"mi3xx": False}, "triton"),
+    ],
+)
+def test_real_flydsl_reasons_drive_upstream_and_copied_auto_routing(
+    upstream_source_root, resolve, copied, options, active
+):
+    path = (
+        upstream_source_root
+        / "vllm/model_executor/layers/mamba/gdn/qwen_gdn_linear_attn.py"
+    )
+    helper = function(
+        path, "_aiter_flydsl_unsupported_reasons", {"torch": NS(bfloat16="bfloat16")}
+    )
+    result, warnings = resolve(
+        "rocm",
+        helper=helper,
+        body=PATCH if copied else path,
+        **({"mi3xx": True} | options),
+    )
+    assert result == ("auto", active)
     assert not warnings
 
 

@@ -28,7 +28,7 @@ def row_shard_case():
         compressed_calls, shard_calls = [], []
         table, slot_mapping, compressed_slots = object(), object(), object()
         shard_sizes = [1] * 8
-        config = object()
+        config = NS(attention_config=NS(indexer_tp_shard_min_rows=37))
         common = NS(
             num_reqs=1,
             num_actual_tokens=8,
@@ -111,7 +111,7 @@ def check_result(body, row_shard_case, compress_ratio, shard):
     assert result.prefill.row_shard_sizes is (shard_sizes if shard else None)
     assert len(shard_calls) == int(shard)
     if shard:
-        assert shard_calls[0] == (Values([17]), Values([8]), compress_ratio, 8)
+        assert shard_calls[0] == (Values([17]), Values([8]), compress_ratio, 8, 37)
     assert len(compressed_calls) == int(compress_ratio > 1)
     if compressed_calls:
         args, kwargs = compressed_calls[0]

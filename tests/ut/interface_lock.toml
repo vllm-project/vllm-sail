@@ -11,7 +11,7 @@
 schema = 1
 vllm_version_range = ">=0.31.0,<0.32.0"
 key_interface_count = 10
-target_count = 264
+target_count = 265
 
 [[key_interface]]
 symbol = "vllm.platforms.interface.PlatformEnum"
@@ -53,7 +53,7 @@ fingerprint = "sha256:d4c578b62f838aab4803f4fb10dd53b74ff5844ff014b206c8ff31a778
 symbol = "vllm.v1.attention.backends.registry.AttentionBackendEnum"
 kind = "enum"
 present = true
-fingerprint = "sha256:ca12a41352cbf6811bcc1bd59ad816b98f5bb0152697cbe9068a41ac3c20284c"
+fingerprint = "sha256:df417ce2039f7999e739b8208cc377ef0b9ccb8389738d7d40ae588c1a43ce92"
 
 [[key_interface]]
 symbol = "vllm.v1.attention.backends.registry.register_backend"
@@ -119,7 +119,7 @@ kind = "module"
 module = "vllm/envs.py"
 symbol = "environment_variables"
 present = true
-fingerprint = "sha256:033471a918e60b693a980e90e92b86af730665767cf69a4626b657e2478d30de"
+fingerprint = "sha256:2bf36d3dc994f7137266e2afeae9904d358c2b48b8403ed37b22f9044921b0bb"
 
 [[patch_target]]
 name = "vllm.lora.layers.utils.try_get_optimal_moe_config"
@@ -583,7 +583,7 @@ kind = "module"
 module = "vllm/model_executor/layers/fused_moe/oracle/mxfp4.py"
 symbol = "convert_weight_to_mxfp4_moe_kernel_format"
 present = true
-fingerprint = "sha256:dfded34bd87802f66b63bb0d8ce0ba17fb10b4384e518d2213cd272a66218400"
+fingerprint = "sha256:5049f0c0a015d2b34058f378beac9fb2aed1296bcfa35213331276b81bffcf18"
 
 [[patch_target]]
 name = "vllm.model_executor.layers.fused_moe.oracle.mxfp4.make_mxfp4_moe_quant_config"
@@ -767,7 +767,7 @@ kind = "module"
 module = "vllm/model_executor/layers/linear.py"
 symbol = "dispatch_unquantized_gemm"
 present = true
-fingerprint = "sha256:70696c5e110409041f69e463f5473e7e6bdc9ceee29cfaa5a8d51205f348e247"
+fingerprint = "sha256:59ddc52a81a5dd80f6e14f0d8c5d93a438926c95fd62ebc4e70bc7500212f96e"
 
 [[patch_target]]
 name = "vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn.ChunkGatedDeltaRule.__init__"
@@ -2096,6 +2096,14 @@ module = "vllm/v1/attention/ops/triton_decode_attention.py"
 symbol = "_decode_grouped_att_m_fwd"
 present = true
 fingerprint = "sha256:1b8fd9c5d097cb8dff521bc36d38b269028ddcd5f1a18dada8e637c9ac2f6dc8"
+
+[[patch_target]]
+name = "vllm.v1.engine.async_llm.AsyncLLM.shutdown"
+kind = "class"
+module = "vllm/v1/engine/async_llm.py"
+symbol = "AsyncLLM.shutdown"
+present = true
+fingerprint = "sha256:10d2c7e2ec7542133b7972aa028326b3b92b7cd9e966ecf681e993d784be7dc0"
 
 [[patch_target]]
 name = "vllm.v1.kv_cache_interface.HiddenStateCacheSpec.__eq__"

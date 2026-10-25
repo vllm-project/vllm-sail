@@ -862,8 +862,15 @@ def test_deepseek_config_preserves_dense_channelwise_patterns_for_mtp(modules):
     ],
 )
 @pytest.mark.parametrize("explicit_manager", [False, True])
+@pytest.mark.parametrize(
+    "consumer_name",
+    [
+        "vllm.model_executor.layers.fused_moe.oracle.fp8",
+        "vllm.model_executor.layers.quantization.modelopt_block_quant",
+    ],
+)
 def test_deepep_factory_uses_bound_globals_and_quantized_protocol(
-    modules, quant_dtype, block, expected, explicit_manager
+    modules, quant_dtype, block, expected, explicit_manager, consumer_name
 ):
     """Execute the installed factory, including its ordinary non-EP branch."""
     ns = types.SimpleNamespace
@@ -894,7 +901,7 @@ def test_deepep_factory_uses_bound_globals_and_quantized_protocol(
         DEEPEP_QUANT_BLOCK_SHAPE=[128, 128],
     )
     consumer = modules(
-        "vllm.model_executor.layers.fused_moe.oracle.fp8",
+        consumer_name,
         maybe_make_prepare_finalize=original,
     )
     modules(

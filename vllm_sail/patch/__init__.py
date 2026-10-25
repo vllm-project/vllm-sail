@@ -61,6 +61,8 @@ def install() -> None:
     import importlib
 
     for category in _CATEGORIES:
-        importlib.import_module(f"{__name__}.{category}")
+        module = importlib.import_module(f"{__name__}.{category}")
+        if install_category := getattr(module, "install", None):
+            install_category()
 
     _installed = True
