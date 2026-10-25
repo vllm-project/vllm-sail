@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Keep SM10x tuning separate from PPU and other packed decode launches."""
+"""Verify release packed decode tiling across CUDA, ROCm and PPU shapes."""
 
 from __future__ import annotations
 
@@ -19,9 +19,9 @@ CASES = [
     ("ppu", 80, 16, "fp32", 128, 32),
     ("ppu", 89, 17, "fp32", 128, 32),
     ("cuda", 90, 16, "fp32", 128, 32),
-    ("cuda", 100, 16, "fp32", 128, 4),
-    ("cuda", 100, 17, "fp32", 128, 8),
-    ("cuda", 100, 16, "bf16", 128, 4),
+    ("cuda", 100, 16, "fp32", 128, 32),
+    ("cuda", 100, 17, "fp32", 128, 32),
+    ("cuda", 100, 16, "bf16", 128, 32),
     ("cuda", 100, 17, "bf16", 128, 32),
     ("cuda", 100, 16, "fp32", 64, 32),
     ("rocm", 0, 16, "fp32", 128, 32),
@@ -100,7 +100,7 @@ def run_decode(path, modules, device, capability, batch, dtype, width, expected)
     assert kwargs["scale"] == 0.25 and kwargs["USE_QK_L2NORM_IN_KERNEL"] is True
     assert kwargs["SPLIT_BATCH_HEAD_GRID"] is split
     assert kwargs["num_warps"] == 1 and kwargs["num_stages"] == 3
-    assert probes == ([(100, 3)] if width == 128 and platform.is_cuda() else [])
+    assert probes == []  # This release does not select an SM10x tile.
 
 
 @pytest.mark.parametrize("device,capability,batch,dtype,width,expected", CASES)

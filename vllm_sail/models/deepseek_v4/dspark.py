@@ -103,6 +103,12 @@ def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
             break
     # PPU MODIFICATION: end
 
+    tp_size = get_tensor_model_parallel_world_size()
+    tp_rank = get_tensor_model_parallel_rank()
+    n_local_head = self.config.num_attention_heads // tp_size
+    head_start = n_local_head * tp_rank
+    head_end = n_local_head * (tp_rank + 1)
+
     for name, loaded_weight in weights:
         mapped = self._remap_dspark_name(name)
         if mapped is None:
@@ -124,13 +130,6 @@ def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
                 # PPU MODIFICATION: end
             )
             name = name.removesuffix(".scale") + suffix
-        if ".shared_experts." in name:
-            experts = self.model.layers[extract_layer_index(name)].ffn.experts
-            if getattr(experts, "has_fused_shared_experts", False):
-                loaded_params.add(
-                    experts.load_shared_expert_weight(name, loaded_weight)
-                )
-                continue
         if ".shared_experts.w2" in name:
             name = name.replace(".shared_experts.w2", ".shared_experts.down_proj")
         if self.pad_shared_expert and ".shared_experts." in name:
@@ -185,6 +184,11 @@ def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
             loaded_params.add(name)
             break
         else:
+            if "attn_sink" in name:
+                narrow = loaded_weight[head_start:head_end]
+                params_dict[name][: narrow.shape[0]].copy_(narrow)
+                loaded_params.add(name)
+                continue
             if name.endswith(".ffn.gate.bias"):
                 name = name.replace(
                     ".ffn.gate.bias", ".ffn.gate.e_score_correction_bias"
@@ -200,6 +204,7 @@ def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
     if self.model.confidence_head is not None and not loaded_confidence_head:
         self.model.confidence_head = None
     # PPU MODIFICATION: end
+    self.process_weights_after_loading()
     logger.info_once("DSpark draft model loaded: %d params", len(loaded_params))
     return loaded_params
 

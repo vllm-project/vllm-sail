@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Speculative steps and total logits rows are different launch dimensions."""
+"""The release kernels receive speculative steps rather than total logits rows."""
 
 import inspect
 from types import SimpleNamespace as NS
@@ -29,8 +29,8 @@ def check_launches(body, block, draft, fp64, upstream=None):
                 assert (
                     inspect.signature(kernel)
                     .bind(*args, **kwargs)
-                    .arguments["num_logits"]
-                    == 13
+                    .arguments["num_speculative_steps"]
+                    == 7
                 )
 
         return record
@@ -67,11 +67,11 @@ def check_launches(body, block, draft, fp64, upstream=None):
         use_fp64=fp64,
     )
     assert len(calls["stats"]) == 1
-    assert calls["stats"][0][0][-1] == 13
+    assert calls["stats"][0][0][-1] == 7
     assert calls["stats"][0][1]["HAS_DRAFT_LOGITS"] is draft
     assert len(calls["residual"]) == int(block and draft)
     if calls["residual"]:
-        assert calls["residual"][0][0][-2:] == (13, 2)
+        assert calls["residual"][0][0][-2:] == (7, 2)
     assert sampled.shape == (2, 8) and count.shape == (2,)
     assert calls["resample"][0][1]["USE_FP64"] is fp64
     assert calls["resample"][0][1]["USE_BLOCK_VERIFICATION"] is block
@@ -80,7 +80,7 @@ def check_launches(body, block, draft, fp64, upstream=None):
 @pytest.mark.parametrize("block", [False, True])
 @pytest.mark.parametrize("draft", [False, True])
 @pytest.mark.parametrize("fp64", [False, True])
-def test_copied_sampler_passes_total_rows_to_both_statistics_kernels(
+def test_copied_sampler_passes_release_step_count_to_statistics_kernels(
     block, draft, fp64
 ):
     check_launches(PATCH, block, draft, fp64)
@@ -91,7 +91,7 @@ def test_copied_sampler_passes_total_rows_to_both_statistics_kernels(
 @pytest.mark.parametrize("block", [False, True])
 @pytest.mark.parametrize("draft", [False, True])
 @pytest.mark.parametrize("fp64", [False, True])
-def test_real_kernel_signatures_receive_total_logits_rows(
+def test_real_kernel_signatures_receive_release_speculative_steps(
     upstream_source_root, copied, block, draft, fp64
 ):
     upstream = upstream_source_root / UPSTREAM

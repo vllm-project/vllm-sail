@@ -36,7 +36,7 @@ if TYPE_CHECKING:
 
 _QMODULE = "vllm.model_executor.layers.quantization.mxfp4"
 _OMODULE = "vllm.model_executor.layers.fused_moe.oracle.mxfp4"
-AFFECTED_VERSIONS = ">=0.31.0,<0.32.0"
+AFFECTED_VERSIONS = ">=0.32.0,<0.33.0"
 
 _PPU_BACKEND_NAMES = (
     "PPU_DEEPGEMM_MXFP4",

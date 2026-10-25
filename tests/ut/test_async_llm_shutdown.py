@@ -150,12 +150,11 @@ def test_install_records_real_target_and_reapplication_guard(
 
 @pytest.mark.upstream_source
 @pytest.mark.parametrize(
-    "unexpected_death,rank_retired,engine_error",
+    "unexpected_death,engine_error",
     [
-        (False, False, True),
-        (True, False, True),
-        (True, True, True),
-        (True, True, False),
+        (False, True),
+        (True, True),
+        (True, False),
     ],
 )
 def test_real_output_loop_distinguishes_shutdown_from_engine_failure(
@@ -163,7 +162,6 @@ def test_real_output_loop_distinguishes_shutdown_from_engine_failure(
     shutdown_module,
     upstream_source_root,
     unexpected_death,
-    rank_retired,
     engine_error,
 ):
     namespace = {"asyncio": asyncio}
@@ -174,13 +172,6 @@ def test_real_output_loop_distinguishes_shutdown_from_engine_failure(
     shutdown = function(path, "AsyncLLM.shutdown", namespace)
     start = function(path, "AsyncLLM._run_output_handler", namespace)
     modules(monkeypatch, cancel=namespace["cancel_task_threadsafe"])
-    middleware = (
-        upstream_source_root / "vllm/entrypoints/serve/elastic_ep/middleware.py"
-    )
-    for name in ("get_elastic_ep_rank_retired", "set_elastic_ep_rank_retired"):
-        namespace[name] = function(middleware, name, namespace)
-    namespace["set_elastic_ep_rank_retired"](rank_retired)
-    assert namespace["get_elastic_ep_rank_retired"]() is rank_retired
     for name in ("VLLMError", "VLLMServerError"):
         namespace[name] = function(
             upstream_source_root / "vllm/exceptions.py", name, namespace
@@ -250,14 +241,8 @@ def test_real_output_loop_distinguishes_shutdown_from_engine_failure(
             pass
         if unexpected_death:
             assert propagated == [failure]
-            if rank_retired and engine_error:
-                assert errors == []
-                assert notices == [
-                    "[Elastic EP] Retired rank stopped receiving EngineCore outputs"
-                ]
-            else:
-                assert errors == ["AsyncLLM output_handler failed."]
-                assert notices == []
+            assert errors == ["AsyncLLM output_handler failed."]
+            assert notices == []
         else:
             assert errors == [] and notices == [] and propagated == []
             assert instance.output_handler.cancelled()

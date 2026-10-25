@@ -19,6 +19,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.ut.test_upstream_version_precheck import SUPPORTED_RANGE
+
 pytest.importorskip("torch", reason="requires torch")
 pytest.importorskip("vllm", reason="requires vLLM")
 
@@ -476,7 +478,7 @@ def test_phase4_metadata_shape(installed) -> None:
     ]
     assert len(records) >= 30, [r.target for r in records]
     for record in records:
-        assert record.affected_versions == ">=0.31.0,<0.32.0", record.target
+        assert record.affected_versions == SUPPORTED_RANGE, record.target
         assert record.reason.strip(), record.target
         assert record.remove_when.strip(), record.target
         assert record.remove_when.strip().lower() != "todo", record.target

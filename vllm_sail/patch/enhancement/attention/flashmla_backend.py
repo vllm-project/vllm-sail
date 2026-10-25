@@ -32,7 +32,7 @@ from vllm.v1.attention.backends.mla import flashmla as _flashmla_backend
 import vllm_sail.envs as ppu_envs
 from vllm_sail.patch.utils import patch
 
-_AFFECTED = ">=0.31.0,<0.32.0"
+_AFFECTED = ">=0.32.0,<0.33.0"
 _MODULE = "vllm.v1.attention.backends.mla.flashmla"
 
 #: Hard-coded SM count the fork uses for the PPU MLA scheduler buffers.

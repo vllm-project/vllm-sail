@@ -62,7 +62,7 @@ def test_quantizer_forwards_new_layout_keyword(monkeypatch, ppu, transpose):
         ("FLASHINFER_CUTLASS", [128, 128], False),
     ],
 )
-def test_actual_fp8_config_layout_reaches_the_group_quantizer(
+def test_actual_release_config_uses_the_provider_default_scale_layout(
     monkeypatch, upstream_source_root, ppu, backend, block, transpose
 ):
     device = platform(monkeypatch, ppu)
@@ -95,7 +95,7 @@ def test_actual_fp8_config_layout_reaches_the_group_quantizer(
         gemm1_alpha=alpha,
         gemm1_beta=beta,
     )
-    assert config.is_scale_transposed is transpose
+    assert not hasattr(config, "is_scale_transposed")
     assert config.gemm1_alpha is alpha and config.gemm1_beta is beta
     calls = []
     values = NS(size=lambda axis: 512)
@@ -124,6 +124,9 @@ def test_actual_fp8_config_layout_reaches_the_group_quantizer(
         "fp8",
         False,
         block,
-        is_scale_transposed=config.is_scale_transposed,
     ) == (values, scales)
-    assert calls == [(tensor, 128, {"column_major_scales": transpose})]
+    assert calls == [(tensor, 128, {})]
+    # The real release provider rejects this later-main keyword. The wrapper
+    # still forwards arbitrary keywords, so unsupported input must fail here.
+    with pytest.raises(TypeError, match="is_scale_transposed"):
+        quantize(tensor, None, "fp8", False, block, is_scale_transposed=transpose)

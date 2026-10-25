@@ -46,16 +46,20 @@ quoting prevents the shell from interpreting the semicolon as a command boundary
 
 Install a vLLM build with `VLLM_TARGET_DEVICE=empty` in the same environment.
 This lets the PPU plugin provide the native operations used by the engine.
-The plugin accepts `>=0.31.0,<0.32.0`; its generated upstream kernel sources use
-**v0.31.0** as the reproducible source baseline.
+The supported release line is `>=0.32.0,<0.33.0`. Build the exact upstream commit
+recorded in [the verified pin](../../.github/vllm-main-verified.commit) and
+[kernel manifest](../../csrc/upstream/manifest.toml); both records must agree.
+**v0.32.0** is the release baseline for this line.
 
 Use a matching wheel supplied with your PPU environment, or build that upstream
-release from source. For a source build, first prepare vLLM's build and runtime
-dependencies using the SDK's package constraints. Then run from the vLLM checkout:
+source pin. For a source build, prepare vLLM's build and runtime dependencies
+using the SDK's package constraints, including the Rust toolchain required by
+that checkout. Then run from the vLLM checkout:
 
 ```bash
 python tools/use_existing_torch.py
-VLLM_TARGET_DEVICE=empty python -m pip install --no-build-isolation --no-deps .
+VLLM_REQUIRE_RUST_FRONTEND=1 VLLM_TARGET_DEVICE=empty \
+  python -m pip install --no-build-isolation --no-deps .
 ```
 
 The upstream helper removes dependency pins that would replace the active torch

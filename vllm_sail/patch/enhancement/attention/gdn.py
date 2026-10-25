@@ -14,7 +14,7 @@ from vllm_sail.patch.utils import PATCH_MARKER, patch
 
 _META = dict(
     reason="PPU GDN uses PLA for supported decode/prefill layouts and Triton for other shapes.",
-    affected_versions=">=0.31.0,<0.32.0",
+    affected_versions=">=0.32.0,<0.33.0",
     remove_when="GDN exposes platform backend registration for PLA prefill and recurrent kernels.",
 )
 
@@ -122,17 +122,6 @@ def fused_recurrent_gated_delta_rule_packed_decode(
             f"Packed decode kernel only supports NK=1 (got K={K}, BK={BK})."
         )
     BV = min(triton.next_power_of_2(V), 32)
-    if (
-        K == V == 128
-        and current_platform.is_cuda()
-        and current_platform.is_device_capability_family(100, device_id=dev.index)
-    ):
-        # Tuned on GB300; validated on GB200 and with 148 SMs.
-        # MRv2 decode warmup/graph capture compiles the reachable BV variants.
-        if B * HV <= 64:
-            BV = 4
-        elif initial_state.dtype == torch.float32:
-            BV = 8
     num_stages = 3
     num_warps = 1
 
@@ -520,7 +509,7 @@ def _resolve_gdn_prefill_backend(
     * Blackwell (SM10.x) with ``head_k_dim == 128``;
 
     AITER FlyDSL GDN prefill kernels are chosen when:
-    * "aiter_flydsl" is requested, or "auto" is requested on gfx942/gfx950;
+    * "aiter_flydsl" is requested; (opt-in only)
     * ROCm AITER exposes the optimized VK prefill API and FlyDSL kernels;
     * the model uses BF16 activations with ``head_k_dim == head_v_dim == 128``.
     # PPU MODIFICATION: begin
@@ -557,28 +546,24 @@ def _resolve_gdn_prefill_backend(
                     "that VLLM_ROCM_USE_AITER=1, that this is a CDNA 3 or "
                     "newer GPU, and that the installed AITER exports them."
                 )
-            reasons = _aiter_flydsl_unsupported_reasons(
-                vllm_config, head_k_dim, head_v_dim
-            )
-            if reasons:
+            if head_k_dim != 128 or head_v_dim != 128:
                 logger.warning_once(
-                    "GDN prefill backend 'aiter_flydsl' was requested but %s. "
+                    "GDN prefill backend 'aiter_flydsl' was requested but "
+                    "linear head dims are K=%s V=%s; FlyDSL requires 128/128. "
                     "Falling back to Triton/FLA.",
-                    "; ".join(reasons),
+                    head_k_dim,
+                    head_v_dim,
+                )
+                return backend, "triton"
+            if vllm_config.model_config.dtype != torch.bfloat16:
+                logger.warning_once(
+                    "GDN prefill backend 'aiter_flydsl' was requested but "
+                    "model dtype is %s; FlyDSL requires bfloat16. "
+                    "Falling back to Triton/FLA.",
+                    vllm_config.model_config.dtype,
                 )
                 return backend, "triton"
             return backend, "aiter_flydsl"
-        if backend == "auto":
-            from vllm.platforms.rocm import on_mi3xx
-
-            if (
-                on_mi3xx()
-                and not _aiter_flydsl_unsupported_reasons(
-                    vllm_config, head_k_dim, head_v_dim
-                )
-                and rocm_aiter_ops.is_gdn_flydsl_prefill_available()
-            ):
-                return backend, "aiter_flydsl"
         return backend, "triton"
 
     if backend == "aiter_flydsl":

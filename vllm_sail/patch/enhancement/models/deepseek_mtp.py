@@ -37,7 +37,7 @@ from vllm.model_executor.models.utils import (
 
 from vllm_sail.patch.utils import patch
 
-_AFFECTED = ">=0.31.0,<0.32.0"
+_AFFECTED = ">=0.32.0,<0.33.0"
 
 # Captured before patching so the delegating replacement can call upstream.
 _upstream_init = DeepSeekMTP.__init__
