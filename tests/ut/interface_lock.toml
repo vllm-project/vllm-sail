@@ -47,13 +47,13 @@ fingerprint = "sha256:a7a2a11aa14d71e74281ae5b14ba89ea8d0833f028349f9699792439b6
 symbol = "vllm.v1.attention.backend.AttentionMetadataBuilder"
 kind = "class"
 present = true
-fingerprint = "sha256:541e81fbf30b80d2d22409554c97e8d8be46af6866fc7dfdd7b23634c5bfb1d8"
+fingerprint = "sha256:d4c578b62f838aab4803f4fb10dd53b74ff5844ff014b206c8ff31a7785ed3a5"
 
 [[key_interface]]
 symbol = "vllm.v1.attention.backends.registry.AttentionBackendEnum"
 kind = "enum"
 present = true
-fingerprint = "sha256:7754e7249f2dec1e3b385832a904e0293ea2e8101ebe6f1005d65b26642c4991"
+fingerprint = "sha256:ca12a41352cbf6811bcc1bd59ad816b98f5bb0152697cbe9068a41ac3c20284c"
 
 [[key_interface]]
 symbol = "vllm.v1.attention.backends.registry.register_backend"
@@ -119,7 +119,7 @@ kind = "module"
 module = "vllm/envs.py"
 symbol = "environment_variables"
 present = true
-fingerprint = "sha256:b290f6fa01a2478035878028c26e656a99bc831144ffcd7231c78989b4cab6ce"
+fingerprint = "sha256:033471a918e60b693a980e90e92b86af730665767cf69a4626b657e2478d30de"
 
 [[patch_target]]
 name = "vllm.lora.layers.utils.try_get_optimal_moe_config"

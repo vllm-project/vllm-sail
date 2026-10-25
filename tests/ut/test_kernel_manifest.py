@@ -175,7 +175,7 @@ def test_vendored_path_mirrors_upstream_layout(path: str, vendored: str) -> None
 
 def test_is_moe_is_exactly_the_moe_subtree(shipped: m.Manifest) -> None:
     for entry in shipped:
-        assert entry.is_moe == entry.path.startswith("csrc/libtorch_stable/moe/")
+        assert entry.is_moe == entry.path.startswith("csrc/moe/")
 
 
 def test_compiled_sources_partition_the_compiled_entries(shipped: m.Manifest) -> None:
@@ -247,7 +247,7 @@ def test_model_kernel_dependencies_are_compiled_and_bound(shipped, op):
     """Check the generated registration as well as the requested build set."""
     assert op in shipped.ops(shipped.compiled())
     root = Path(__file__).parents[2]
-    bindings = (root / "csrc/upstream/libtorch_stable/torch_bindings.cpp").read_text()
+    bindings = (root / "csrc/upstream/torch_bindings.cpp").read_text()
     assert f'"{op}(' in bindings or f'"{op}( ' in bindings
     namespace = "_C_cache_ops" if op == "concat_and_cache_mla_rope_fused" else "_C"
     cuda_block = bindings.split(
