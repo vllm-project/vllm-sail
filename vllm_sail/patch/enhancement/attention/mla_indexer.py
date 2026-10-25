@@ -607,6 +607,7 @@ def _build_body(
                 prefill_query_lens_cpu,
                 self.compress_ratio,
                 self.tp_size,
+                self.vllm_config.attention_config.indexer_tp_shard_min_rows,
             )
         prefill_metadata = DeepseekV32IndexerPrefillMetadata(
             chunks,

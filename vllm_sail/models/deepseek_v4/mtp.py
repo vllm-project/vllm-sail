@@ -11,10 +11,6 @@ from collections.abc import Iterable
 import regex as re
 import torch
 from typing_extensions import override
-from vllm.distributed import (
-    get_tensor_model_parallel_rank,
-    get_tensor_model_parallel_world_size,
-)
 from vllm.model_executor.layers.fused_moe import RoutedExperts
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.models.deepseek_v4.nvidia.model import make_deepseek_v4_expert_params_mapping
@@ -69,14 +65,6 @@ class DeepSeekV4MTP(NvidiaDeepSeekV4MTP):
         ]
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
-
-        # TP for attention
-        tp_size = get_tensor_model_parallel_world_size()
-        tp_rank = get_tensor_model_parallel_rank()
-        n_head = self.config.num_attention_heads
-        n_local_head = n_head // tp_size
-        head_rank_start = n_local_head * tp_rank
-        head_rank_end = n_local_head * (tp_rank + 1)
 
         # Pre-compute expert mapping ONCE.
         first_layer = next(iter(self.model.layers.values()))
@@ -137,6 +125,13 @@ class DeepSeekV4MTP(NvidiaDeepSeekV4MTP):
                     else non_expert_scale_suffix
                 )
                 name = name.removesuffix(".scale") + suffix
+            if ".shared_experts." in name:
+                experts = self.model.layers[str(spec_layer)].mtp_block.ffn.experts
+                if getattr(experts, "has_fused_shared_experts", False):
+                    loaded_params.add(
+                        experts.load_shared_expert_weight(name, loaded_weight)
+                    )
+                    continue
             for param_name, weight_name, shard_id in stacked_params_mapping:
                 if ".experts." in name:
                     continue
@@ -177,18 +172,10 @@ class DeepSeekV4MTP(NvidiaDeepSeekV4MTP):
                     if name not in params_dict:
                         continue
                     param = params_dict[name]
-                    # The release sink has padded local heads and no registered
-                    # loader. Copy only this rank's heads, preserving -inf padding.
-                    if name.endswith(".attn_sink"):
-                        narrow = loaded_weight[head_rank_start:head_rank_end]
-                        param[: narrow.shape[0]].copy_(narrow)
-                        loaded_params.add(name)
-                        continue
                     weight_loader = getattr(
                         param, "weight_loader", default_weight_loader
                     )
                     weight_loader(param, loaded_weight)
                     loaded_params.add(name)
 
-        self.process_weights_after_loading()
         return loaded_params

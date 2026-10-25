@@ -154,6 +154,7 @@ def _stub_platform(
             is_cuda=lambda: is_cuda,
             is_ppu=lambda: is_ppu,
             is_rocm=lambda: False,
+            is_xpu=lambda: False,
             is_device_capability=lambda c: c == capability,
             is_device_capability_family=lambda f: f == family,
             get_cuda_runtime_major=lambda: runtime_major,
