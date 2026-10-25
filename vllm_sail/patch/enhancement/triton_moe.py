@@ -771,6 +771,7 @@ def fused_experts_impl(
         use_int4_w4a16=use_int4_w4a16,
         block_shape=block_shape,
         ignore_invalid_experts=True,
+        weights_host_resident=_weights_host_resident(w1, w2),
     )
 
     dispatch_fused_moe_kernel(
@@ -1075,26 +1076,23 @@ def apply(
         and (not self.per_act_token_quant or self.quantization_emulation)
     )
     skip_invalid = (
-        expert_map is not None
-        and self._lora_context is None
-        and not a2_scale_is_global
+        expert_map is not None and self._lora_context is None and not a2_scale_is_global
     )
 
     # Include fused shared-expert rows while preserving EP remapping.
     num_align_experts = w1.shape[0] if expert_map is None else global_num_experts
-    sorted_token_ids, expert_ids, num_tokens_post_padded = (
-        _prepare_expert_assignment(
-            topk_ids,
-            config,
-            num_tokens,
-            top_k_num,
-            num_align_experts,
-            expert_map,
-            use_int8_w8a16=self.quant_config.use_int8_w8a16,
-            use_int4_w4a16=self.quant_config.use_int4_w4a16,
-            block_shape=self.block_shape,
-            ignore_invalid_experts=skip_invalid,
-        )
+    sorted_token_ids, expert_ids, num_tokens_post_padded = _prepare_expert_assignment(
+        topk_ids,
+        config,
+        num_tokens,
+        top_k_num,
+        num_align_experts,
+        expert_map,
+        use_int8_w8a16=self.quant_config.use_int8_w8a16,
+        use_int4_w4a16=self.quant_config.use_int4_w4a16,
+        block_shape=self.block_shape,
+        ignore_invalid_experts=skip_invalid,
+        weights_host_resident=_weights_host_resident(w1, w2),
     )
 
     # LoRA w13: applied to intermediate_cache1 before activation. When
@@ -1273,7 +1271,7 @@ def apply(
             sorted_token_ids,
             expert_ids,
             num_tokens_post_padded,
-            not apply_router_weight_on_input,
+            self._apply_router_weight_in_gemm2(apply_router_weight_on_input),
             1,
             # PPU MODIFICATION: begin
             config.get("DOWN", config),
@@ -1339,7 +1337,7 @@ def apply(
             )
 
     # separate function is required for MoE + LoRA
-    self.moe_sum(intermediate_cache3, output, topk_ids, expert_map)
+    self._finalize_expert_output(intermediate_cache3, output, topk_ids, expert_map)
 
 
 _install(_experts, "apply", apply, target_name="TritonExperts.apply")
