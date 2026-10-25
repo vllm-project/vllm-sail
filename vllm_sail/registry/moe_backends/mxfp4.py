@@ -243,21 +243,6 @@ def select_mxfp4_moe_backend(
         assert last_error is not None
         raise last_error
 
-    if _requires_qwen38_tep8_emulation(config, requested_activation_key):
-        backend = Mxfp4MoeBackend.EMULATION
-        logger.warning_once(
-            "Using OCP MX emulation for the Qwen3.8 Flash Next TEP8 routed "
-            "experts on gfx950 because the native AITER W4A4 kernel is not "
-            "numerically reliable for this shape. Performance will be lower."
-        )
-        return _return_or_raise(
-            backend,
-            config,
-            kMxfp4Static,
-            requested_activation_key,
-            activation_format,
-        )
-
     # Select kernels in order of backend.
     AVAILABLE_BACKENDS = _filter_by_activation(
         _get_priority_backends_for_gpt_oss(), requested_activation_key
