@@ -184,10 +184,25 @@ def test_upstream_humming_priority_keeps_ppu_registration_first(
 class Tensor:
     """Shape/dtype double; numerical dequantization is tested on device."""
 
+    # Physical tensor metadata is not a custom reload attribute. Keep it out
+    # of __dict__, as on a real torch.Tensor, for the real replace_parameter.
+    __slots__ = ("shape", "dtype", "ndim", "data", "device", "is_meta", "__dict__")
+
     def __init__(self, shape, dtype):
         self.shape, self.dtype = shape, dtype
         self.ndim = len(shape)
         self.data = self
+        self.device = "host-double"
+        self.is_meta = False
+
+    def stride(self):
+        import math
+
+        return tuple(math.prod(self.shape[index + 1 :]) for index in range(self.ndim))
+
+    def copy_(self, value):
+        assert self.shape == value.shape and self.dtype == value.dtype
+        return self
 
     def contiguous(self):
         return self
@@ -219,16 +234,29 @@ def test_upstream_dequantizes_at_load_or_per_forward(
         assert weight.dtype == x.dtype
         return x
 
+    class Parameter:
+        def __init__(self, tensor, **kwargs):
+            self.data = tensor
+
+        def __getattr__(self, name):
+            return getattr(self.data, name)
+
     modules("vllm.envs", VLLM_MXFP8_EMULATION_DEQUANT_AT_LOAD=dequant_at_load)
     namespace = {
         "torch": SimpleNamespace(
-            nn=SimpleNamespace(functional=SimpleNamespace(linear=linear))
+            nn=SimpleNamespace(
+                Parameter=Parameter, functional=SimpleNamespace(linear=linear)
+            )
         ),
-        "Parameter": lambda tensor, **kw: tensor,
         "MXFP8_BLOCK_SIZE": 32,
         "MXFP8_SCALE_DTYPE": "uint8",
         "dequant_mxfp8_to_bf16": dequant,
     }
+    function(
+        upstream_source_root / "vllm/model_executor/utils.py",
+        "replace_parameter",
+        namespace,
+    )
     path = (
         upstream_source_root / "vllm/model_executor/kernels/linear/mxfp8/emulation.py"
     )
@@ -237,9 +265,15 @@ def test_upstream_dequantizes_at_load_or_per_forward(
     )
     apply = function(path, "EmulationMxfp8LinearKernel.apply_weights", namespace)
     layer = SimpleNamespace(
-        weight=Tensor((64, 576), "fp8"), weight_scale=Tensor((64, 18), "uint8")
+        weight=Parameter(Tensor((64, 576), "fp8")),
+        weight_scale=Parameter(Tensor((64, 18), "uint8")),
     )
+    weight, scale = layer.weight, layer.weight_scale
+    weight.weight_loader, scale.weight_loader = object(), object()
+    loaders = (weight.weight_loader, scale.weight_loader)
     process(None, layer)
+    assert layer.weight is weight and layer.weight_scale is scale
+    assert (layer.weight.weight_loader, layer.weight_scale.weight_loader) == loaders
     assert layer.weight.dtype == ("bf16" if dequant_at_load else "fp8")
     assert len(calls) == int(dequant_at_load)
     x, bias = Tensor((3, 576), "fp16"), object()
