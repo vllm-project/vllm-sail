@@ -23,7 +23,7 @@ fingerprint = "sha256:34692ac48c0dc502cf39ea0a331e6bc0773daa4ce33d98bfae61cdedae
 symbol = "vllm.platforms.interface.Platform"
 kind = "class"
 present = true
-fingerprint = "sha256:24df93182d11072c17230d6a6b158ce874567cdbfc49cadb87ab38f987350928"
+fingerprint = "sha256:377cba3d9e9319aa2477d33ccd21308c80f94a71d0a914c3e43fa0ba0b100564"
 
 [[key_interface]]
 symbol = "vllm.platforms.cuda.NvmlCudaPlatform"
@@ -41,7 +41,7 @@ fingerprint = "sha256:b000add51e983eda3dee41ae9b7a040ec14f912ba762472274a835f800
 symbol = "vllm.v1.attention.backend.AttentionBackend"
 kind = "class"
 present = true
-fingerprint = "sha256:a7a2a11aa14d71e74281ae5b14ba89ea8d0833f028349f9699792439b690197d"
+fingerprint = "sha256:9566957fa93150740bac407d359e35d7a6fbeb4a22f0b855125170a3cd4d7312"
 
 [[key_interface]]
 symbol = "vllm.v1.attention.backend.AttentionMetadataBuilder"
@@ -119,7 +119,7 @@ kind = "module"
 module = "vllm/envs.py"
 symbol = "environment_variables"
 present = true
-fingerprint = "sha256:44be308f8c056f91047878b84e31e3b121270bbfc211a2462dfa6538ef3b35f3"
+fingerprint = "sha256:163b0a51c2a5211bb3cf96b7a04bbfc7ed8ab97863043b55732b0d7e169878d1"
 
 [[patch_target]]
 name = "vllm.lora.layers.utils.try_get_optimal_moe_config"
@@ -239,7 +239,7 @@ kind = "module"
 module = "vllm/model_executor/layers/fused_moe/experts/triton_moe.py"
 symbol = "invoke_fused_moe_triton_kernel"
 present = true
-fingerprint = "sha256:4163de0c830ffb404b86278e31fc33d1f402ce17290d2dc22837c2fb2c94c395"
+fingerprint = "sha256:8453cffa0ff82ce0a92283930359ef7cd332c57a1490996e522ee1bbbad4596e"
 
 [[patch_target]]
 name = "vllm.model_executor.layers.fused_moe.experts.triton_moe.invoke_fused_moe_wna16_triton_kernel"
@@ -247,7 +247,7 @@ kind = "module"
 module = "vllm/model_executor/layers/fused_moe/experts/triton_moe.py"
 symbol = "invoke_fused_moe_wna16_triton_kernel"
 present = true
-fingerprint = "sha256:4163de0c830ffb404b86278e31fc33d1f402ce17290d2dc22837c2fb2c94c395"
+fingerprint = "sha256:8453cffa0ff82ce0a92283930359ef7cd332c57a1490996e522ee1bbbad4596e"
 
 [[patch_target]]
 name = "vllm.model_executor.layers.fused_moe.experts.triton_moe.moe_kernel_quantize_input"
@@ -263,7 +263,7 @@ kind = "module"
 module = "vllm/model_executor/layers/fused_moe/experts/triton_moe.py"
 symbol = "try_get_optimal_moe_config"
 present = true
-fingerprint = "sha256:4163de0c830ffb404b86278e31fc33d1f402ce17290d2dc22837c2fb2c94c395"
+fingerprint = "sha256:8453cffa0ff82ce0a92283930359ef7cd332c57a1490996e522ee1bbbad4596e"
 
 [[patch_target]]
 name = "vllm.model_executor.layers.fused_moe.fused_moe.dispatch_fused_moe_kernel"
