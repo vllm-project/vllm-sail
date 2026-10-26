@@ -1562,12 +1562,12 @@ present = true
 fingerprint = "sha256:277bb7424748f51ed9854495829a4d10360ef121c87a9149f9c69efa9f60c581"
 
 [[patch_target]]
-name = "vllm.models.deepseek_v4.compressor.DeepseekCompressor.forward"
+name = "vllm.models.deepseek_v4.compressor.DeepseekCompressor._compress_norm_rope_store"
 kind = "class"
 module = "vllm/models/deepseek_v4/compressor.py"
-symbol = "DeepseekCompressor.forward"
+symbol = "DeepseekCompressor._compress_norm_rope_store"
 present = true
-fingerprint = "sha256:2f40ba99c7ff0094f51dfb3cd4b4b34b54ed0507f950d06282f9525b26ca33a1"
+fingerprint = "sha256:275eeba1fba646d8a7590f49d1df0ba2cea0c41ca57a22be2a4bcea905b47cab"
 
 [[patch_target]]
 name = "vllm.models.deepseek_v4.compressor.compress_norm_rope_store_triton"

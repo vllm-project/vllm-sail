@@ -25,7 +25,10 @@ def gdn_provider(modules, monkeypatch, upstream_source_root):
     modules("vllm_sail.attention.gdn_decode", **gdn_decode.__dict__)
     calls = []
     platform = NS(
-        ppu=True, is_ppu=lambda: platform.ppu, has_device_capability=lambda _: True
+        ppu=True,
+        is_ppu=lambda: platform.ppu,
+        is_rocm=lambda: False,
+        has_device_capability=lambda _: True,
     )
     modules("vllm.platforms", current_platform=platform)
     logger = NS(info_once=lambda *a: None, warning_once=lambda *a: None)
@@ -67,6 +70,8 @@ def gdn_provider(modules, monkeypatch, upstream_source_root):
         MAX_FUSED_GDN_MTP_TOKENS=8,
     )
 
+    supports = function(path, "supports_fused_mtp_decode", namespace)
+
     class Layer:
         def __init__(self, config, vllm_config, prefix=""):
             self.head_k_dim = self.head_v_dim = 128
@@ -97,6 +102,7 @@ def gdn_provider(modules, monkeypatch, upstream_source_root):
     provider = modules(
         "vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn",
         QwenGatedDeltaNetAttention=Layer,
+        supports_fused_mtp_decode=supports,
     )
     originals = {
         name: getattr(Layer, name)
@@ -167,6 +173,7 @@ def test_stub_cannot_select_native_mtp_even_with_registered_schema(
 ):
     f = gdn_provider
     monkeypatch.setenv("VLLM_SAIL_USE_PLA", "0")
+    assert f.provider.supports_fused_mtp_decode() is True
     layer = f.layer(None, f.config)
     assert layer.gdn_decode_kernel == "triton"
     assert not layer.enable_fused_gdn_spec_decode
