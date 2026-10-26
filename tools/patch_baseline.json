@@ -83,6 +83,7 @@
   "vllm.model_executor.layers.fused_moe.prepare_finalize.no_dp_ep.moe_kernel_quantize_input": "3b72fa4b6a30c3185cc3bc45429ab690eebee284f32cc475deacd84a0f95dd78",
   "vllm.model_executor.layers.fused_moe.unquantized_fused_moe_method.select_unquantized_moe_backend": "2817b5968ddec5bc90c7c08e834f4f9cf82100829e6b5204497a1cbd3f09628a",
   "vllm.model_executor.layers.fused_moe.utils.moe_kernel_quantize_input": "3b72fa4b6a30c3185cc3bc45429ab690eebee284f32cc475deacd84a0f95dd78",
+  "vllm.model_executor.layers.fused_qk_norm_rope._fused_qk_rmsnorm_rope_gate_kernel": "additive",
   "vllm.model_executor.layers.linear.dispatch_unquantized_gemm": "58a0612ca30793a2f22b64b35f0ff4970b503f4f0996a25018c9aefbaeab227d",
   "vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn.ChunkGatedDeltaRule.__init__": "5093351c98db4a99faaf2835dd4d2154fa72c3a5028636ae8660f86d3e937704",
   "vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn.ChunkGatedDeltaRule.forward_pla": "additive",
