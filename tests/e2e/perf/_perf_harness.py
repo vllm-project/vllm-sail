@@ -37,19 +37,31 @@ import torch
 
 from tests.e2e.perf._baseline_store import (
     FAIL_THRESHOLD,
+    STATUS_UNSTABLE,
     WARN_THRESHOLD,
     BaselineStore,
     MetricSample,
 )
 
 #: Untimed iterations before measurement (plan PART 6.1).
-WARMUP_ITERS = 5
+WARMUP_ITERS = 50
 #: Timed iterations behind the median/p90 (plan PART 6.1).
 TIMED_ITERS = 20
 
 
-def summarize(durations_us: Sequence[float]) -> tuple[float, float]:
-    """Return ``(median_us, p90_us)`` over per-iteration device times."""
+def compute_cv(values: Sequence[float]) -> float:
+    """Coefficient of variation (std / mean); ``0.0`` for < 2 samples or zero mean.
+
+    Re-export of :func:`tests.e2e.perf._baseline_store.compute_cv` kept here
+    for backward-compatible imports.
+    """
+    from tests.e2e.perf._baseline_store import compute_cv as _cv
+
+    return _cv(values)
+
+
+def summarize(durations_us: Sequence[float]) -> tuple[float, float, float]:
+    """Return ``(median_us, p90_us, cv)`` over per-iteration device times."""
     ordered = sorted(float(value) for value in durations_us)
     count = len(ordered)
     if count == 0:
@@ -59,7 +71,9 @@ def summarize(durations_us: Sequence[float]) -> tuple[float, float]:
         ordered[middle] if count % 2 else (ordered[middle - 1] + ordered[middle]) / 2
     )
     index = int(0.9 * (count - 1) + 0.5)
-    return median, ordered[min(index, count - 1)]
+    p90 = ordered[min(index, count - 1)]
+    cv = compute_cv(ordered)
+    return median, p90, cv
 
 
 def bench_kernel(
@@ -67,8 +81,8 @@ def bench_kernel(
     *,
     warmup: int = WARMUP_ITERS,
     iters: int = TIMED_ITERS,
-) -> tuple[float, float]:
-    """Time ``call`` with CUDA events; returns ``(median_us, p90_us)``.
+) -> tuple[float, float, float]:
+    """Time ``call`` with CUDA events; returns ``(median_us, p90_us, cv)``.
 
     One event pair per iteration keeps launch overhead out of the median and
     makes the p90 a real tail rather than an artifact of a single bracket
@@ -117,6 +131,7 @@ class PerfHarness:
         p90: Optional[float] = None,  # noqa: UP045
         samples: int = 1,
         config: Optional[Mapping[str, Any]] = None,  # noqa: UP045
+        cv: Optional[float] = None,  # noqa: UP045
     ) -> None:
         """Archive one metric, then enforce the regression policy."""
         row = self.store.record(
@@ -128,6 +143,7 @@ class PerfHarness:
                 p90=p90,
                 samples=samples,
                 config=config,
+                cv=cv,
             )
         )
         if row.status == "FAIL":
@@ -137,7 +153,13 @@ class PerfHarness:
                 f"baseline={row.baseline:.6g} regression={row.regression:.1%} "
                 f"> {FAIL_THRESHOLD:.0%} (warn band {WARN_THRESHOLD:.0%})"
             )
-        if row.status == "WARN":
+        if row.status == STATUS_UNSTABLE:
+            warnings.warn(
+                f"perf metric UNSTABLE on {key!r}: "
+                f"cv={cv:.3f} > 0.15, measurement too noisy to compare reliably",
+                stacklevel=2,
+            )
+        elif row.status == "WARN":
             warnings.warn(
                 f"perf regression WARN on {key!r}: current={row.current:.6g} "
                 f"baseline={row.baseline:.6g} regression={row.regression:.1%} "
@@ -160,7 +182,7 @@ class PerfHarness:
         under it: ``<prefix>.latency_us`` (lower is better) and, when the case
         declares its arithmetic work, ``<prefix>.tflops`` (higher is better).
         """
-        median_us, p90_us = bench_kernel(call)
+        median_us, p90_us, cv = bench_kernel(call)
         self.record(
             f"{key_prefix}.latency_us",
             median_us,
@@ -169,6 +191,7 @@ class PerfHarness:
             p90=p90_us,
             samples=TIMED_ITERS,
             config=config,
+            cv=cv,
         )
         if flops is not None and median_us > 0.0:
             self.record(
@@ -178,6 +201,7 @@ class PerfHarness:
                 unit="tflops",
                 samples=TIMED_ITERS,
                 config=config,
+                cv=cv,
             )
         return median_us, p90_us
 
