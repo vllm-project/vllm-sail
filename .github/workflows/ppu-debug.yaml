@@ -12,7 +12,7 @@ on:
         description: Stages to rerun against the existing build
         required: true
         type: choice
-        options: [both, pin-ut, model-tests, accuracy-tests]
+        options: [both, pin-ut, model-tests, accuracy-tests, kernel-perf]
         default: both
       models:
         description: Comma-separated smoke model catalog keys
@@ -65,3 +65,14 @@ jobs:
       pr_mode: false
       build_run_id: ${{ inputs.build_run_id }}
       models: ${{ inputs.accuracy_models }}
+
+  kernel-perf:
+    name: PPU kernel perf
+    if: inputs.target == 'both' || inputs.target == 'kernel-perf'
+    permissions:
+      contents: read
+      actions: read
+    uses: ./.github/workflows/_ppu-kernel-perf.yaml
+    with:
+      pr_mode: false
+      build_run_id: ${{ inputs.build_run_id }}
