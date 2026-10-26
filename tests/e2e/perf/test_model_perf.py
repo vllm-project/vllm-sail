@@ -244,7 +244,7 @@ def test_model_e2e_perf(perf_llm_factory, perf_harness, model, workload):
             if tpot_ms is not None:
                 tpots.append(tpot_ms)
 
-    median_ms, p90_ms = summarize(wall_times)
+    median_ms, p90_ms, _cv = summarize(wall_times)
     median_wall_s = median_ms / 1000.0
     # Output tokens are identical across greedy repeats; use the median count.
     median_tokens = statistics.median(output_tokens)

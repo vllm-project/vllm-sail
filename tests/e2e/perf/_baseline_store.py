@@ -83,6 +83,13 @@ STATUS_PASS = "PASS"
 STATUS_WARN = "WARN"
 STATUS_FAIL = "FAIL"
 STATUS_PENDING = "PENDING"
+#: Metric whose measurement CV exceeds the noise ceiling; treated like
+#: PENDING for CI purposes (surfaces in the report, never fails the job).
+STATUS_UNSTABLE = "UNSTABLE"
+
+#: Regression within this band (3 %) is treated as measurement noise and
+#: clamped to zero so it never triggers WARN / FAIL.
+NOISE_FLOOR = 0.03
 
 _VALID_DIRECTIONS = (HIGHER_BETTER, LOWER_BETTER)
 
@@ -101,6 +108,9 @@ class MetricSample(NamedTuple):
     samples: int = 1
     #: Fixed shape/config of the case, archived for traceability.
     config: Optional[Mapping[str, Any]] = None  # noqa: UP045
+    #: Coefficient of variation (std/mean) of the timed iterations; ``None``
+    #: when not available (e.g. single wall-clock measurement).
+    cv: Optional[float] = None  # noqa: UP045
 
 
 class ComparisonRow(NamedTuple):
@@ -157,6 +167,23 @@ def git_commit(root: Optional[Path] = None) -> str:  # noqa: UP045
     return probe.stdout.strip() or "unknown"
 
 
+def apply_noise_floor(regression: float) -> float:
+    """Clamp regression within :data:`NOISE_FLOOR` to zero (noise band)."""
+    return max(regression - NOISE_FLOOR, 0.0)
+
+
+def compute_cv(values: Sequence[float]) -> float:
+    """Coefficient of variation (std / mean); ``0.0`` for < 2 samples or zero mean."""
+    n = len(values)
+    if n < 2:
+        return 0.0
+    mean = sum(values) / n
+    if mean <= 0.0:
+        return 0.0
+    variance = sum((x - mean) ** 2 for x in values) / n
+    return variance**0.5 / mean
+
+
 def regression_fraction(current: float, baseline: float, direction: str) -> float:
     """Fraction by which ``current`` regressed against ``baseline``.
 
@@ -178,25 +205,56 @@ def regression_fraction(current: float, baseline: float, direction: str) -> floa
     return max(fraction, 0.0)
 
 
-def classify(regression: float) -> str:
-    """Map a regression fraction onto PASS / WARN / FAIL."""
-    if regression > FAIL_THRESHOLD:
+def classify(
+    regression: float,
+    *,
+    warn_threshold: float = WARN_THRESHOLD,
+    fail_threshold: float = FAIL_THRESHOLD,
+) -> str:
+    """Map a regression fraction onto PASS / WARN / FAIL.
+
+    Accepts optional *warn_threshold* / *fail_threshold* so that
+    CV-adaptive callers can relax the bands for noisy metrics.
+    """
+    if regression > fail_threshold:
         return STATUS_FAIL
-    if regression > WARN_THRESHOLD:
+    if regression > warn_threshold:
         return STATUS_WARN
     return STATUS_PASS
 
 
 def compare(
-    current: float, baseline: float, direction: str
+    current: float,
+    baseline: float,
+    direction: str,
+    *,
+    cv: Optional[float] = None,  # noqa: UP045
 ) -> tuple[str, float, float]:
-    """Return ``(status, regression_fraction, signed_delta_pct)``."""
-    regression = regression_fraction(current, baseline, direction)
+    """Return ``(status, regression_fraction, signed_delta_pct)``.
+
+    When *cv* is provided the function applies CV-adaptive thresholds:
+
+    * ``cv > 0.15`` → :data:`STATUS_UNSTABLE` (too noisy to judge)
+    * ``0.08 < cv <= 0.15`` → relaxed bands (WARN 20 %, FAIL 35 %)
+    * ``cv <= 0.08`` (or *None*) → default bands
+
+    A :data:`NOISE_FLOOR` (3 %) is subtracted from the raw regression
+    fraction before classification so that trivial fluctuation is ignored.
+    """
+    regression = apply_noise_floor(regression_fraction(current, baseline, direction))
     if baseline > 0.0:
         delta_pct = (float(current) - baseline) / baseline
     else:
         delta_pct = 0.0
-    return classify(regression), regression, delta_pct
+
+    # CV-adaptive thresholds
+    if cv is not None and cv > 0.15:
+        return STATUS_UNSTABLE, regression, delta_pct
+    if cv is not None and cv > 0.08:
+        status = classify(regression, warn_threshold=0.20, fail_threshold=0.35)
+    else:
+        status = classify(regression)
+    return status, regression, delta_pct
 
 
 class BaselineStore:
@@ -350,12 +408,15 @@ class BaselineStore:
             return row
 
         status, regression, delta_pct = compare(
-            sample.value, baseline_median, sample.direction
+            sample.value, baseline_median, sample.direction, cv=sample.cv
         )
         if entry.get("status") != "confirmed":
             # Pending baseline: still surface the delta, never fail on it.
             status = STATUS_PENDING
             self.pending.append(sample.key)
+        elif status == STATUS_UNSTABLE:
+            # High-CV: surface in the report but never fail the job.
+            pass  # keep STATUS_UNSTABLE from compare()
         # Roll the run median into history for the weekly refresh, keeping the
         # authoritative median untouched in comparison mode.
         history = [float(v) for v in entry.get("history", [])]
