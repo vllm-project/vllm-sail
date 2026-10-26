@@ -26,9 +26,7 @@ vllm_sail_resolve_cmake_hgcc()
 # ---------------------------------------------------------------------------
 # HG language configuration. MUST precede project().
 # ---------------------------------------------------------------------------
-# Every compiled TU carries the `.hg` extension (the port renames upstream's
-# `.cu` sources), so the HG language compiles the whole corpus directly and no
-# `.cu` files remain for Torch's CMake config to claim.
+# Compile the ported corpus with HGGC's .hg source extension.
 
 if(NOT CMAKE_HG_ARCHITECTURES)
   if(PYTORCH_SAIL_ARCH)
@@ -110,9 +108,7 @@ function(ppu_add_extension target)
       "${CMAKE_CURRENT_SOURCE_DIR}/csrc/upstream"
       "${CMAKE_CURRENT_SOURCE_DIR}/csrc")
   target_compile_definitions(${target} PRIVATE ${PPU_DEFINES})
-  # Force-included rather than #include'd: sailify only text-substitutes, so the
-  # translated sources reference COMPATIBLE_* without ever including the header
-  # that defines them. SHELL: keeps `-include` and its operand one argument.
+  # Supply sailify compatibility gates; SHELL: keeps the -include operand paired.
   target_compile_options(${target} PRIVATE
     "SHELL:-include ppu_compat.h")
   # cmake-hgcc emits the standard in CMAKE_HG_FLAGS during project(), but the
@@ -134,10 +130,7 @@ function(ppu_add_extension target)
     "$<$<COMPILE_LANGUAGE:HG>:-U__HGGC_NO_HALF_CONVERSIONS__>"
     "$<$<COMPILE_LANGUAGE:HG>:-U__HGGC_NO_HALF2_OPERATORS__>"
     "$<$<COMPILE_LANGUAGE:HG>:-U__HGGC_NO_BFLOAT16_CONVERSIONS__>")
-  # Torch's hg_native.cmake passes --extended-lambda, which defines
-  # __HGGCCC_EXTENDED_LAMBDA__. PPU libc++'s __functional/invoke.h then takes a
-  # device-only builtin path in a host-pass static_assert and fails to parse.
-  # The corpus has no extended device lambdas to lose.
+  # Avoid the extended-lambda device builtin during host compilation.
   target_compile_options(${target} PRIVATE
     "$<$<COMPILE_LANGUAGE:HG>:-U__HGGCCC_EXTENDED_LAMBDA__>")
   target_link_libraries(${target} PRIVATE

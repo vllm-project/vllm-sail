@@ -1,26 +1,17 @@
 // SPDX-License-Identifier: Apache-2.0
 #pragma once
 
-// sailify rewrites upstream's __CUDA_ARCH__, __CUDA_ARCH_LIST__ and CUDA_VERSION
-// gates into the names below but leaves them undefined. This header supplies the
-// values a SAIL torch's .ppu_compat/compatible_wrapper.h provided, so the ported
-// corpus builds without that wheel header. Values match sailify's defaults.
+// Compatibility gates for sailify-generated sources.
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdint.h>
 
-// The wrapper this replaces was force-included into every ported source and
-// covered their missing standard includes; cuda_utils.h, for example, uses
-// std::enable_if_t and int64_t with only <stdio.h>.
 #if defined(__cplusplus)
 #include <type_traits>
 #endif
 
-// ...and its SDK umbrella: cuda_utils_kernels.cu expands CUDA_CHECK's
-// hggcError_t with no SDK header of its own. Key on the HG compiler marker
-// rather than __has_include, which the PPU preprocessor does not reliably
-// evaluate; host-only compiles still probe so they need no PPU SDK.
+// HG preprocessing does not reliably support __has_include.
 #if defined(__HGGCCC__)
 #define PPU_COMPAT_HAS_SDK
 #elif defined(__has_include)
@@ -36,14 +27,7 @@
 #endif
 #endif
 
-// The CUDA-compatible nvcc driver defines __CUDACC__ alongside __HGGCCC__.
-// A SAIL torch switches to the SDK's scalar types under __HGGCCC__; a stock
-// torch still takes its __CUDACC__ branch and includes NVIDIA's cuda_fp16.h
-// and cuda_bf16.h. Those define a second __half/__nv_bfloat16 universe next to
-// hggc_fp16.h/hggc_bf16.h, so ported sources that include the native headers
-// collide with thousands of redefinition and overload errors. Take the native
-// headers first, mask NVIDIA's via their include guards, and give the NVIDIA
-// bf16 spellings the native types so stock torch headers compile unchanged.
+// Use SDK scalar types for stock torch CUDA spellings.
 #if defined(__HGGCCC__) && defined(__cplusplus)
 #include <hggc_fp16.h>
 #include <hggc_bf16.h>
@@ -97,11 +81,7 @@ typedef __ppu_bfloat162_raw __nv_bfloat162_raw;
 #endif
 #endif
 
-// Un-sailified Torch wheels key their device branches on the NVIDIA macro
-// spellings, which for them the CUDA-compatible nvcc driver supplies. Every
-// translation unit here is compiled by the hgcc driver, which defines neither,
-// so supply both. __CUDACC__ holds in either pass; __CUDA_ARCH__ only where
-// __HGGC_ARCH__ marks the device pass, mapped like COMPATIBLE_ARCH above.
+// CUDA-spelling compiler gates for stock torch.
 #if defined(__HGGCCC__) && !defined(__CUDACC__)
 #define __CUDACC__ 1
 #define __CUDACC_VER_MAJOR__ __COMPATIBLECC_VER_MAJOR__

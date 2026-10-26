@@ -33,20 +33,12 @@ __all__ = [
 
 SCHEMA = 1
 
-# Where the translated corpus lives in this repo. An upstream `csrc/a/b.cu`
-# becomes `csrc/upstream/a/b.hg`: the corpus is CUDA-free, so every compiled TU
-# carries the HG language's own extension and a vLLM bump stays a path-for-path
-# diff.
+# Translate csrc/a/b.cu to csrc/upstream/a/b.hg.
 VENDOR_ROOT = "csrc/upstream"
 
 
 def vendored_name(upstream_rel: str) -> str:
-    """The vendor-tree path for an upstream ``csrc/`` relative path.
-
-    Compiled TUs trade the upstream ``.cu`` suffix for ``.hg`` so CMake's HG
-    language compiles them without depending on how the ambient Torch's CMake
-    config treats ``.cu``. Headers keep upstream names.
-    """
+    """Map upstream paths to the vendor tree, replacing .cu with .hg."""
     name = upstream_rel.removeprefix("csrc/")
     return f"{name[:-3]}.hg" if name.endswith(".cu") else name
 

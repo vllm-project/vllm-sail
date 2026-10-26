@@ -1,9 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Compile regressions using host tools, without torch, vLLM, or a PPU SDK.
-
-These exercise CMake options, compatibility headers and sampler scalar loads.
-They do not compile device code or establish PPU numerical correctness.
-"""
+"""Host compile regressions without torch, vLLM, or a PPU SDK."""
 
 from __future__ import annotations
 
@@ -54,11 +50,7 @@ def _write_native_sdk_stubs(sdk: Path) -> None:
 def test_stable_abi_macros_preserve_torch_error_checking(
     tmp_path: Path, cuda_checks_available: bool
 ) -> None:
-    """Compile the real wrapper over a torch-free header and exercise its API.
-
-    Include order must reach the wrapper and then the original header. Older
-    torch headers without CUDA checks must retain that feature boundary.
-    """
+    """Exercise wrapper include order, error checks and older torch headers."""
     compiler = _tool("c++")
     torch_include = tmp_path / "torch_include"
     header = torch_include / "torch/csrc/stable/macros.h"

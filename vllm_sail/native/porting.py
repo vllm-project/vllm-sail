@@ -50,9 +50,7 @@ __all__ = [
 # The generated companion to manifest.toml, read at runtime by stubs.install().
 EXCLUDED_OPS_NAME = "excluded_ops.toml"
 
-# Everything the manifest names lives under upstream's csrc/; the vendored tree
-# drops that one level and renames compiled TUs, so `csrc/a/b.cu` becomes
-# `csrc/upstream/a/b.hg` (see manifest.vendored_name).
+# Upstream paths are relative to csrc/; vendored TUs use .hg.
 _CSRC = "csrc/"
 
 # Files in the dest tree that port() must not delete when it rebuilds:
@@ -190,8 +188,7 @@ def port(
         preserve=PRESERVED,
     )
     dest = Path(dest_root).resolve()
-    # Copying and translating keep upstream names (sailify keys on them); the
-    # vendor tree renames compiled TUs afterwards.
+    # Rename TUs after sailify, which requires upstream names.
     sources = tuple(_manifest.vendored_name(_CSRC + rel) for rel in corpus.sources)
     for upstream, vendored in zip(corpus.sources, sources, strict=False):
         if upstream != vendored:
@@ -362,8 +359,7 @@ def _replace_text(
     files: Sequence[Path], dest: Path, replacements: Mapping[str, Mapping[str, str]]
 ) -> None:
     """Apply exact post-sailify edits; stop on upstream drift, never guess."""
-    # The manifest names upstream paths; only compiled TUs carry a vendored
-    # `.hg` suffix, so the inverse mapping back to those keys is unambiguous.
+    # Map .hg files back to upstream .cu manifest keys.
     copied: dict[str, Path] = {}
     for path in files:
         rel = path.relative_to(dest).as_posix()

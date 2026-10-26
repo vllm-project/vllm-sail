@@ -4,11 +4,7 @@
 // Project modifications are licensed under Apache-2.0.
 #pragma once
 
-// Shadows Torch's stable-ABI macros through include-path order (csrc precedes
-// Torch's include tree). An unpatched Torch declares STD_CUDA_CHECK's result as
-// cudaError_t, while sailified sources call hggc* APIs returning hggcError_t --
-// two distinct enums, so assignment fails. Keep the real header and redefine
-// only the check macros with a type-erased result.
+// Accept HGGC error enums while retaining torch's checks.
 #include_next <torch/csrc/stable/macros.h>
 
 #ifdef STD_CUDA_CHECK
