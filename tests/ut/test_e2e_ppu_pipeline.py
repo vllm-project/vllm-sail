@@ -17,6 +17,7 @@ SELECT = ROOT / "scripts" / "ci" / "ppu_e2e_select.py"
 MODELS = ROOT / "scripts" / "ci" / "ppu_e2e_models.json"
 MODEL_WORKFLOW = ROOT / ".github" / "workflows" / "_ppu-model-tests.yaml"
 ACCURACY_WORKFLOW = ROOT / ".github" / "workflows" / "_ppu-accuracy-tests.yaml"
+NIGHTLY_WORKFLOW = ROOT / ".github" / "workflows" / "ppu-accuracy-nightly.yaml"
 DEBUG_WORKFLOW = ROOT / ".github" / "workflows" / "ppu-debug.yaml"
 
 
@@ -219,6 +220,18 @@ def test_accuracy_script_uses_writable_results_with_read_only_source() -> None:
     assert 'python "${ROOT_DIR}/scripts/eval/ppu_gsm8k_eval.py"' in text
 
 
+def test_accuracy_script_seeds_reviewed_goldens_into_the_writable_tree() -> None:
+    """Without the seed every run reports "created" and never compares."""
+    text = ACCURACY.read_text()
+    seed = 'GOLDEN_SEED_DIR="${GOLDEN_SEED_DIR:-/source/tests/e2e/models/_golden}"'
+    assert seed in text
+    # The checked-out source is mounted read-only, so the copy must land in
+    # RESULTS_DIR and the evaluator must read the copy.
+    assert 'cp -f "${golden}" "${golden_dir}/"' in text
+    assert text.index(seed) < text.index('--golden-dir "${RESULTS_DIR}/golden"')
+    assert "threshold-only run" in text
+
+
 def test_runtime_wrapper_exposes_accuracy_mode_and_environment() -> None:
     text = RUNTIME.read_text()
     assert "pin-ut|model-test|model-accuracy" in text
@@ -288,7 +301,7 @@ def test_accuracy_workflow_is_call_only_and_uses_docker_runner() -> None:
     assert text.count("actions/download-artifact@v4") == 1
 
 
-def test_debug_workflow_is_the_only_accuracy_entrypoint() -> None:
+def test_accuracy_entrypoints_are_the_manual_debug_and_the_nightly_runs() -> None:
     debug = _workflow(DEBUG_WORKFLOW)
     assert set(debug[True]) == {"workflow_dispatch"}
     inputs = debug[True]["workflow_dispatch"]["inputs"]
@@ -302,9 +315,52 @@ def test_debug_workflow_is_the_only_accuracy_entrypoint() -> None:
     assert debug["jobs"]["accuracy-tests"]["uses"] == (
         "./.github/workflows/_ppu-accuracy-tests.yaml"
     )
+
+    nightly = _workflow(NIGHTLY_WORKFLOW)
+    assert set(nightly[True]) == {"workflow_dispatch", "schedule"}
+    assert nightly[True]["schedule"] == [{"cron": "0 12 * * *"}]
+    assert set(nightly["jobs"]["accuracy"]["with"]) >= {
+        "build_run_id",
+        "models",
+        "pr_head_sha",
+        "wheel_source_sha",
+    }
+    assert nightly["jobs"]["accuracy"]["uses"] == (
+        "./.github/workflows/_ppu-accuracy-tests.yaml"
+    )
+
+    # Accuracy still never rides the per-PR gate.
     automatic = (ROOT / ".github/workflows/ppu-build-and-test.yaml").read_text()
     assert "_ppu-accuracy-tests.yaml" not in automatic
     assert "model-accuracy" not in automatic
+
+
+def test_accuracy_nightly_is_serial_and_wheel_sourced_from_the_build_commit() -> None:
+    nightly = _workflow(NIGHTLY_WORKFLOW)
+    accuracy = nightly["jobs"]["accuracy"]
+    # Every lane needs all eight devices and the runtime wrapper holds an
+    # exclusive lock, so a parallel matrix would abort instead of queueing.
+    assert accuracy["strategy"]["max-parallel"] == 1
+    assert accuracy["strategy"]["fail-fast"] is False
+    assert accuracy["strategy"]["matrix"] == (
+        "${{ fromJson(needs.resolve.outputs.matrix) }}"
+    )
+    # Checkout and wheels must describe the same SAIL tree.
+    assert accuracy["with"]["pr_head_sha"] == (
+        "${{ needs.resolve.outputs.source_sha }}"
+    )
+    assert accuracy["with"]["wheel_source_sha"] == (
+        "${{ needs.resolve.outputs.source_sha }}"
+    )
+    assert accuracy["with"]["pr_mode"] is False
+    # The accuracy work runs inside the reusable call, not on a hosted shell.
+    assert "runs-on" not in accuracy
+    text = NIGHTLY_WORKFLOW.read_text()
+    assert "ppu-wheels-" in text
+    # Each model must reach the reusable workflow with one catalog key.
+    matrix = _load_select().build_accuracy_matrix(_catalog(), "")
+    assert len(matrix["include"]) == 4
+    assert "models: ${{ matrix.model }}" in text
 
 
 def test_workflows_pull_wheels_by_run_id_and_keep_python_frontend() -> None:
