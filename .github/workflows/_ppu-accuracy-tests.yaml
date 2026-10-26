@@ -1,6 +1,7 @@
 name: PPU accuracy tests
 
-# Called only by ppu-debug.yaml; accuracy is intentionally outside the per-PR gate.
+# Called by ppu-debug.yaml (manual single target) and ppu-accuracy-nightly.yaml
+# (scheduled). Accuracy is intentionally outside the per-PR gate.
 
 on:
   workflow_call:
@@ -38,7 +39,11 @@ permissions:
 cache-mode: none
 
 concurrency:
-  group: accuracy-ppu-${{ github.ref }}-${{ inputs.pr_mode && github.run_id || inputs.build_run_id }}
+  # Keyed by (build, requested models): one nightly dispatches several models
+  # of the same build, and those lanes must not cancel each other. Lanes that
+  # ask for the same set still queue, which keeps a runner's exclusive lock
+  # from being taken by a duplicate dispatch.
+  group: accuracy-ppu-${{ github.ref }}-${{ inputs.pr_mode && github.run_id || inputs.build_run_id }}-${{ inputs.models }}
   cancel-in-progress: false
 
 jobs:

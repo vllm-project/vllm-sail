@@ -77,6 +77,27 @@ each mirrored root (`_offline_runner.CHECKPOINT_ROOT_MIRRORS`).
    b. **Hard floor**: `score >= tolerance.hard_floor`.
    c. **Regression**: `score >= golden_score - max(abs, (1-rel)*golden_score)`.
 
+## Nightly CI
+
+`ppu-accuracy-nightly.yaml` runs every accuracy model once a night against the
+wheels of the newest successful PPU CI build. The checkout inside the runtime
+container is read-only, so `scripts/ci/ppu_e2e_accuracy.sh` copies every
+`accuracy_*.json` from this directory into the writable results tree before
+evaluating (`GOLDEN_SEED_DIR`, default `/source/tests/e2e/models/_golden`).
+Consequences:
+
+* A model with a committed golden here **is** gated on the regression bounds.
+* A model without one reports `created`, uploads
+  `accuracy_<model>_<chip>.pending-review.json` inside the run's
+  `ppu-accuracy-*` artifact, and only enforces `score >= threshold`.
+
+Promotion therefore stays a human step: review the pending artifact, commit it
+here as `accuracy_<model>_<chip>.json`, and the next run gates against it.
+
+`chip` is whatever device the nightly runner exposes, not the catalog `board`
+field: the lane runs on the self-hosted `8-ppu-m890p` runner, so
+`deepseek_v4_int8` is currently captured against the ZW-M890P int8 path.
+
 ## Capturing / refreshing
 
 Run the eval script or test on the target PPU machine with `--update-golden`:
