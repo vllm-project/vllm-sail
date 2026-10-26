@@ -317,3 +317,93 @@ assert 'torch' not in sys.modules and 'vllm' not in sys.modules
     )
     with zipfile.ZipFile(rebuilt / wheel.name) as archive:
         assert set(archive.namelist()) == wheel_names
+
+
+def test_prebuilt_extension_mode_repackages_current_python_without_cmake(
+    tmp_path: Path,
+) -> None:
+    import sysconfig
+
+    if importlib.util.find_spec("setuptools_scm") is None:
+        pytest.skip("setuptools_scm is required for the direct wheel build")
+    root = Path(__file__).parents[2]
+    source = tmp_path / "source"
+    shutil.copytree(
+        root,
+        source,
+        ignore=shutil.ignore_patterns(
+            ".git",
+            ".venv-test",
+            "build",
+            "dist",
+            "*.egg-info",
+            "__pycache__",
+            "_version.py",
+            "*.so",
+        ),
+    )
+    prebuilt = tmp_path / "prebuilt"
+    prebuilt.mkdir()
+    suffix = sysconfig.get_config_var("EXT_SUFFIX")
+    expected = {}
+    for module in ("_C", "_moe_C", "_upstream_C", "_upstream_moe_C"):
+        payload = f"donor:{module}".encode()
+        expected[f"vllm_sail/{module}{suffix}"] = payload
+        (prebuilt / f"{module}{suffix}").write_bytes(payload)
+    (source / "vllm_sail/repack_probe.py").write_text("VALUE = 'current source'\n")
+
+    artifacts = tmp_path / "artifacts"
+    result = subprocess.run(
+        [sys.executable, "setup.py", "bdist_wheel", "--dist-dir", str(artifacts)],
+        cwd=source,
+        env={
+            **os.environ,
+            "VLLM_SAIL_PREBUILT_EXT_DIR": str(prebuilt),
+            "SETUPTOOLS_SCM_PRETEND_VERSION_FOR_VLLM_SAIL": "0.0.0",
+        },
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    wheel = next(artifacts.glob("*.whl"))
+    assert "none-any" not in wheel.name
+    with zipfile.ZipFile(wheel) as archive:
+        assert (
+            archive.read("vllm_sail/repack_probe.py") == b"VALUE = 'current source'\n"
+        )
+        for member, payload in expected.items():
+            assert archive.read(member) == payload
+
+
+def test_prebuilt_extension_mode_requires_every_exact_extension(tmp_path: Path) -> None:
+    import sysconfig
+
+    if importlib.util.find_spec("setuptools_scm") is None:
+        pytest.skip("setuptools_scm is required for the direct wheel build")
+    root = Path(__file__).parents[2]
+    source = tmp_path / "source"
+    shutil.copytree(
+        root,
+        source,
+        ignore=shutil.ignore_patterns(
+            ".git", "build", "dist", "*.egg-info", "__pycache__", "*.so"
+        ),
+    )
+    prebuilt = tmp_path / "prebuilt"
+    prebuilt.mkdir()
+    suffix = sysconfig.get_config_var("EXT_SUFFIX")
+    for module in ("_C", "_moe_C", "_upstream_C"):
+        (prebuilt / f"{module}{suffix}").write_bytes(b"native")
+    result = subprocess.run(
+        [sys.executable, "setup.py", "build_ext"],
+        cwd=source,
+        env={
+            **os.environ,
+            "VLLM_SAIL_PREBUILT_EXT_DIR": str(prebuilt),
+            "SETUPTOOLS_SCM_PRETEND_VERSION_FOR_VLLM_SAIL": "0.0.0",
+        },
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode != 0
+    assert "expected exactly one non-empty prebuilt" in result.stderr
