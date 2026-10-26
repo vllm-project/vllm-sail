@@ -18,6 +18,7 @@ MODELS = ROOT / "scripts" / "ci" / "ppu_e2e_models.json"
 MODEL_WORKFLOW = ROOT / ".github" / "workflows" / "_ppu-model-tests.yaml"
 ACCURACY_WORKFLOW = ROOT / ".github" / "workflows" / "_ppu-accuracy-tests.yaml"
 NIGHTLY_WORKFLOW = ROOT / ".github" / "workflows" / "ppu-accuracy-nightly.yaml"
+KERNEL_PERF_WORKFLOW = ROOT / ".github" / "workflows" / "_ppu-kernel-perf.yaml"
 DEBUG_WORKFLOW = ROOT / ".github" / "workflows" / "ppu-debug.yaml"
 
 
@@ -233,7 +234,7 @@ def test_accuracy_script_seeds_reviewed_goldens_into_the_writable_tree() -> None
 
 def test_runtime_wrapper_exposes_accuracy_mode_and_environment() -> None:
     text = RUNTIME.read_text()
-    assert "pin-ut|model-test|model-accuracy" in text
+    assert "pin-ut|model-test|model-accuracy|kernel-perf" in text
     assert "/source/scripts/ci/ppu_e2e_accuracy.sh" in text
     for marker in (
         "HF_HOME",
@@ -311,6 +312,7 @@ def test_accuracy_entrypoints_are_the_manual_debug_and_the_nightly_runs() -> Non
         "accuracy_models",
     }
     assert "accuracy-tests" in inputs["target"]["options"]
+    assert "kernel-perf" in inputs["target"]["options"]
     assert debug["jobs"]["accuracy-tests"]["uses"] == (
         "./.github/workflows/_ppu-accuracy-tests.yaml"
     )
@@ -328,10 +330,15 @@ def test_accuracy_entrypoints_are_the_manual_debug_and_the_nightly_runs() -> Non
         "./.github/workflows/_ppu-accuracy-tests.yaml"
     )
 
+    assert debug["jobs"]["kernel-perf"]["uses"] == (
+        "./.github/workflows/_ppu-kernel-perf.yaml"
+    )
+
     # Accuracy still never rides the per-PR gate.
     automatic = (ROOT / ".github/workflows/ppu-build-and-test.yaml").read_text()
     assert "_ppu-accuracy-tests.yaml" not in automatic
     assert "model-accuracy" not in automatic
+    assert "_ppu-kernel-perf.yaml" in automatic
 
 
 def test_accuracy_nightly_is_serial_and_wheel_sourced_from_the_build_commit() -> None:
@@ -373,3 +380,42 @@ def test_workflows_pull_wheels_by_run_id_and_keep_python_frontend() -> None:
     smoke_text = SMOKE.read_text()
     assert "VLLM_USE_RUST_FRONTEND=0" in smoke_text
     assert "VLLM_USE_RUST_BENCH=0" in smoke_text
+
+
+def test_kernel_perf_workflow_is_call_only_and_uses_docker_runner() -> None:
+    workflow = _workflow(KERNEL_PERF_WORKFLOW)
+    assert workflow["name"] == "PPU kernel performance"
+    assert set(workflow[True]) == {"workflow_call"}
+    assert set(workflow["jobs"]) == {"kernel-perf"}
+    kp = workflow["jobs"]["kernel-perf"]
+    assert kp["runs-on"] == "8-ppu-m890p"
+    assert kp["timeout-minutes"] == 60
+    assert "container" not in kp
+    text = KERNEL_PERF_WORKFLOW.read_text()
+    assert 'ppu_runtime_container.sh" kernel-perf' in text
+    assert "ppu-scheduler-action" not in text
+
+
+def test_runtime_container_kernel_perf_mode() -> None:
+    text = RUNTIME.read_text()
+    assert "kernel-perf)" in text
+    assert "/source/scripts/ci/perf_regression.sh" in text
+    # kernel-perf mode injects SUITE and does not require MODEL_PATH/HF_HOME
+    lines = text.split("\n")
+    in_kernel_block = False
+    kernel_block = []
+    for line in lines:
+        if line.strip() == "kernel-perf)":
+            in_kernel_block = True
+        elif in_kernel_block and line.strip() == ";;":
+            break
+        elif in_kernel_block:
+            kernel_block.append(line)
+    kernel_text = "\n".join(kernel_block)
+    assert "SUITE" in kernel_text
+    assert "TEST_PATH=tests/e2e/perf/test_kernel_perf.py" in kernel_text
+    assert "RESULTS_DIR=/artifacts" in kernel_text
+    assert "perf_regression.sh" in kernel_text
+    assert "MODEL_PATH" not in kernel_text
+    assert "HF_HOME" not in kernel_text
+    assert "GSM8K_DATASET_PATH" not in kernel_text

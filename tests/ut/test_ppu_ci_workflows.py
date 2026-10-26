@@ -210,6 +210,7 @@ def test_executor_separates_read_only_pr_execution_and_always_reporting():
         "_ppu-build.yaml",
         "_ppu-pin-ut.yaml",
         "_ppu-model-tests.yaml",
+        "_ppu-kernel-perf.yaml",
         "ppu-ops-tests.yaml",
         "ppu-debug.yaml",
     ],
@@ -231,12 +232,13 @@ def test_untrusted_workflows_have_no_write_permissions_or_inherited_secrets(name
         ("_ppu-build.yaml", ["build"]),
         ("_ppu-pin-ut.yaml", ["pin-unit-tests"]),
         ("_ppu-model-tests.yaml", ["prepare", "e2e"]),
+        ("_ppu-kernel-perf.yaml", ["kernel-perf"]),
     ],
 )
 def test_every_pr_checkout_verifies_the_requested_sha_before_execution(name, job_ids):
     config = workflow(name)
     inputs = config[True]["workflow_call"]["inputs"]
-    if name == "_ppu-build.yaml":
+    if name in ("_ppu-build.yaml",):
         assert "pr_mode" not in inputs
     else:
         assert inputs["pr_mode"]["type"] == "boolean"
@@ -278,6 +280,7 @@ def test_every_pr_checkout_verifies_the_requested_sha_before_execution(name, job
         ("_ppu-pin-ut.yaml", "pin-unit-tests"),
         ("_ppu-model-tests.yaml", "prepare"),
         ("_ppu-model-tests.yaml", "e2e"),
+        ("_ppu-kernel-perf.yaml", "kernel-perf"),
     ],
 )
 def test_sha_verification_allows_different_owner_but_rejects_wrong_sha(
@@ -354,6 +357,7 @@ def test_pr_pipeline_structure():
         "build",
         "pin-unit-tests",
         "model-tests",
+        "kernel-perf",
         "gate",
     }
     runtime = jobs["runtime-image"]
@@ -381,6 +385,7 @@ def test_pr_pipeline_structure():
         "build",
         "pin-unit-tests",
         "model-tests",
+        "kernel-perf",
     ]
     assert "always()" in jobs["gate"]["if"]
     assert "ci-preview" in jobs["gate"]["if"]
@@ -410,6 +415,18 @@ def test_pr_pipeline_structure():
             "wheel_source_sha": "${{ inputs.wheel_source_sha || '' }}",
             "build_run_id": "${{ inputs.existing_build_run_id || github.run_id }}",
         }
+    kp = jobs["kernel-perf"]
+    assert kp["name"] == "PPU kernel perf"
+    assert kp["needs"] == ["runtime-image", "build"]
+    assert kp["uses"] == "./.github/workflows/_ppu-kernel-perf.yaml"
+    assert "!cancelled()" in kp["if"]
+    assert "ci-preview" in kp["if"]
+    assert "needs.build.result == 'success'" in kp["if"]
+    assert kp["with"] == {
+        "pr_mode": True,
+        "pr_head_sha": "${{ inputs.pr_head_sha || github.sha }}",
+        "build_run_id": "${{ inputs.existing_build_run_id || github.run_id }}",
+    }
 
 
 def test_docs_only_call_uses_hosted_gate_without_ppu_jobs():
@@ -531,6 +548,7 @@ def test_debug_structure():
         "pin-ut",
         "model-tests",
         "accuracy-tests",
+        "kernel-perf",
     ]
     assert inputs["target"]["default"] == "both"
     assert inputs["models"]["type"] == "string"
@@ -554,6 +572,11 @@ def test_debug_structure():
             "inputs.target == 'accuracy-tests'",
             "_ppu-accuracy-tests.yaml",
             {"models": "${{ inputs.accuracy_models }}"},
+        ),
+        "kernel-perf": (
+            "inputs.target == 'both' || inputs.target == 'kernel-perf'",
+            "_ppu-kernel-perf.yaml",
+            {},
         ),
     }
     assert set(jobs) == set(expected_jobs)
@@ -845,7 +868,12 @@ def test_preview_jobs_skip_without_an_active_ci_preview_label(labels, draft):
 
 @pytest.mark.parametrize(
     "target,expected",
-    [("both", (True, True)), ("pin-ut", (True, False)), ("model-tests", (False, True))],
+    [
+        ("both", (True, True, True)),
+        ("pin-ut", (True, False, False)),
+        ("model-tests", (False, True, False)),
+        ("kernel-perf", (False, False, True)),
+    ],
 )
 def test_debug_targets_select_requested_consumers(target, expected):
     jobs = workflow("ppu-debug.yaml")["jobs"]
@@ -853,7 +881,7 @@ def test_debug_targets_select_requested_consumers(target, expected):
     assert (
         tuple(
             bool(expression(jobs[job_id]["if"], context))
-            for job_id in ("pin-unit-tests", "model-tests")
+            for job_id in ("pin-unit-tests", "model-tests", "kernel-perf")
         )
         == expected
     )
@@ -1072,7 +1100,7 @@ def test_consumers_require_build_or_valid_reuse(build_jobs, build, run_id, sourc
     }
     reuse = bool(run_id) and bool(source)
     eligible = build == "success" or (build == "skipped" and reuse)
-    for job_id in ("pin-unit-tests", "model-tests"):
+    for job_id in ("pin-unit-tests", "model-tests", "kernel-perf"):
         assert bool(expression(build_jobs[job_id]["if"], context)) == eligible
     assert bool(expression(build_jobs["build"]["if"], context)) == (not run_id)
     # Gate must execute even after failed/cancelled/skipped dependencies.
@@ -1081,7 +1109,7 @@ def test_consumers_require_build_or_valid_reuse(build_jobs, build, run_id, sourc
 
 @pytest.mark.parametrize(
     "states",
-    itertools.product(["success", "failure", "cancelled", "skipped"], repeat=3),
+    itertools.product(["success", "failure", "cancelled", "skipped"], repeat=4),
 )
 @pytest.mark.parametrize(
     "run_id,source", [("", ""), ("123", "a" * 40), ("999", ""), ("", "a" * 40)]
@@ -1104,7 +1132,7 @@ def test_gate_executes_fail_closed_truth_table(
     results = {"runtime-image": {"result": "success"}}
     results.update(
         zip(
-            ("build", "pin-unit-tests", "model-tests"),
+            ("build", "pin-unit-tests", "model-tests", "kernel-perf"),
             ({"result": state} for state in states),
             strict=False,
         )
@@ -1120,7 +1148,7 @@ def test_gate_executes_fail_closed_truth_table(
     expected = (
         states[0] == "success"
         or (states[0] == "skipped" and bool(run_id) and bool(source))
-    ) and states[1:] == ("success", "success")
+    ) and states[1:] == ("success", "success", "success")
     assert passed is expected
 
 
@@ -1159,4 +1187,23 @@ def test_runtime_workflows_use_the_checked_in_docker_wrapper():
     assert "ppu-scheduler-action" not in (WORKFLOWS / "_ppu-pin-ut.yaml").read_text()
     assert (
         "ppu-scheduler-action" not in (WORKFLOWS / "_ppu-model-tests.yaml").read_text()
+    )
+    kperf = workflow("_ppu-kernel-perf.yaml")["jobs"]["kernel-perf"]
+    kperf_step = next(
+        step
+        for step in kperf["steps"]
+        if "ppu_runtime_container.sh" in step.get("run", "")
+    )
+    assert (
+        kperf_step["run"]
+        == 'bash "${PPU_CI_SOURCE_DIR}/scripts/ci/ppu_runtime_container.sh" kernel-perf'
+    )
+    assert kperf_step["env"]["PPU_CI_DEVICE_COUNT"] == "8"
+    assert kperf_step["env"]["PPU_CI_REQUIRE_PR_ARTIFACT"] == "${{ inputs.pr_mode }}"
+    assert kperf_step["env"]["SUITE"] == "kernel"
+    assert (
+        kperf_step["env"]["PPU_CI_SOURCE_DIR"] == "${{ steps.runtime.outputs.source }}"
+    )
+    assert (
+        "ppu-scheduler-action" not in (WORKFLOWS / "_ppu-kernel-perf.yaml").read_text()
     )
