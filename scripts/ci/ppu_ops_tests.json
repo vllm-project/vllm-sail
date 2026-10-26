@@ -89,7 +89,7 @@
     {"id": "selective-scan", "test": "tests/e2e/tier_b/test_selective_scan.py", "boards": ["ppu10", "ppu15"], "requires": ["torch", "triton", "vllm", "vllm_sail"], "board_overrides": {}}
   ],
   "execution_profiles": {
-    "ppu10": {"runner_group": "k8s-runner-group-cpu-thead", "node_selector": {"board-type": "OAM-810E"}, "nproc_per_node": 1, "group_count": 1},
-    "ppu15": {"runner_group": "k8s-runner-group-cpu-thead", "node_selector": {"board-type": "ZW-M890P"}, "nproc_per_node": 1, "group_count": 1}
+    "ppu10": {"runner_group": "8-ppu-m890p", "node_selector": {"board-type": "OAM-810E"}, "nproc_per_node": 1, "group_count": 1},
+    "ppu15": {"runner_group": "8-ppu-m890p", "node_selector": {"board-type": "ZW-M890P"}, "nproc_per_node": 1, "group_count": 1}
   }
 }

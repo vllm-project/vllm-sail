@@ -11,7 +11,7 @@
 schema = 1
 vllm_version_range = ">=0.31.0,<0.32.0"
 key_interface_count = 10
-target_count = 257
+target_count = 261
 
 [[key_interface]]
 symbol = "vllm.platforms.interface.PlatformEnum"
@@ -1640,6 +1640,38 @@ module = "vllm/models/kimi_k3/nvidia/kda.py"
 symbol = "is_fused_kda_decode_supported"
 present = true
 fingerprint = "sha256:bcac008483fce3d460657fbe040ce125db05ee92818e9e012a738e21a624ef7f"
+
+[[patch_target]]
+name = "vllm.models.kimi_k3.nvidia.latent_moe_runner.LatentMoERunner.__init__"
+kind = "class"
+module = "vllm/models/kimi_k3/nvidia/latent_moe_runner.py"
+symbol = "LatentMoERunner.__init__"
+present = true
+fingerprint = "sha256:93c65cfe8410be6b954a16b1df5bd35434a27ecd0afd833d21a2fce0c839a41f"
+
+[[patch_target]]
+name = "vllm.models.kimi_k3.nvidia.latent_moe_runner.LatentMoERunner._overlap_allreduce_tail"
+kind = "class"
+module = "vllm/models/kimi_k3/nvidia/latent_moe_runner.py"
+symbol = "LatentMoERunner._overlap_allreduce_tail"
+present = true
+fingerprint = "sha256:9015fb804fff198294183e26a6c381df6b00986cfbd0ae163834c57539052f62"
+
+[[patch_target]]
+name = "vllm.models.kimi_k3.nvidia.latent_moe_runner.LatentMoERunner._select_tail_tier"
+kind = "class"
+module = "vllm/models/kimi_k3/nvidia/latent_moe_runner.py"
+symbol = "LatentMoERunner._select_tail_tier"
+present = true
+fingerprint = "sha256:1797c45874f400e8eae658738c578f4017082edac65a3e1e4de455f5bd5c5cdd"
+
+[[patch_target]]
+name = "vllm.models.kimi_k3.nvidia.model.KimiRoutedOutputTransform.forward"
+kind = "class"
+module = "vllm/models/kimi_k3/nvidia/model.py"
+symbol = "KimiRoutedOutputTransform.forward"
+present = true
+fingerprint = "sha256:82d672f98450ec92117cb7a8a39de7cac5e84d99e190614319005ae41e6e7c49"
 
 [[patch_target]]
 name = "vllm.platforms.interface.Platform.is_ppu"

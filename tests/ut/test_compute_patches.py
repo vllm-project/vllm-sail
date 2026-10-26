@@ -233,6 +233,64 @@ def test_kernel_warmup_filters_real_jit_registry(monkeypatch, installed):
     assert calls == [128]
 
 
+def test_register_ppu_sampler_warmups_gating(monkeypatch, installed):
+    """The sampler registration mirrors upstream's ROCm gate, on PPU."""
+    from types import SimpleNamespace
+
+    import vllm.v1.sample.ops.topk_topp_sampler as sampler_mod
+    from vllm.model_executor.warmup.jit_warmup import JitWarmupRegistry, VllmJitKernel
+
+    from vllm_sail.patch.enhancement.kernel_warmup import (
+        _register_ppu_sampler_warmups,
+    )
+
+    calls: list[str] = []
+
+    class ProbeKernel(VllmJitKernel):
+        def get_warmup_keys(self):
+            return ["k"]
+
+        def compile(self, compile_key):
+            calls.append(compile_key)
+
+    def fake_register():
+        calls.append("registered")
+        # Landing in the registry proves the activate() context was live.
+        ProbeKernel().register_warmup()
+
+    monkeypatch.setattr(
+        sampler_mod, "register_top_k_top_p_warmups", fake_register, raising=False
+    )
+
+    def make_worker(**runner_kwargs):
+        registry = JitWarmupRegistry(SimpleNamespace())
+        runner = SimpleNamespace(jit_warmup_registry=registry, **runner_kwargs)
+        return SimpleNamespace(model_runner=runner), registry
+
+    # A runner without a registry (e.g. pooling-only or older vLLM) is a no-op.
+    worker, _ = make_worker(is_last_pp_rank=True, is_pooling_model=False)
+    worker.model_runner.jit_warmup_registry = None
+    _register_ppu_sampler_warmups(worker)
+    assert calls == []
+
+    # Non-last pipeline-parallel ranks never sample.
+    worker, registry = make_worker(is_last_pp_rank=False, is_pooling_model=False)
+    _register_ppu_sampler_warmups(worker)
+    assert calls == []
+    assert not registry._registrations
+
+    # Pooling models never sample.
+    worker, registry = make_worker(is_last_pp_rank=True, is_pooling_model=True)
+    _register_ppu_sampler_warmups(worker)
+    assert calls == []
+    assert not registry._registrations
+
+    worker, registry = make_worker(is_last_pp_rank=True, is_pooling_model=False)
+    _register_ppu_sampler_warmups(worker)
+    assert calls == ["registered"]
+    assert len(registry._registrations) == 1
+
+
 # ---------------------------------------------------------------------------
 # quant_keys
 # ---------------------------------------------------------------------------

@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: Apache-2.0
 #
-# PPU end-to-end smoke test, executed inside the PPU pod dispatched by
-# t-head/ppu-scheduler-action. It installs the CI-built vLLM and vLLM SAIL
-# wheels, self-checks the SAIL platform, serves a model from the auto-mounted
-# NAS checkpoint, and verifies one chat completion request end to end.
+# PPU end-to-end smoke test, executed inside the CUDA-compatible runtime
+# container created on a self-hosted PPU runner. It installs the CI-built vLLM
+# and vLLM SAIL wheels, self-checks the SAIL platform, serves a model from the
+# read-only NAS checkpoint mount, and verifies one chat completion end to end.
 #
-# Environment contract (injected via the action's extra_env):
+# Environment contract (injected by ppu_runtime_container.sh):
 #   MODEL_PATH          absolute checkpoint path (under the auto-mounted NAS)
 #   SERVED_NAME         served-model-name exposed by vLLM
 #   TP_SIZE             tensor-parallel size (matches the pod's PPU card count)
@@ -47,7 +47,15 @@ python -c 'import sys; print("python", sys.version)'
 
 log "install wheels"
 WHEELS_DIR="$(cd -- "${WHEELS_DIR}" && pwd)"
+REQUIRE_PR_ARTIFACT="${REQUIRE_PR_ARTIFACT:-false}"
+EXPECTED_VLLM_COMMIT="${EXPECTED_VLLM_COMMIT:?EXPECTED_VLLM_COMMIT is required}"
+EXPECTED_SAIL_COMMIT="${EXPECTED_SAIL_COMMIT:?EXPECTED_SAIL_COMMIT is required}"
 python "${ROOT_DIR}/scripts/ci/ppu_wheel_manifest.py" verify "${WHEELS_DIR}"
+if [[ "${REQUIRE_PR_ARTIFACT}" == "true" ]]; then
+    python "${ROOT_DIR}/scripts/ci/ppu_wheel_manifest.py" verify "${WHEELS_DIR}" \
+        --vllm-commit "${EXPECTED_VLLM_COMMIT}" \
+        --sail-commit "${EXPECTED_SAIL_COMMIT}"
+fi
 # Match the vLLM wheel first, excluding the vllm_sail wheel (underscore prefix).
 mapfile -t vllm_wheels < <(
     find "${WHEELS_DIR}" -type f -name 'vllm-*.whl' -print | sort
@@ -60,7 +68,7 @@ mapfile -t sail_wheels < <(
 echo "vllm wheel: ${vllm_wheels[0]}"
 echo "sail wheel: ${sail_wheels[0]}"
 export PIP_CONSTRAINT="/tmp/ppu-smoke-image-constraints.txt"
-python "${ROOT_DIR}/scripts/ci/ppu_image_stack.py" prepare \
+python "${ROOT_DIR}/scripts/ci/ppu_image_stack.py" capture \
     --sdk /usr/local/PPU_SDK --output /tmp/ppu-smoke-image-stack.json \
     --constraints "${PIP_CONSTRAINT}"
 python -m pip install --no-deps --force-reinstall "${vllm_wheels[0]}"
@@ -79,6 +87,19 @@ PY
 
 log "collect_env"
 python -c "from vllm_sail import collect_env; collect_env()"
+
+log "resolve model path"
+# Resolve a model_id from the local HF cache only when no local path was given.
+if [ -n "${MODEL_PATH}" ] && [ ! -d "${MODEL_PATH}" ]; then
+    export HF_HOME="${HF_HOME:?HF_HOME must be set for model_id resolution}"
+    export HF_HUB_OFFLINE=1
+    resolved=$(python -c "
+from huggingface_hub import snapshot_download
+print(snapshot_download('${MODEL_PATH}', local_files_only=True))
+" 2>/dev/null) || { echo "ERROR: Cannot resolve model_id '${MODEL_PATH}' from HF cache"; exit 1; }
+    echo "Resolved model_id '${MODEL_PATH}' -> '${resolved}'"
+    export MODEL_PATH="${resolved}"
+fi
 
 log "checkpoint"
 test -d "${MODEL_PATH}" || { echo "checkpoint dir missing: ${MODEL_PATH}"; exit 1; }

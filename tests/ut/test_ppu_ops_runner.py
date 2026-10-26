@@ -579,7 +579,7 @@ def test_execute_only_publishes_success_after_complete_evidence(
                 "--output",
                 str(output / "image-stack.json"),
             ]
-            if command[2] == "prepare":
+            if command[2] == "capture":
                 assert not installed
                 assert command[7:] == ["--constraints", kwargs["env"]["PIP_CONSTRAINT"]]
                 if failure == "torch":
@@ -590,7 +590,7 @@ def test_execute_only_publishes_success_after_complete_evidence(
                     raise subprocess.CalledProcessError(1, command)
             return subprocess.CompletedProcess(command, 0)
         if command[1:3] == ["-m", "pip"]:
-            assert stack_commands == ["prepare"]
+            assert stack_commands == ["capture"]
             assert kwargs["env"]["PIP_CONSTRAINT"] == str(
                 output / "image-constraints.txt"
             )
@@ -636,7 +636,7 @@ def test_execute_only_publishes_success_after_complete_evidence(
     assert code == (0 if failure is None else 1)
     assert summary["status"] == ("success" if failure is None else "failure")
     assert stack_commands == (
-        ["prepare"] if failure in {"torch", "install"} else ["prepare", "verify"]
+        ["capture"] if failure in {"torch", "install"} else ["capture", "verify"]
     )
     if failure == "torch":
         assert not installed

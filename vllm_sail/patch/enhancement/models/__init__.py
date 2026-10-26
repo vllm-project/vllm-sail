@@ -17,6 +17,8 @@ Modules, and why each is import-on-install like the rest of the framework:
 * ``deepseek_v4`` — selects the plugin FlashMLA subclass only on PPU; the
   quantization-specific weights mapper remains plugin-local so CUDA behavior
   is unchanged.
+* ``kimi_k3`` — quantized routed up-projection support for the latent-MoE
+  tail's fused tiers.
 * ``llama4`` — torch.compile on the custom router (+1).
 * ``qwen3_moe`` — per-layer mix_layer quant overrides (+36).
 * ``qwen3_next`` — NVTX profiling scaffold (+19).
@@ -31,6 +33,7 @@ from vllm_sail.patch.enhancement.models import (
     deepseek_v4_cache,  # noqa: F401
     deepseek_v4_compressor,  # noqa: F401
     deepseek_v4_metadata,  # noqa: F401
+    kimi_k3,  # noqa: F401
     llama4,  # noqa: F401
     moe_marlin_gate,  # noqa: F401
     qwen3_moe,  # noqa: F401

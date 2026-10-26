@@ -1,6 +1,4 @@
-# ruff: noqa: E731, W291, W293, UP037
 # ruff: noqa: F821, I001
-# Copied bodies resolve globals in their upstream module through bind_body.
 # SPDX-License-Identifier: Apache-2.0
 """Register PPU standard and batched INT4 W4A16 experts."""
 
@@ -8,6 +6,7 @@ from __future__ import annotations
 
 import inspect
 
+import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.model_executor.layers.fused_moe.oracle import int_wna16 as oracle
 
 from vllm_sail.patch.bodies import bind_body
@@ -24,85 +23,44 @@ WNA16MoEBackend = oracle.WNA16MoEBackend
 for _name in ("PPU_DEEPGEMM", "BATCHED_PPU_DEEPGEMM"):
     extend_enum(WNA16MoEBackend, _name, _name)
 _PPU = (WNA16MoEBackend.PPU_DEEPGEMM, WNA16MoEBackend.BATCHED_PPU_DEEPGEMM)
+_PPU_ALIASES = ("ppu_deep_gemm", "ppu_deep_gemm_w4a16")
+
+# Captured before patching so every replacement can fall back to upstream.
+_upstream_backend_to_kernel_cls = oracle.backend_to_kernel_cls
+_upstream_get_priority_backends = oracle._get_priority_backends
+_upstream_map_wna16_backend = oracle.map_wna16_backend
+_upstream_select_wna16_moe_backend = oracle.select_wna16_moe_backend
+_upstream_reason = oracle._backend_incompatibility_reason
+_upstream_convert = oracle.convert_to_wna16_moe_kernel_format
 
 
+@patch(_MODULE, "backend_to_kernel_cls", **_META)
 def backend_to_kernel_cls(
     backend: WNA16MoEBackend,
 ) -> list[type[mk.FusedMoEExperts]]:
     """Return the experts class for the given backend, or None for NONE."""
-    if backend == WNA16MoEBackend.HUMMING:
-        from vllm.model_executor.layers.fused_moe.experts.fused_humming_moe import (
-            BatchedHummingGroupedExperts,
-            HummingGroupedExperts,
-            HummingIndexedExperts,
-        )
-
-        return [
-            BatchedHummingGroupedExperts,
-            HummingGroupedExperts,
-            HummingIndexedExperts,
-        ]
-    elif backend == WNA16MoEBackend.MARLIN:
-        return [MarlinExperts]
-    elif backend == WNA16MoEBackend.BATCHED_MARLIN:
-        return [BatchedMarlinExperts]
-    # PPU MODIFICATION: begin
-    elif backend == WNA16MoEBackend.PPU_DEEPGEMM:
+    # PPU MODIFICATION: begin — upstream cannot resolve plugin experts.
+    if backend == WNA16MoEBackend.PPU_DEEPGEMM:
         from vllm_sail.model_executor.layers.fused_moe.experts.deep_gemm_moe import (
             PPUDeepGemmExperts,
         )
 
         return [PPUDeepGemmExperts]
-    elif backend == WNA16MoEBackend.BATCHED_PPU_DEEPGEMM:
+    if backend == WNA16MoEBackend.BATCHED_PPU_DEEPGEMM:
         from vllm_sail.model_executor.layers.fused_moe.experts.batched_deep_gemm_moe import (
             PPUBatchedDeepGemmExperts,
         )
 
         return [PPUBatchedDeepGemmExperts]
     # PPU MODIFICATION: end
-    elif backend == WNA16MoEBackend.FLASHINFER_TRTLLM:
-        return [TrtLlmMxint4ExpertsMonolithic]
-    elif backend == WNA16MoEBackend.TRITON:
-        return [TritonWNA16Experts]
-    elif backend == WNA16MoEBackend.XPU:
-        from vllm.model_executor.layers.fused_moe.experts.xpu_moe import (
-            XPUExpertsWNA16,
-        )
-
-        return [XPUExpertsWNA16]
-    elif backend == WNA16MoEBackend.CPU:
-        from vllm.model_executor.layers.fused_moe.experts.cpu_moe import (
-            CPUExpertsInt4,
-        )
-
-        return [CPUExpertsInt4]
-    elif backend == WNA16MoEBackend.ZEN_CPU:
-        from vllm.model_executor.layers.fused_moe.experts.zentorch_moe import (
-            ZentorchExpertsInt4,
-        )
-
-        return [ZentorchExpertsInt4]
-    elif backend == WNA16MoEBackend.EMULATION:
-        from vllm.model_executor.layers.fused_moe.experts.int4_emulation_moe import (
-            Int4EmulationTritonExperts,
-        )
-
-        return [Int4EmulationTritonExperts]
-    else:
-        raise ValueError(f"Unknown WNA16 MoE backend: {backend.value}")
+    return _upstream_backend_to_kernel_cls(backend)
 
 
-backend_to_kernel_cls = patch(_MODULE, "backend_to_kernel_cls", **_META)(
-    bind_body(backend_to_kernel_cls, oracle)
-)
-
-
+@patch(_MODULE, "_get_priority_backends", **_META)
 def _get_priority_backends() -> list[WNA16MoEBackend]:
     """Get available backends in priority order based on platform and config."""
-    if current_platform.is_cpu():
-        return [WNA16MoEBackend.ZEN_CPU, WNA16MoEBackend.CPU]
-    if current_platform.is_xpu():
-        return [WNA16MoEBackend.XPU]
+    from vllm.platforms import current_platform
+
     # PPU MODIFICATION: begin
     if current_platform.is_ppu():
         return [
@@ -115,48 +73,59 @@ def _get_priority_backends() -> list[WNA16MoEBackend]:
             WNA16MoEBackend.EMULATION,
         ]
     # PPU MODIFICATION: end
-
-    return [
-        WNA16MoEBackend.FLASHINFER_TRTLLM,
-        WNA16MoEBackend.MARLIN,
-        WNA16MoEBackend.BATCHED_MARLIN,
-        WNA16MoEBackend.TRITON,
-        WNA16MoEBackend.HUMMING,
-        WNA16MoEBackend.EMULATION,
-    ]
+    return _upstream_get_priority_backends()
 
 
-_get_priority_backends = patch(_MODULE, "_get_priority_backends", **_META)(
-    bind_body(_get_priority_backends, oracle)
-)
-
-
+@patch(_MODULE, "map_wna16_backend", **_META)
 def map_wna16_backend(runner_backend: MoEBackend) -> WNA16MoEBackend:
     """Map user's MoEBackend to WNA16MoEBackend."""
-    mapping = {
-        "triton": WNA16MoEBackend.TRITON,
-        "marlin": WNA16MoEBackend.MARLIN,
-        # PPU MODIFICATION: begin
-        "ppu_deep_gemm": WNA16MoEBackend.PPU_DEEPGEMM,
-        "ppu_deep_gemm_w4a16": WNA16MoEBackend.PPU_DEEPGEMM,
-        # PPU MODIFICATION: end
-        "humming": WNA16MoEBackend.HUMMING,
-        "flashinfer_trtllm": WNA16MoEBackend.FLASHINFER_TRTLLM,
-        "emulation": WNA16MoEBackend.EMULATION,
-    }
-    if backend := mapping.get(runner_backend):
-        return backend
+    # PPU MODIFICATION: begin
+    if runner_backend in _PPU_ALIASES:
+        return WNA16MoEBackend.PPU_DEEPGEMM
+    # PPU MODIFICATION: end
+    return _upstream_map_wna16_backend(runner_backend)
+
+
+def _select_batched_ppu_backend(
+    config: FusedMoEConfig,
+    weight_key: QuantKey,
+    quant_config: QuantizationConfig | QuantizationArgs,
+    may_have_zp: bool,
+    may_have_bias: bool,
+    allow_tile_padding: bool,
+) -> tuple[WNA16MoEBackend, type[mk.FusedMoEExperts]]:
+    """Resolve the batched-layout expert for an explicit PPU request."""
+    backend = WNA16MoEBackend.BATCHED_PPU_DEEPGEMM
+    reason = _backend_incompatibility_reason(
+        backend,
+        config,
+        quant_config,
+        may_have_zp,
+        may_have_bias,
+        allow_tile_padding,
+    )
+    if reason is not None:
+        raise ValueError(
+            f"WNA16 MoE backend '{backend.value}' does not support the "
+            f"deployment configuration since {reason}."
+        )
+    activation_format = mk.FusedMoEActivationFormat.BatchedExperts
+    for k_cls in backend_to_kernel_cls(backend):
+        supported, reason = k_cls.is_supported_config(
+            k_cls, config, weight_key, None, activation_format
+        )
+        if supported:
+            oracle.logger.info_once(
+                f"Using '{backend.value}' WNA16 MoE backend.", scope="local"
+            )
+            return backend, k_cls
     raise ValueError(
-        f"moe_backend='{runner_backend}' is not supported for WNA16 MoE. "
-        f"Expected one of {list(mapping.keys())}."
+        f"WNA16 MoE backend '{backend.value}' does not support the "
+        f"deployment configuration since {reason}."
     )
 
 
-map_wna16_backend = patch(_MODULE, "map_wna16_backend", **_META)(
-    bind_body(map_wna16_backend, oracle)
-)
-
-
+@patch(_MODULE, "select_wna16_moe_backend", **_META)
 def select_wna16_moe_backend(
     config: FusedMoEConfig,
     weight_key: QuantKey,
@@ -174,107 +143,35 @@ def select_wna16_moe_backend(
         quant_config: Quantization structure and checkpoint format description.
         may_have_zp: Whether the integration can provide weight zero points.
         may_have_bias: Whether the integration can provide expert bias.
+        allow_tile_padding: Whether backends that require padding the weights
+            up to a tile boundary may be selected.
 
     Returns:
         A tuple of (``WNA16MoEBackend``, experts class or ``None``).
     """
-
-    activation_format = (
-        mk.FusedMoEActivationFormat.BatchedExperts
-        if config.moe_parallel_config.use_batched_activation_format
-        else mk.FusedMoEActivationFormat.Standard
-    )
-
-    def _make_log_backend(backend: WNA16MoEBackend):
-        return f"Using '{backend.value}' WNA16 MoE backend."
-
-    def _make_log_unsupported(backend: WNA16MoEBackend, reason: str | None) -> str:
-        if reason:
-            return (
-                f"WNA16 MoE backend '{backend.value}' does not support the "
-                f"deployment configuration since {reason}."
-            )
-        return (
-            f"WNA16 MoE backend '{backend.value}' does not support the "
-            "deployment configuration."
-        )
-
-    def _return_or_raise(
-        backend: WNA16MoEBackend,
-        config: FusedMoEConfig,
-        weight_key: QuantKey | None,
-        activation_key: QuantKey | None,
-        activation_format: mk.FusedMoEActivationFormat,
-    ) -> tuple[WNA16MoEBackend, type[mk.FusedMoEExperts]]:
-        reason: str | None = None
-        for k_cls in backend_to_kernel_cls(backend):
-            supported, reason = k_cls.is_supported_config(
-                k_cls, config, weight_key, activation_key, activation_format
-            )
-            if supported:
-                logger.info_once(_make_log_backend(backend), scope="local")
-                return backend, k_cls
-        raise ValueError(_make_log_unsupported(backend, reason))
-
-    # Handle explicit moe_backend from user.
-    runner_backend = config.moe_backend
-    if runner_backend != "auto":
-        requested_backend = map_wna16_backend(runner_backend)
-        reason = _backend_incompatibility_reason(
-            requested_backend,
+    # PPU MODIFICATION: begin — an explicit PPU DeepGEMM request cannot use the
+    # standard-layout expert when the layer runs the batched activation format.
+    if (
+        config.moe_backend in _PPU_ALIASES
+        and config.moe_parallel_config.use_batched_activation_format
+    ):
+        return _select_batched_ppu_backend(
             config,
+            weight_key,
             quant_config,
             may_have_zp,
             may_have_bias,
             allow_tile_padding,
         )
-        if reason is not None:
-            raise ValueError(_make_log_unsupported(requested_backend, reason))
-        # PPU MODIFICATION: begin
-        if (
-            activation_format == mk.FusedMoEActivationFormat.BatchedExperts
-            and requested_backend == WNA16MoEBackend.PPU_DEEPGEMM
-        ):
-            requested_backend = WNA16MoEBackend.BATCHED_PPU_DEEPGEMM
-        # PPU MODIFICATION: end
-        return _return_or_raise(
-            requested_backend, config, weight_key, None, activation_format
-        )
-
-    # Select kernels in order of backend.
-    AVAILABLE_BACKENDS = _get_priority_backends()
-
-    for backend in AVAILABLE_BACKENDS:
-        reason = _backend_incompatibility_reason(
-            backend,
-            config,
-            quant_config,
-            may_have_zp,
-            may_have_bias,
-            allow_tile_padding,
-        )
-        if reason is not None:
-            logger.debug_once(_make_log_unsupported(backend, reason), scope="local")
-            continue
-        activation_key = None  # always BF16 activation for WNA16 MoE
-        for k_cls in backend_to_kernel_cls(backend):
-            supported, reason = k_cls.is_supported_config(
-                k_cls, config, weight_key, activation_key, activation_format
-            )
-            if supported:
-                logger.info_once(_make_log_backend(backend), scope="local")
-                return backend, k_cls
-            else:
-                logger.debug_once(_make_log_unsupported(backend, reason), scope="local")
-
-    raise NotImplementedError(
-        "No WNA16 MoE backend supports the deployment configuration."
+    # PPU MODIFICATION: end
+    return _upstream_select_wna16_moe_backend(
+        config,
+        weight_key,
+        quant_config,
+        may_have_zp,
+        may_have_bias,
+        allow_tile_padding,
     )
-
-
-select_wna16_moe_backend = patch(_MODULE, "select_wna16_moe_backend", **_META)(
-    bind_body(select_wna16_moe_backend, oracle)
-)
 
 
 def make_wna16_moe_kernel(
@@ -282,12 +179,6 @@ def make_wna16_moe_kernel(
     moe_config: FusedMoEConfig,
     experts_cls: type[mk.FusedMoEExperts],
     backend: WNA16MoEBackend = WNA16MoEBackend.MARLIN,
-    layer: torch.nn.Module | None = None,
-    is_k_full: bool = False,
-    w13_g_idx: torch.Tensor | None = None,
-    w2_g_idx: torch.Tensor | None = None,
-    w13_g_idx_sort_indices: torch.Tensor | None = None,
-    w2_g_idx_sort_indices: torch.Tensor | None = None,
     routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
 ) -> mk.FusedMoEKernel:
     from vllm.model_executor.layers.fused_moe.all2all_utils import (
@@ -299,6 +190,9 @@ def make_wna16_moe_kernel(
     from vllm.model_executor.layers.fused_moe.experts.int4_emulation_moe import (
         Int4EmulationTritonExperts,
     )
+    from vllm.model_executor.layers.fused_moe.experts.rdna3_moe import (
+        Rdna3WNA16Experts,
+    )
     from vllm.model_executor.layers.fused_moe.experts.xpu_moe import (
         XPUExpertsWNA16,
     )
@@ -306,11 +200,10 @@ def make_wna16_moe_kernel(
         ZentorchExpertsInt4,
     )
 
-    # PPU MODIFICATION: begin
+    # PPU MODIFICATION: begin — plugin experts are not in upstream's allowlist.
     from vllm_sail.model_executor.layers.fused_moe.experts.batched_deep_gemm_moe import (
         PPUBatchedDeepGemmExperts,
     )
-
     from vllm_sail.model_executor.layers.fused_moe.experts.deep_gemm_moe import (
         PPUDeepGemmExperts,
     )
@@ -333,6 +226,7 @@ def make_wna16_moe_kernel(
         CPUExpertsInt4,
         ZentorchExpertsInt4,
         Int4EmulationTritonExperts,
+        Rdna3WNA16Experts,
     )
     if backend == WNA16MoEBackend.HUMMING:
         allowed_experts += tuple(backend_to_kernel_cls(WNA16MoEBackend.HUMMING))
@@ -353,18 +247,6 @@ def make_wna16_moe_kernel(
     logger.info_once("Using %s", experts_cls.__name__, scope="local")
 
     extra_args: dict[str, Any] = {}
-    if backend == WNA16MoEBackend.HUMMING:
-        assert layer is not None
-        extra_args = {"layer": layer}
-    elif issubclass(experts_cls, MarlinExpertsBase):
-        extra_args = {
-            "w13_g_idx": w13_g_idx,
-            "w2_g_idx": w2_g_idx,
-            "w13_g_idx_sort_indices": w13_g_idx_sort_indices,
-            "w2_g_idx_sort_indices": w2_g_idx_sort_indices,
-            "is_k_full": is_k_full,
-        }
-
     if prepare_finalize.activation_format == mk.FusedMoEActivationFormat.BatchedExperts:
         max_num_tokens = prepare_finalize.max_num_tokens_per_rank()
         assert max_num_tokens is not None
@@ -386,9 +268,6 @@ def make_wna16_moe_kernel(
 make_wna16_moe_kernel = patch(_MODULE, "make_wna16_moe_kernel", **_META)(
     bind_body(make_wna16_moe_kernel, oracle)
 )
-
-_upstream_reason = oracle._backend_incompatibility_reason
-_upstream_convert = oracle.convert_to_wna16_moe_kernel_format
 
 
 @patch(_MODULE, "_backend_incompatibility_reason", **_META)

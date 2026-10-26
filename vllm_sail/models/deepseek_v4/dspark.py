@@ -78,6 +78,13 @@ def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
     params_dict = dict(self.named_parameters())
     loaded_params: set[str] = set()
     # PPU MODIFICATION: begin
+    # 0.31 keeps a cross-layer ``context_wkv_proj`` that the checkpoint does
+    # not contain: every draft layer's ``mtp.{i}.attn.wkv.*`` must be
+    # duplicated into it (carrying ``shard_id=i``) and loaded separately.
+    # Without this the draft model runs on uninitialised context-KV weights
+    # and the acceptance rate collapses to ~0.
+    loaded_confidence_head = False
+    weights = _duplicate_context_wkv_weights(weights, len(self.model.layers))
 
     # Detect non-expert scale suffix from actual model parameters.
     # INT8/FP8 channelwise quant registers .weight_scale; FP8 block
@@ -108,6 +115,11 @@ def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
             continue
         name = mapped
 
+        # PPU MODIFICATION: begin
+        if "confidence_head." in name:
+            loaded_confidence_head = True
+        # PPU MODIFICATION: end
+
         # ``.scale`` -> per-method scale suffix.
         if name.endswith(".scale"):
             suffix = (
@@ -124,6 +136,18 @@ def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
             loaded_weight = DeepseekV4Model._pad_shared_expert_weight(
                 self.quant_config, name, loaded_weight
             )
+
+        # PPU MODIFICATION: begin
+        # ``context_wkv_proj`` is a MergedColumnParallelLinear whose shards are
+        # produced by ``_duplicate_context_wkv_weights``; the destination shard
+        # rides on the tensor as ``loaded_weight.shard_id``. Falling through to
+        # the default loader would overwrite every shard with the last one.
+        if name.startswith("model.context_wkv_proj."):
+            param = params_dict[name]
+            param.weight_loader(param, loaded_weight, loaded_weight.shard_id)
+            loaded_params.add(name)
+            continue
+        # PPU MODIFICATION: end
 
         # E8M0 expert scales: keep raw exponent bytes.
         if ".experts." in name:
@@ -174,7 +198,13 @@ def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
             weight_loader(param, loaded_weight)
             loaded_params.add(name)
 
-    self._finalize_moe()
+    # PPU MODIFICATION: begin
+    # The checkpoint may not ship confidence-head weights; drop the randomly
+    # initialised module so acceptance estimation never consumes garbage.
+    if self.model.confidence_head is not None and not loaded_confidence_head:
+        self.model.confidence_head = None
+    # PPU MODIFICATION: end
+    self.process_weights_after_loading()
     logger.info_once("DSpark draft model loaded: %d params", len(loaded_params))
     return loaded_params
 

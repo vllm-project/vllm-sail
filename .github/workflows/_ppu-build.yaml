@@ -1,0 +1,128 @@
+name: PPU wheel build
+
+on:
+  workflow_call:
+    inputs:
+      pr_head_sha:
+        description: Exact SAIL commit to build (blank uses github.sha)
+        type: string
+        default: ""
+      build_image:
+        description: Digest-pinned SDK image (blank uses the default stack image)
+        type: string
+        default: ""
+      vllm_ref:
+        description: vLLM ref (blank uses .github/vllm-main-verified.commit)
+        type: string
+        default: ""
+      pytorch_sail_arch:
+        description: Semicolon-separated HG architectures (blank uses ppu_15;ppu_10)
+        type: string
+        default: ""
+      native_reuse_run_id:
+        description: Prior trusted run whose vLLM wheel and native SAIL extensions may be reused
+        type: string
+        default: ""
+    outputs:
+      image:
+        description: Build image recorded for downstream tests
+        value: ${{ jobs.build.outputs.image }}
+
+permissions:
+  contents: read
+  actions: read
+cache-mode: none
+
+jobs:
+  build:
+    name: PPU wheel build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    outputs:
+      image: ${{ steps.image.outputs.image }}
+    container:
+      image: ${{ inputs.build_image || 'download.t-head.cn/docker_release/pytorch@sha256:a33a67832f7ec442c481421e94255518dd67e464406f8e610c15d2b594b21f80' }}
+    env:
+      VLLM_SAIL_BUILD_IMAGE: ${{ inputs.build_image || 'download.t-head.cn/docker_release/pytorch@sha256:a33a67832f7ec442c481421e94255518dd67e464406f8e610c15d2b594b21f80' }}
+      VLLM_REF: ${{ inputs.vllm_ref }}
+      PYTORCH_SAIL_ARCH: ${{ inputs.pytorch_sail_arch || 'ppu_15;ppu_10' }}
+      ARTIFACT_DIR: ${{ github.workspace }}/artifacts
+    steps:
+      - name: Disable internal GitHub mirror rewrite
+        shell: bash
+        run: |
+          # The job container image ships a global/system git
+          # url.<internal-mirror>.insteadOf = https://github.com rewrite. Left in
+          # place it makes actions/checkout fetch from the internal mirror and
+          # fail, so strip only the github.com rewrites before checkout.
+          for scope in system global; do
+            echo "=== ${scope} insteadOf before ==="
+            git config --${scope} --get-regexp '^url\..*\.insteadof$' 2>/dev/null || true
+            while IFS= read -r section; do
+              [ -n "${section}" ] || continue
+              git config --${scope} --unset-all "${section}.insteadOf" 2>/dev/null || true
+            done < <(git config --${scope} --get-regexp '^url\..*\.insteadof$' 2>/dev/null | awk '$2 ~ /github\.com/ {sub(/\.insteadof$/, "", $1); print $1}')
+          done
+          echo "=== insteadOf after (system) ==="
+          git config --system --get-regexp '^url\..*\.insteadof$' 2>/dev/null || echo none
+          echo "=== insteadOf after (global) ==="
+          git config --global --get-regexp '^url\..*\.insteadof$' 2>/dev/null || echo none
+
+      - name: Require disabled cache access
+        uses: actions/github-script@v7
+        with:
+          script: |
+            if (process.env.ACTIONS_CACHE_MODE !== 'none') {
+              core.setFailed('PPU CI requires cache-mode: none');
+            }
+      - name: Check out vLLM SAIL
+        uses: actions/checkout@v4
+        with:
+          github-server-url: https://github.com
+          ref: ${{ inputs.pr_head_sha || github.sha }}
+          persist-credentials: false
+      - name: Verify checked-out revision
+        env:
+          EXPECTED_SHA: ${{ inputs.pr_head_sha || github.sha }}
+        run: test "$(git -c safe.directory="$PWD" rev-parse HEAD)" = "$EXPECTED_SHA"
+
+      - name: Record build image for downstream tests
+        id: image
+        run: printf 'image=%s\n' "$VLLM_SAIL_BUILD_IMAGE" >> "$GITHUB_OUTPUT"
+
+      - name: Download native wheel donor
+        if: inputs.native_reuse_run_id != ''
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          name: ppu-wheels-${{ inputs.native_reuse_run_id }}
+          path: artifacts/native-reuse
+          github-token: ${{ github.token }}
+          run-id: ${{ inputs.native_reuse_run_id }}
+
+      - name: Build or repackage wheels
+        env:
+          VLLM_SAIL_NATIVE_REUSE_DIR: ${{ inputs.native_reuse_run_id != '' && format('{0}/artifacts/native-reuse', github.workspace) || '' }}
+        run: bash scripts/ci/build_ppu_wheels.sh
+
+      - name: Upload wheels
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ppu-wheels-${{ github.run_id }}
+          path: artifacts/wheels/
+          if-no-files-found: error
+          retention-days: 14
+          overwrite: true
+
+      - name: Upload build diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ppu-build-diagnostics-${{ github.run_id }}
+          overwrite: true
+          path: |
+            artifacts/logs/**
+            artifacts/build-manifest.txt
+          if-no-files-found: warn
+          retention-days: 14

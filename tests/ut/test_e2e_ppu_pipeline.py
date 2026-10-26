@@ -6,13 +6,18 @@ import json
 import subprocess
 from pathlib import Path
 
+import pytest
 import yaml
 
 ROOT = Path(__file__).resolve().parents[2]
 SMOKE = ROOT / "scripts" / "ci" / "ppu_e2e_smoke.sh"
+ACCURACY = ROOT / "scripts" / "ci" / "ppu_e2e_accuracy.sh"
+RUNTIME = ROOT / "scripts" / "ci" / "ppu_runtime_container.sh"
 SELECT = ROOT / "scripts" / "ci" / "ppu_e2e_select.py"
 MODELS = ROOT / "scripts" / "ci" / "ppu_e2e_models.json"
-WORKFLOW = ROOT / ".github" / "workflows" / "e2e-ppu.yaml"
+MODEL_WORKFLOW = ROOT / ".github" / "workflows" / "_ppu-model-tests.yaml"
+ACCURACY_WORKFLOW = ROOT / ".github" / "workflows" / "_ppu-accuracy-tests.yaml"
+DEBUG_WORKFLOW = ROOT / ".github" / "workflows" / "ppu-debug.yaml"
 
 
 def _load_select():
@@ -23,82 +28,157 @@ def _load_select():
     return module
 
 
+def _catalog() -> list[dict]:
+    return json.loads(MODELS.read_text())
+
+
+def _workflow(path: Path) -> dict:
+    return yaml.safe_load(path.read_text())
+
+
 # --- model catalog -----------------------------------------------------------
 
 
-def test_models_catalog_is_valid_json_with_required_fields() -> None:
-    catalog = json.loads(MODELS.read_text())
-    assert isinstance(catalog, list) and catalog
-    required = {"key", "checkpoint", "served_name", "board", "tp"}
+def test_models_catalog_is_partitioned_by_category_and_contract() -> None:
+    catalog = _catalog()
+    assert isinstance(catalog, list) and len(catalog) == 6
+    common = {"key", "served_name", "board", "tp"}
     for entry in catalog:
-        assert required <= set(entry), entry
+        assert common <= set(entry), entry
+        category = entry.get("category", "smoke")
+        assert category in {"smoke", "accuracy"}
+        if category == "smoke":
+            assert "checkpoint" in entry and "model_id" not in entry
+        else:
+            assert "model_id" in entry and "checkpoint" not in entry
     keys = [entry["key"] for entry in catalog]
     assert len(keys) == len(set(keys)), "model keys must be unique"
 
 
-def test_default_matrix_targets_qwen_on_810e() -> None:
-    catalog = json.loads(MODELS.read_text())
-    qwen = next(e for e in catalog if e["key"] == "qwen3.8-27b")
-    # Checkpoints are read from /nas_aisw/datasets, the internal NAS root
-    # recorded in the model catalog sheet.
+def test_catalog_keeps_smoke_and_accuracy_subsets_exact() -> None:
+    by_category = {
+        category: {
+            entry["key"]
+            for entry in _catalog()
+            if entry.get("category", "smoke") == category
+        }
+        for category in ("smoke", "accuracy")
+    }
+    assert by_category["smoke"] == {"qwen3.8-27b", "qwen3.8-27b-m890p"}
+    assert by_category["accuracy"] == {
+        "deepseek-v4-int8",
+        "deepseek-v4-mxfp4",
+        "minimax-m3-fp8",
+        "qwen3.8-flash-next",
+    }
+
+
+@pytest.mark.parametrize(
+    ("key", "board"),
+    [
+        ("qwen3.8-27b", "OAM-810E"),
+        ("qwen3.8-27b-m890p", "ZW-M890P"),
+    ],
+)
+def test_qwen_smoke_catalog_targets_both_boards(key: str, board: str) -> None:
+    qwen = {entry["key"]: entry for entry in _catalog()}[key]
     assert qwen["checkpoint"] == (
         "/nas_aisw/datasets/checkpoints/LLM/Qwen/v3.8/Qwen3.8-27B"
     )
-    # The built wheels (arch ppu_15;ppu_10) are only verified on 810E.
-    assert qwen["board"] == "OAM-810E"
+    assert qwen["board"] == board
     assert int(qwen["tp"]) == 2
+    assert qwen["served_name"] == "qwen3.8-27b"
+    assert qwen["extra_serve_flags"] == "--trust-remote-code"
 
 
-# --- matrix selector ----------------------------------------------------------
+def test_accuracy_catalog_keeps_model_ids_and_per_model_tp() -> None:
+    accuracy = {
+        entry["key"]: entry for entry in _catalog() if entry["category"] == "accuracy"
+    }
+    assert accuracy["qwen3.8-flash-next"]["model_id"] == ("Qwen/Qwen3.8-Flash-Next")
+    assert accuracy["deepseek-v4-int8"]["board"] == "OAM-810E"
+    assert accuracy["deepseek-v4-mxfp4"]["board"] == "ZW-M890P"
+    assert {int(entry["tp"]) for entry in accuracy.values()} == {8}
 
 
-def test_selector_default_returns_every_model() -> None:
+# --- matrix selector ---------------------------------------------------------
+
+
+def test_selector_defaults_to_smoke_and_legacy_entries_are_smoke() -> None:
     select = _load_select()
-    catalog = json.loads(MODELS.read_text())
-    matrix = select.build_matrix(catalog, "")
-    assert [m["key"] for m in matrix["include"]] == [e["key"] for e in catalog]
-
-
-def test_selector_filters_to_requested_keys() -> None:
-    select = _load_select()
-    catalog = [
-        {"key": "a", "checkpoint": "/x", "served_name": "a", "board": "b", "tp": 1},
-        {"key": "b", "checkpoint": "/y", "served_name": "b", "board": "b", "tp": 1},
+    matrix = select.build_matrix(_catalog(), "")
+    assert [entry["key"] for entry in matrix["include"]] == [
+        "qwen3.8-27b",
+        "qwen3.8-27b-m890p",
     ]
-    matrix = select.build_matrix(catalog, " b , a ")
-    assert [m["key"] for m in matrix["include"]] == ["b", "a"]
+    legacy = [{"key": "legacy", "checkpoint": "/tmp/model"}]
+    assert select.build_matrix(legacy, "")["include"] == legacy
+
+
+def test_selector_filters_smoke_without_leaking_accuracy() -> None:
+    select = _load_select()
+    matrix = select.build_matrix(_catalog(), "qwen3.8-flash-next,qwen3.8-27b-m890p")
+    assert [entry["key"] for entry in matrix["include"]] == ["qwen3.8-27b-m890p"]
+
+
+def test_accuracy_matrix_uses_only_accuracy_and_eval_keys() -> None:
+    select = _load_select()
+    matrix = select.build_accuracy_matrix(
+        _catalog(), "deepseek-v4-mxfp4,minimax-m3-fp8"
+    )
+    assert matrix == {
+        "include": [
+            {
+                "model_key": "deepseek_v4_mxfp4",
+                "board": "ZW-M890P",
+                "ppu_count": 8,
+            },
+            {
+                "model_key": "minimax-m3-fp8",
+                "board": "ZW-M890P",
+                "ppu_count": 8,
+            },
+        ]
+    }
+
+
+def test_accuracy_matrix_default_contains_all_four_accuracy_models() -> None:
+    select = _load_select()
+    matrix = select.build_accuracy_matrix(_catalog(), "")
+    assert {entry["model_key"] for entry in matrix["include"]} == {
+        "deepseek_v4_int8",
+        "deepseek_v4_mxfp4",
+        "minimax-m3-fp8",
+        "qwen3.8-flash-next",
+    }
 
 
 def test_selector_rejects_unknown_key() -> None:
-    select = _load_select()
-    catalog = [
-        {"key": "a", "checkpoint": "/x", "served_name": "a", "board": "b", "tp": 1},
-    ]
-    try:
-        select.build_matrix(catalog, "does-not-exist")
-    except (KeyError, ValueError, SystemExit):
-        return
-    raise AssertionError("unknown model key must be rejected")
+    with pytest.raises(ValueError, match="unknown model key"):
+        _load_select().build_matrix(_catalog(), "does-not-exist")
 
 
-def test_selector_cli_emits_github_output_matrix(tmp_path: Path) -> None:
+def test_selector_cli_emits_separate_smoke_and_accuracy_outputs() -> None:
     result = subprocess.run(
         ["python3", str(SELECT), ""],
         capture_output=True,
         text=True,
     )
     assert result.returncode == 0, result.stderr
-    line = next(ln for ln in result.stdout.splitlines() if ln.startswith("matrix="))
-    payload = json.loads(line[len("matrix=") :])
-    assert "include" in payload and payload["include"]
+    outputs = dict(line.split("=", 1) for line in result.stdout.splitlines())
+    smoke = json.loads(outputs["matrix"])
+    accuracy = json.loads(outputs["accuracy_matrix"])
+    assert len(smoke["include"]) == 2
+    assert len(accuracy["include"]) == 4
 
 
-# --- pod smoke script ---------------------------------------------------------
+# --- scripts -----------------------------------------------------------------
 
 
-def test_smoke_script_has_valid_bash_syntax() -> None:
+@pytest.mark.parametrize("script", [SMOKE, ACCURACY, RUNTIME])
+def test_e2e_shell_scripts_have_valid_bash_syntax(script: Path) -> None:
     result = subprocess.run(
-        ["bash", "-n", str(SMOKE)],
+        ["bash", "-n", str(script)],
         capture_output=True,
         text=True,
     )
@@ -107,124 +187,134 @@ def test_smoke_script_has_valid_bash_syntax() -> None:
 
 def test_smoke_script_preserves_required_e2e_contract() -> None:
     text = SMOKE.read_text()
-    required = (
+    for marker in (
         "set -Eeuo pipefail",
-        # wheels are installed without pulling deps to keep the SAIL native ABI.
         "--no-deps",
         "--force-reinstall",
         "from vllm_sail import collect_env",
         "vllm serve",
         "/v1/chat/completions",
-        # readiness is confirmed by the vLLM startup banner, not a fixed sleep.
         "Application startup complete",
-        # occupancy evidence for the run log.
+        "kill -0",
         "ppu-smi",
-        "unset VLLM_VERSION",
         "check_vllm_compatibility(force=True)",
         "ppu_wheel_manifest.py",
-    )
-    for marker in required:
+    ):
         assert marker in text, marker
 
 
-def test_smoke_script_fails_when_serve_dies_early() -> None:
+def test_smoke_requires_hf_cache_only_for_model_id_resolution() -> None:
     text = SMOKE.read_text()
-    # The readiness poll must detect an early-exiting serve process instead of
-    # blocking until timeout.
-    assert "kill -0" in text
+    directory_guard = 'if [ -n "${MODEL_PATH}" ] && [ ! -d "${MODEL_PATH}" ]; then'
+    assert text.index(directory_guard) < text.index("HF_HOME must be set")
+    assert text.index(directory_guard) < text.index("export HF_HUB_OFFLINE=1")
 
 
-# --- workflow -----------------------------------------------------------------
-
-
-def test_e2e_workflow_is_reusable_and_manual_and_uses_cpu_runner() -> None:
-    text = WORKFLOW.read_text()
-    assert "workflow_dispatch:" in text
-    # PR orchestration calls the same workflow as manual smoke runs.
-    assert "workflow_call:" in text
-    assert "pull_request:" not in text
-    assert "push:" not in text
-    # ppu-scheduler-action itself runs on the CPU runner scale set and dispatches
-    # a PPU pod; the workflow must not try to run on PPU directly.
-    assert "runs-on: k8s-runner-group-cpu-thead" in text
-    assert "t-head/ppu-scheduler-action@main" in text
-    # board is data-driven from the matrix (the literal OAM-810E lives in the
-    # catalog and is asserted by test_default_matrix_targets_qwen_on_810e).
-    assert "board-type=${{ matrix.model.board }}" in text
-    assert "contents: read" in text
-    # cross-run artifact download needs the actions:read scope.
-    assert "actions: read" in text
-
-
-def test_e2e_workflow_only_exposes_model_smoke() -> None:
-    text = WORKFLOW.read_text()
-    workflow = yaml.safe_load(text)
-    trigger = workflow.get("on", workflow.get(True))
-    assert set(trigger) == {"workflow_call", "workflow_dispatch"}
-    assert set(trigger["workflow_dispatch"]["inputs"]) == {
-        "build_run_id",
-        "models",
-        "image",
-    }
-    assert set(trigger["workflow_call"]["inputs"]) == {
-        "build_run_id",
-        "models",
-        "image",
-        "pr_mode",
-        "pr_head_sha",
-        "wheel_source_sha",
-    }
-    assert set(workflow["jobs"]) == {"prepare", "e2e"}
-    assert "if" not in workflow["jobs"]["prepare"]
-    assert workflow["jobs"]["e2e"]["needs"] == "prepare"
-    for marker in (
-        "device_probe_only",
-        "probe_suite",
-        "probe_sail_commit",
-        "ppu_ops_probe",
-    ):
-        assert marker not in text
-    caller = yaml.safe_load(
-        (ROOT / ".github/workflows/build-ppu-wheels.yaml").read_text()
-    )
-    assert caller["jobs"]["smoke"]["uses"] == "./.github/workflows/e2e-ppu.yaml"
-    assert caller["jobs"]["gate"]["needs"] == ["build", "pin-unit-tests", "smoke"]
-
-
-def test_e2e_workflow_pulls_wheels_by_run_id() -> None:
-    text = WORKFLOW.read_text()
-    assert "build_run_id:" in text
-    assert "actions/download-artifact@v4" in text
-    assert "run-id: ${{ inputs.build_run_id }}" in text
-    assert "ppu-wheels-${{ inputs.build_run_id }}" in text
-
-
-def test_e2e_workflow_keeps_python_frontend_and_privileged() -> None:
-    text = WORKFLOW.read_text()
-    assert "VLLM_VERSION=" not in text
-    assert "VLLM_USE_RUST_FRONTEND=0" in text
-    assert "VLLM_USE_RUST_BENCH=0" in text
-    assert "privileged: true" in text
-    # smoke work is delegated to the checked-in script, not inlined in YAML.
-    assert "scripts/ci/ppu_e2e_smoke.sh" in text
-
-
-def test_e2e_workflow_gives_every_cpu_runner_job_a_container() -> None:
-    text = WORKFLOW.read_text()
-    # k8s-runner-group-cpu-thead rejects container-less jobs ("Jobs without a
-    # job container are forbidden on this runner"), so every job on that runner
-    # must declare a container image.
-    runner_jobs = text.count("runs-on: k8s-runner-group-cpu-thead")
-    container_decls = sum(
-        1 for line in text.splitlines() if line.strip() == "container:"
-    )
-    assert runner_jobs >= 1
-    assert container_decls >= runner_jobs, (runner_jobs, container_decls)
-
-
-def test_smoke_checks_manifest_before_install_and_uses_installed_package() -> None:
-    text = SMOKE.read_text()
-    assert text.index("ppu_wheel_manifest.py") < text.index("python -m pip install")
-    assert text.index("cd /tmp") < text.index("check_vllm_compatibility(force=True)")
-    assert "export VLLM_USE_RUST_FRONTEND=0 VLLM_USE_RUST_BENCH=0" in text
+def test_accuracy_script_uses_writable_results_with_read_only_source() -> None:
+    text = ACCURACY.read_text()
+    assert '--golden-dir "${RESULTS_DIR}/golden"' in text
+    assert "cd /tmp" in text
     assert "unset PYTHONPATH" in text
+    assert 'cp -fv "${wheel_so[@]}" "${ROOT_DIR}/vllm_sail/"' not in text
+    assert 'python "${ROOT_DIR}/scripts/eval/ppu_gsm8k_eval.py"' in text
+
+
+def test_runtime_wrapper_exposes_accuracy_mode_and_environment() -> None:
+    text = RUNTIME.read_text()
+    assert "pin-ut|model-test|model-accuracy" in text
+    assert "/source/scripts/ci/ppu_e2e_accuracy.sh" in text
+    for marker in (
+        "HF_HOME",
+        "HF_HUB_OFFLINE=1",
+        "GSM8K_DATASET_PATH",
+        "MODEL_KEY",
+        "RESULTS_DIR=/artifacts",
+    ):
+        assert marker in text
+
+
+def test_evaluator_requires_dataset_environment_without_hardcoded_paths() -> None:
+    text = (ROOT / "scripts" / "eval" / "ppu_gsm8k_eval.py").read_text()
+    assert "GSM8K_DATASET_PATH environment variable is required" in text
+    assert "/ppusw/" not in text
+    assert "/nas_aisw/" not in text
+
+
+# --- workflows ---------------------------------------------------------------
+
+
+def test_model_workflow_is_call_only_and_uses_docker_runner() -> None:
+    workflow = _workflow(MODEL_WORKFLOW)
+    assert set(workflow[True]) == {"workflow_call"}
+    assert workflow["jobs"]["prepare"]["runs-on"] == "ubuntu-latest"
+    assert workflow["jobs"]["e2e"]["runs-on"] == "8-ppu-m890p"
+    assert "container" not in workflow["jobs"]["e2e"]
+    text = MODEL_WORKFLOW.read_text()
+    assert 'ppu_runtime_container.sh" model-test' in text
+    assert "ppu-scheduler-action" not in text
+
+
+@pytest.mark.parametrize(
+    ("filename", "event", "expected"),
+    [
+        ("_ppu-model-tests.yaml", "workflow_call", "qwen3.8-27b-m890p"),
+        ("ppu-debug.yaml", "workflow_dispatch", "qwen3.8-27b-m890p"),
+    ],
+)
+def test_smoke_workflow_defaults_target_available_m890_runner(
+    filename: str, event: str, expected: str
+) -> None:
+    config = _workflow(MODEL_WORKFLOW.parent / filename)
+    models = config[True][event]["inputs"]["models"]["default"]
+    assert models == expected
+    matrix = _load_select().build_matrix(_catalog(), models)
+    assert [(entry["key"], entry["board"]) for entry in matrix["include"]] == [
+        ("qwen3.8-27b-m890p", "ZW-M890P")
+    ]
+
+
+def test_accuracy_workflow_is_call_only_and_uses_docker_runner() -> None:
+    workflow = _workflow(ACCURACY_WORKFLOW)
+    assert workflow["name"] == "PPU accuracy tests"
+    assert set(workflow[True]) == {"workflow_call"}
+    assert set(workflow["jobs"]) == {"prepare", "accuracy"}
+    assert workflow["jobs"]["prepare"]["runs-on"] == "ubuntu-latest"
+    accuracy = workflow["jobs"]["accuracy"]
+    assert accuracy["runs-on"] == "8-ppu-m890p"
+    assert "container" not in accuracy
+    text = ACCURACY_WORKFLOW.read_text()
+    assert 'ppu_runtime_container.sh" model-accuracy' in text
+    assert "ppu-scheduler-action" not in text
+    assert text.count("actions/download-artifact@v4") == 1
+
+
+def test_debug_workflow_is_the_only_accuracy_entrypoint() -> None:
+    debug = _workflow(DEBUG_WORKFLOW)
+    assert set(debug[True]) == {"workflow_dispatch"}
+    inputs = debug[True]["workflow_dispatch"]["inputs"]
+    assert set(inputs) == {
+        "build_run_id",
+        "target",
+        "models",
+        "accuracy_models",
+    }
+    assert "accuracy-tests" in inputs["target"]["options"]
+    assert debug["jobs"]["accuracy-tests"]["uses"] == (
+        "./.github/workflows/_ppu-accuracy-tests.yaml"
+    )
+    automatic = (ROOT / ".github/workflows/ppu-build-and-test.yaml").read_text()
+    assert "_ppu-accuracy-tests.yaml" not in automatic
+    assert "model-accuracy" not in automatic
+
+
+def test_workflows_pull_wheels_by_run_id_and_keep_python_frontend() -> None:
+    for path in (MODEL_WORKFLOW, ACCURACY_WORKFLOW):
+        text = path.read_text()
+        assert "build_run_id:" in text
+        assert "actions/download-artifact@v4" in text
+        assert "run-id: ${{ inputs.build_run_id }}" in text
+        assert "ppu-wheels-${{ inputs.build_run_id }}" in text
+        assert "VLLM_VERSION=" not in text
+    smoke_text = SMOKE.read_text()
+    assert "VLLM_USE_RUST_FRONTEND=0" in smoke_text
+    assert "VLLM_USE_RUST_BENCH=0" in smoke_text

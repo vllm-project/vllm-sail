@@ -11,7 +11,7 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = ROOT / "scripts" / "ci" / "build_ppu_wheels.sh"
-WORKFLOW = ROOT / ".github" / "workflows" / "build-ppu-wheels.yaml"
+WORKFLOW = ROOT / ".github" / "workflows" / "_ppu-build.yaml"
 
 
 def test_build_script_has_valid_bash_syntax() -> None:
@@ -65,6 +65,13 @@ def test_build_script_uses_configurable_aliyun_pip_mirror() -> None:
     assert text.index("source /usr/local/PPU_SDK/envsetup.sh") < text.index(forced)
 
 
+def test_build_script_does_not_install_runtime_only_ppu_dependencies() -> None:
+    text = SCRIPT.read_text()
+    assert '-r "${ROOT_DIR}/requirements/build.txt"' in text
+    assert '-r "${ROOT_DIR}/requirements/ppu.txt"' not in text
+    assert "separate CUDA-compatible runtime image" in text
+
+
 def test_build_script_caps_parallelism_to_avoid_oom() -> None:
     text = SCRIPT.read_text()
     # Native PPU kernel compiles are memory-heavy; an unbounded MAX_JOBS OOM-kills
@@ -74,16 +81,17 @@ def test_build_script_caps_parallelism_to_avoid_oom() -> None:
     assert 'BUILD_JOBS="${BUILD_JOBS:-' in text
 
 
-def test_build_workflow_supports_on_demand_and_manual_runs_on_cpu_runner() -> None:
+def test_build_workflow_is_call_only_on_github_hosted_runner() -> None:
+    import yaml
+
     text = WORKFLOW.read_text()
-    assert "workflow_dispatch:" in text
-    assert "workflow_call:" in text
+    assert set(yaml.safe_load(text)[True]) == {"workflow_call"}
+    assert "workflow_dispatch:" not in text
     assert "pull_request:" not in text
     assert "push:" not in text
-    # ppu-scheduler-action does not support compiling on PPU resources; t-head
-    # build jobs must run on the CPU runner scale set. The pod is sized with
-    # enough memory for the memory-aware parallelism cap to compile in parallel.
-    assert "runs-on: k8s-runner-group-cpu-thead" in text
+    # The CUDA-free wheel build runs in its pinned container on a GitHub-hosted
+    # runner; scarce PPU runners are reserved for runtime validation.
+    assert "runs-on: ubuntu-24.04" in text
     assert "ppu-scheduler-action" not in text
     assert "contents: read" in text
 
@@ -93,11 +101,11 @@ def test_build_workflow_uses_script_and_retains_artifacts() -> None:
     assert "bash scripts/ci/build_ppu_wheels.sh" in text
     import yaml
 
-    jobs = yaml.safe_load(text)["jobs"]
-    for job in ("build", "ops-build"):
+    ops = yaml.safe_load((WORKFLOW.parent / "ppu-ops-tests.yaml").read_text())["jobs"]
+    for job in (yaml.safe_load(text)["jobs"]["build"], ops["ops-build"]):
         uploads = {
             step["with"]["name"]: step["with"]
-            for step in jobs[job]["steps"]
+            for step in job["steps"]
             if step.get("uses") == "actions/upload-artifact@v4"
         }
         assert set(uploads) == {
@@ -116,7 +124,7 @@ def test_build_workflow_uses_script_and_retains_artifacts() -> None:
         assert any(
             step.get("with", {}).get("name")
             == f"ppu-ops-{name}-${{{{ github.run_id }}}}-${{{{ github.run_attempt }}}}"
-            for step in jobs[job]["steps"]
+            for step in ops[job]["steps"]
         )
     assert "if-no-files-found: error" in text
     assert "if-no-files-found: warn" in text
@@ -186,7 +194,7 @@ def test_rust_build_is_explicit_before_wheel_packaging() -> None:
     assert "vllm-rust-build.log" in text
 
 
-def test_image_build_only_replaces_torch_before_capturing_the_stack():
+def test_image_build_captures_the_pinned_image_stack_before_building():
     text = SCRIPT.read_text()
     for forbidden in (
         "SDK_URL",
@@ -198,31 +206,39 @@ def test_image_build_only_replaces_torch_before_capturing_the_stack():
         "download()",
     ):
         assert forbidden not in text
-    prepare = text.index('ppu_image_stack.py" prepare')
+    capture = text.index('ppu_image_stack.py" capture')
     verify = text.index('ppu_image_stack.py" verify')
-    assert prepare < text.index("compatible_wrapper.h")
-    assert prepare < text.index("python -m pip install") < verify
+    assert capture < text.index("compatible_wrapper.h")
+    assert capture < text.index("python -m pip install") < verify
     assert verify < text.index("status=succeeded")
 
 
-def test_all_ci_paths_use_the_same_pinned_image_stack():
+def test_ci_uses_separate_pinned_build_and_runtime_stacks():
     import yaml
 
-    image = "reg.docker.alibaba-inc.com/ai-tmp/llm@sha256:24872709b1a84ec0e91260eeeccf6ae7ba52a6c70fb90f55a7aae1c1df503bcb"
+    build_image = (
+        "download.t-head.cn/docker_release/pytorch@sha256:"
+        "a33a67832f7ec442c481421e94255518dd67e464406f8e610c15d2b594b21f80"
+    )
     workflow = yaml.safe_load(WORKFLOW.read_text())
-    inputs = workflow[True]["workflow_dispatch"]["inputs"]
+    inputs = yaml.safe_load((WORKFLOW.parent / "ppu-ops-tests.yaml").read_text())[True][
+        "workflow_dispatch"
+    ]["inputs"]
     assert not {"sdk_url", "torch_url"} & inputs.keys()
-    assert inputs["build_image"]["default"] == image
-    assert inputs["ops_image"]["default"] == image
+    assert inputs["build_image"]["default"] == build_image
+    assert inputs["ops_image"]["required"] is True
+    assert "default" not in inputs["ops_image"]
     build = workflow["jobs"]["build"]
-    assert image in build["container"]["image"]
+    assert build_image in build["container"]["image"]
     assert build["env"]["VLLM_SAIL_BUILD_IMAGE"] == build["container"]["image"]
-    for job in ("pin-unit-tests", "smoke"):
-        assert "needs.build.outputs.image" in workflow["jobs"][job]["with"]["image"]
-    for name in ("ppu-pin-ut.yaml", "e2e-ppu.yaml"):
+    pipeline = yaml.safe_load((WORKFLOW.parent / "ppu-build-and-test.yaml").read_text())
+    assert "runtime_image" not in pipeline[True]["workflow_call"]["inputs"]
+    for job in ("pin-unit-tests", "model-tests"):
+        assert "image" not in pipeline["jobs"][job]["with"]
+    for name in ("_ppu-pin-ut.yaml", "_ppu-model-tests.yaml", "ppu-debug.yaml"):
         triggers = yaml.safe_load((WORKFLOW.parent / name).read_text())[True]
         for trigger in triggers.values():
-            assert trigger["inputs"]["image"]["default"] == image
+            assert "image" not in trigger["inputs"]
 
 
 @pytest.fixture
@@ -346,6 +362,8 @@ def test_image_stack_cli_capture_verify_and_refuse_mutation(tmp_path):
     site = tmp_path / "site"
     torch = site / "torch"
     torch.mkdir(parents=True)
+    (torch / ".ppu_compat").mkdir()
+    (torch / ".ppu_compat/compatible_wrapper.h").write_text("header")
     (torch / "__init__.py").write_text('__version__ = "2.13.0"\n')
     dist = site / "torch-2.13.0.dist-info"
     dist.mkdir()
@@ -646,7 +664,11 @@ def test_prepare_records_replacement_provenance_and_checks_header(
 
     monkeypatch.setattr(subprocess, "run", install)
     argv = ["stack", "prepare", "--sdk", str(sdk), "--output", str(output)]
-    monkeypatch.setattr(sys, "argv", [*argv, "--constraints", str(constraints)])
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [*argv, "--constraints", str(constraints), "--require-ppu-headers"],
+    )
     if not header:
         with pytest.raises(ValueError, match="compatible_wrapper.h"):
             image_stack.main()
@@ -684,10 +706,24 @@ def test_prepare_records_replacement_provenance_and_checks_header(
 
 
 @pytest.mark.parametrize("script", ["ppu_pin_ut.sh", "ppu_e2e_smoke.sh"])
-def test_runtime_scripts_prepare_same_torch_before_installing_wheels(script):
+def test_runtime_scripts_capture_same_image_stack_before_installing_wheels(script):
     text = (ROOT / "scripts/ci" / script).read_text()
-    prepare = text.index('ppu_image_stack.py" prepare')
+    capture = text.index('ppu_image_stack.py" capture')
     install = text.index("python -m pip install")
     verify = text.index('ppu_image_stack.py" verify')
-    assert prepare < install < verify
-    assert "--constraints" in text[prepare:install]
+    assert capture < install < verify
+    assert "--constraints" in text[capture:install]
+
+
+def test_native_repack_is_verified_and_falls_back_to_full_build() -> None:
+    text = SCRIPT.read_text()
+    fingerprint = text.index('ppu_wheel_manifest.py" \\\n        fingerprint')
+    verify = text.index('ppu_wheel_manifest.py" verify')
+    extract = text.index('ppu_wheel_manifest.py" extract-native')
+    prebuilt = text.index('export VLLM_SAIL_PREBUILT_EXT_DIR="${PREBUILT_EXT_DIR}"')
+    package = text.index("python setup.py bdist_wheel")
+    assert verify < fingerprint < extract < prebuilt < package
+    assert "if ((NATIVE_REUSE == 0)); then" in text
+    assert 'git init "${VLLM_SRC}"' in text
+    assert "Native reuse unavailable or invalid; compiling" in text
+    assert "|| return 1" in text

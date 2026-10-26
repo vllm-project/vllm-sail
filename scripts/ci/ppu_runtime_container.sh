@@ -1,0 +1,172 @@
+#!/usr/bin/env bash
+# SPDX-License-Identifier: Apache-2.0
+# Run pin/model/accuracy validation in an isolated PPU runtime container.
+set -Eeuo pipefail
+
+mode=${1:?Usage: ppu_runtime_container.sh pin-ut|model-test|model-accuracy}
+case "${mode}" in
+    pin-ut|model-test|model-accuracy) ;;
+    *) printf 'Unknown runtime mode: %s\n' "${mode}" >&2; exit 2 ;;
+esac
+
+: "${PPU_CI_SOURCE_DIR:?PPU_CI_SOURCE_DIR is required}"
+: "${PPU_CI_SOURCE_SHA:?PPU_CI_SOURCE_SHA is required}"
+: "${PPU_CI_WHEELS_DIR:?PPU_CI_WHEELS_DIR is required}"
+: "${PPU_CI_ARTIFACT_DIR:?PPU_CI_ARTIFACT_DIR is required}"
+: "${PPU_CI_DEVICE_COUNT:?PPU_CI_DEVICE_COUNT is required}"
+: "${PPU_CI_REQUIRE_PR_ARTIFACT:?PPU_CI_REQUIRE_PR_ARTIFACT is required}"
+
+source_dir=$(realpath "${PPU_CI_SOURCE_DIR}")
+wheels_dir=$(realpath "${PPU_CI_WHEELS_DIR}")
+mkdir -p "${PPU_CI_ARTIFACT_DIR}"
+artifact_dir=$(realpath "${PPU_CI_ARTIFACT_DIR}")
+git -C "${source_dir}" rev-parse --is-inside-work-tree >/dev/null
+[[ "$(git -C "${source_dir}" rev-parse HEAD)" == "${PPU_CI_SOURCE_SHA}" ]] || {
+    echo "PPU CI source checkout does not match PPU_CI_SOURCE_SHA" >&2
+    exit 2
+}
+[[ -d "${wheels_dir}" ]] || { echo "PPU CI wheel directory is missing" >&2; exit 2; }
+[[ "${PPU_CI_REQUIRE_PR_ARTIFACT}" =~ ^(true|false)$ ]] || {
+    echo "PPU_CI_REQUIRE_PR_ARTIFACT must be true or false" >&2
+    exit 2
+}
+expected_vllm_commit=$(tr -d '[:space:]' < "${source_dir}/.github/vllm-main-verified.commit")
+expected_sail_commit="${PPU_CI_WHEEL_SOURCE_SHA:-${PPU_CI_SOURCE_SHA}}"
+for commit in "${expected_vllm_commit}" "${expected_sail_commit}"; do
+    [[ "${commit}" =~ ^[0-9a-f]{40}$ ]] || {
+        echo "PPU CI expected commits must be immutable SHA-1 values" >&2
+        exit 2
+    }
+done
+[[ "${PPU_CI_DEVICE_COUNT}" =~ ^[1-8]$ ]] || {
+    echo "PPU_CI_DEVICE_COUNT must be between 1 and 8" >&2
+    exit 2
+}
+
+exec 9>/tmp/vllm-sail-ppu-ci.lock
+flock -n 9 || { echo "Another vLLM SAIL PPU job is active on this runner" >&2; exit 2; }
+
+uid=$(id -u)
+gid=$(id -g)
+prefix="vllm-sail-${GITHUB_RUN_ID:-local}-${GITHUB_RUN_ATTEMPT:-1}-${mode}"
+container=""
+image_id=""
+cleanup() {
+    code=$?
+    trap - EXIT
+    set +e
+    if [[ -n "${container}" ]]; then
+        docker stop --time=2 "${container}" 9>&- >/dev/null 2>&1 || true
+        docker rm --force "${container}" 9>&- >/dev/null 2>&1 || true
+    fi
+    if [[ -n "${image_id}" ]]; then
+        docker run --rm --runtime=runc --network=none \
+            --env NVIDIA_VISIBLE_DEVICES=void --user 0:0 \
+            --mount "type=bind,source=${artifact_dir},target=/artifacts" \
+            --entrypoint chown "${image_id}" -hR -- "${uid}:${gid}" /artifacts \
+            9>&- >/dev/null 2>&1 || true
+    fi
+    exec 9>&-
+    exit "${code}"
+}
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+image_id=$(bash "${source_dir}/scripts/ci/ppu_runtime_image.sh" 9>&-)
+printf '%s\n' "${image_id}" >"${artifact_dir}/runtime-image-id.txt"
+
+container="${prefix}"
+device_args=(
+    --device=/dev/alixpu
+    --device=/dev/alixpu_ctl
+    --device=/dev/alixpu_sep
+)
+visible=()
+for ((index = 0; index < PPU_CI_DEVICE_COUNT; index++)); do
+    device_args+=(--device="/dev/alixpu_ppu${index}")
+    visible+=("${index}")
+done
+visible_csv=$(IFS=,; echo "${visible[*]}")
+
+create=(
+    docker create --name "${container}" --runtime=runc
+    --ipc=host --network=host
+    --mount "type=bind,source=${source_dir},target=/source,readonly"
+    --mount "type=bind,source=${wheels_dir},target=/wheels,readonly"
+    --mount "type=bind,source=${artifact_dir},target=/artifacts"
+    --env NVIDIA_VISIBLE_DEVICES=void
+    --env CUDA_VISIBLE_DEVICES="${visible_csv}"
+    --env PYTHONPYCACHEPREFIX=/tmp/pycache
+    --env WHEELS_DIR=/wheels
+    --env REQUIRE_PR_ARTIFACT="${PPU_CI_REQUIRE_PR_ARTIFACT}"
+    --env EXPECTED_VLLM_COMMIT="${expected_vllm_commit}"
+    --env EXPECTED_SAIL_COMMIT="${expected_sail_commit}"
+)
+create+=("${device_args[@]}")
+
+case "${mode}" in
+    pin-ut)
+        create+=(
+            --shm-size=8g
+            --env UT_RESULTS_DIR=/artifacts
+            --env VLLM_USE_RUST_FRONTEND=0
+            --env VLLM_USE_RUST_BENCH=0
+            --entrypoint bash "${image_id}"
+            /source/scripts/ci/ppu_pin_ut.sh
+        )
+        ;;
+    model-test)
+        : "${MODEL_PATH:?MODEL_PATH is required for model-test}"
+        : "${SERVED_NAME:?SERVED_NAME is required for model-test}"
+        : "${TP_SIZE:?TP_SIZE is required for model-test}"
+        [[ "${MODEL_PATH}" == /nas_aisw/* ]] || {
+            echo "MODEL_PATH must be under /nas_aisw" >&2
+            exit 2
+        }
+        create+=(
+            --shm-size=32g
+            --mount "type=bind,source=/nas_aisw,target=/nas_aisw,readonly"
+            --env MODEL_PATH="${MODEL_PATH}"
+            --env SERVED_NAME="${SERVED_NAME}"
+            --env TP_SIZE="${TP_SIZE}"
+            --env EXTRA_SERVE_FLAGS="${EXTRA_SERVE_FLAGS:-}"
+            --env VLLM_USE_RUST_FRONTEND=0
+            --env VLLM_USE_RUST_BENCH=0
+            --entrypoint bash "${image_id}"
+            /source/scripts/ci/ppu_e2e_smoke.sh
+        )
+        ;;
+    model-accuracy)
+        : "${HF_HOME:?HF_HOME is required for model-accuracy}"
+        : "${GSM8K_DATASET_PATH:?GSM8K_DATASET_PATH is required for model-accuracy}"
+        : "${MODEL_KEY:?MODEL_KEY is required for model-accuracy}"
+        hf_home=$(realpath "${HF_HOME}")
+        gsm8k_dataset=$(realpath "${GSM8K_DATASET_PATH}")
+        [[ -d "${hf_home}" ]] || { echo "HF_HOME is not a directory" >&2; exit 2; }
+        [[ -d "${gsm8k_dataset}" ]] || {
+            echo "GSM8K_DATASET_PATH is not a directory" >&2
+            exit 2
+        }
+        create+=(
+            --shm-size=32g
+            --mount "type=bind,source=${hf_home},target=${hf_home},readonly"
+            --mount "type=bind,source=${gsm8k_dataset},target=${gsm8k_dataset},readonly"
+            --env HF_HOME="${hf_home}"
+            --env HF_HUB_OFFLINE=1
+            --env GSM8K_DATASET_PATH="${gsm8k_dataset}"
+            --env MODEL_KEY="${MODEL_KEY}"
+            --env RESULTS_DIR=/artifacts
+            --env UPDATE_GOLDEN="${UPDATE_GOLDEN:-0}"
+            --env THRESHOLD="${THRESHOLD:-0.9}"
+            --env VLLM_PORT="${VLLM_PORT:-9985}"
+            --env VLLM_USE_RUST_FRONTEND=0
+            --env VLLM_USE_RUST_BENCH=0
+            --entrypoint bash "${image_id}"
+            /source/scripts/ci/ppu_e2e_accuracy.sh
+        )
+        ;;
+esac
+
+"${create[@]}" 9>&- >"${artifact_dir}/container-id.txt"
+docker start --attach "${container}" 9>&- 2>&1 | tee "${artifact_dir}/runtime.log"

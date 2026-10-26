@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Exclude CuTeDSL on PPU and run the PPU DeepGEMM warmup.
+"""Exclude CuTeDSL on PPU, register the sampler JIT warmups, run PPU DeepGEMM.
 
 Upstream ``warmup/kernel_warmup.py`` ends with a DeepGEMM warmup block gated
 on ``is_deep_gemm_supported()``, which upstream defines via
@@ -8,6 +8,9 @@ sm80-class capability, so that block never fires on PPU, and PPU needs its own
 warmup anyway: ``vllm_sail.model_executor.warmup.deep_gemm_warmup`` exercises
 the PPU DeepGEMM wrapper's int8/bf16/fp4 grouped GEMMs and its tuned-config
 lookup, none of which CUDA's warmup reaches.
+
+vLLM 0.31.0's V2 runner only registers native top-k/top-p sampler warmups on
+ROCm. PPU misses that branch, so register them before delegating to upstream.
 
 PPU shares CUDA identity but cannot compile CuTeDSL. Before delegating to
 upstream, discard CuTeDSL registrations and guard the legacy warmup provider
@@ -60,6 +63,26 @@ def _exclude_ppu_cutedsl_registrations(worker) -> None:
             "Skipping unsupported CuTeDSL JIT warmup on PPU: %s",
             ", ".join(type(kernel).__name__ for kernel in unsupported),
         )
+
+
+def _register_ppu_sampler_warmups(worker) -> None:
+    """Register native sampler warmups missing from the V2 runner on PPU.
+
+    Only acts on the last PP rank of non-pooling models.  Duplicates are
+    deduplicated by the upstream registry.  See patch ``remove_when``.
+    """
+    runner = worker.model_runner
+    if not getattr(runner, "is_last_pp_rank", True):
+        return
+    if getattr(runner, "is_pooling_model", False):
+        return
+    registry = getattr(runner, "jit_warmup_registry", None)
+    if registry is None:
+        return
+    from vllm.v1.sample.ops.topk_topp_sampler import register_top_k_top_p_warmups
+
+    with registry.activate():
+        register_top_k_top_p_warmups()
 
 
 def _ppu_deep_gemm_warmup_enabled() -> bool:
@@ -118,6 +141,8 @@ else:
         "kernel_warmup",
         reason=(
             "Exclude unsupported CuTeDSL JIT registrations on PPU. "
+            "Register native top-k/top-p sampler warmups that V2 only "
+            "registers on ROCm. "
             "Upstream's DeepGEMM warmup is gated on support_deep_gemm() "
             "(sm90/sm100/sm120), so it never runs on PPU; and CUDA's warmup "
             "would not exercise the PPU DeepGEMM wrapper's kernels or tuned "
@@ -128,7 +153,8 @@ else:
         remove_when=(
             "upstream gives kernel_warmup a per-platform warmup registry (or "
             "vllm.utils.deep_gemm dispatches on current_platform), so the PPU "
-            "warmup can register itself."
+            "warmup can register itself. Sampler warmups: remove once upstream "
+            "V2 registers native top-k/top-p on PPU for non-speculative paths."
         ),
     )
     def kernel_warmup(worker, *, process_local_only: bool = False):
@@ -136,6 +162,7 @@ else:
 
         if current_platform.is_ppu():
             _exclude_ppu_cutedsl_registrations(worker)
+            _register_ppu_sampler_warmups(worker)
         result = _upstream_kernel_warmup(worker, process_local_only=process_local_only)
 
         if process_local_only or not current_platform.is_ppu():

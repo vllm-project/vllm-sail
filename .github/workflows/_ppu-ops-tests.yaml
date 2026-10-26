@@ -43,7 +43,7 @@ env:
 
 jobs:
   ops-tests:
-    runs-on: k8s-runner-group-cpu-thead
+    runs-on: 8-ppu-m890p
     timeout-minutes: 90
     container:
       image: ${{ inputs.image }}

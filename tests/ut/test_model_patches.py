@@ -39,6 +39,7 @@ EXPECTED_MODULES = {
     "deepseek_v4_cache",
     "deepseek_v4_metadata",
     "deepseek_v4_compressor",
+    "kimi_k3",
     "llama4",
     "moe_marlin_gate",
     "qwen3_fused_quant",
@@ -95,9 +96,9 @@ def _module_constants(tree: ast.Module) -> dict[str, str]:
 def test_all_expected_patch_modules_exist() -> None:
     on_disk = {path.stem for path in _patch_module_files()}
     assert on_disk == EXPECTED_MODULES, (
-        "Model patch modules are the audited port of the fork's seven "
-        "modified model files plus the Marlin gate; a missing or extra "
-        "module means the port drifted from that inventory."
+        "Model patch modules are the audited port of the fork's modified model "
+        "files, the Marlin gate and the Kimi K3 latent-MoE tail; a missing or "
+        "extra module means the port drifted from that inventory."
     )
 
 
@@ -221,6 +222,16 @@ _EXPECTED_TARGETS = {
     "vllm.model_executor.models.deepseek_mtp.DeepSeekMTP.__init__",
     "vllm.model_executor.models.deepseek_mtp.DeepSeekMTP.load_weights",
     "vllm.models.deepseek_v4.nvidia.model._select_dsv4_attn_cls",
+    (
+        "vllm.models.kimi_k3.nvidia.latent_moe_runner.LatentMoERunner."
+        "_overlap_allreduce_tail"
+    ),
+    (
+        "vllm.models.kimi_k3.nvidia.latent_moe_runner.LatentMoERunner."
+        "_select_tail_tier"
+    ),
+    "vllm.models.kimi_k3.nvidia.latent_moe_runner.LatentMoERunner.__init__",
+    "vllm.models.kimi_k3.nvidia.model.KimiRoutedOutputTransform.forward",
     "vllm.model_executor.models.llama4.Llama4MoE.custom_routing_function",
     "vllm.model_executor.models.qwen3_moe.Qwen3MoeSparseMoeBlock.__init__",
     "vllm.model_executor.models.qwen3_moe.Qwen3MoeDecoderLayer.__init__",
@@ -257,6 +268,28 @@ def test_all_model_patches_land(installed_model_patches) -> None:
             getattr(installed, "__wrapped__", None), PATCH_MARKER, None
         )
         assert marker_source is not None or record.was_missing, record.target
+
+
+def test_kimi_k3_quantized_up_proj_forces_tier_one(
+    installed_model_patches,
+) -> None:
+    """A quantized routed up-projection must never reach a raw-weight tier.
+
+    Tier selection short-circuits before reading the batch, so ``None`` tensors
+    are safe here.
+    """
+    from types import SimpleNamespace
+
+    from vllm.models.kimi_k3.nvidia.latent_moe_runner import (
+        LatentMoERunner,
+        LatentTailTier,
+    )
+
+    runner = SimpleNamespace(_up_proj_is_quantized=True)
+    assert (
+        LatentMoERunner._select_tail_tier(runner, None, None)
+        is LatentTailTier.ALLREDUCE_OVERLAP
+    )
 
 
 def test_deepseek_v4_selector_uses_ppu_flashmla(installed_model_patches) -> None:

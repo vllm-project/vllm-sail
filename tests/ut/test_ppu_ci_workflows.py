@@ -3,10 +3,8 @@ import itertools
 import json
 import os
 import re
-import shlex
 import subprocess
 import sys
-import zipfile
 from pathlib import Path
 
 import pytest
@@ -18,6 +16,10 @@ DEFAULT_BRANCH = "${{ github.event.repository.default_branch }}"
 EXPECTED_SHA = "${{ inputs.pr_head_sha || github.sha }}"
 DEFAULT_REF_GUARD = (
     "github.ref == format('refs/heads/{0}', github.event.repository.default_branch)"
+)
+BUILD_IMAGE = (
+    "download.t-head.cn/docker_release/pytorch@sha256:"
+    "a33a67832f7ec442c481421e94255518dd67e464406f8e610c15d2b594b21f80"
 )
 
 
@@ -56,6 +58,21 @@ def test_control_jobs_only_execute_trusted_code(name, job_id, ref):
             job_id == "report"
             and all(DEFAULT_REF_GUARD in step.get("if", "") for step in job["steps"])
         )
+
+
+def test_ppu_jobs_use_hosted_build_and_self_hosted_runtime_runners():
+    assert workflow("_ppu-build.yaml")["jobs"]["build"]["runs-on"] == "ubuntu-24.04"
+    assert (
+        workflow("_ppu-model-tests.yaml")["jobs"]["prepare"]["runs-on"]
+        == "ubuntu-latest"
+    )
+    for filename, job_id in (
+        ("_ppu-pin-ut.yaml", "pin-unit-tests"),
+        ("_ppu-model-tests.yaml", "e2e"),
+        ("_ppu-ops-tests.yaml", "ops-tests"),
+        ("upstream-reuse.yaml", "nightly-ppu-reuse"),
+    ):
+        assert workflow(filename)["jobs"][job_id]["runs-on"] == "8-ppu-m890p"
 
 
 def test_controller_filters_comments_serializes_all_commands_and_reports_failure():
@@ -147,13 +164,14 @@ def test_executor_separates_read_only_pr_execution_and_always_reporting():
     jobs = workflow("ppu-pr-ci.yaml")["jobs"]
     ppu = jobs["ppu"]
     assert ppu["needs"] == "validate"
-    assert ppu["uses"] == "./.github/workflows/build-ppu-wheels.yaml"
+    assert ppu["uses"] == "./.github/workflows/ppu-build-and-test.yaml"
     assert ppu["permissions"] == {"contents": "read", "actions": "read"}
     assert "secrets" not in ppu
     assert ppu["with"] == {
-        "pr_mode": True,
         "pr_head_sha": "${{ inputs.head_sha }}",
+        "skip_ppu": "${{ needs.validate.outputs.skip_ppu == 'true' }}",
         "existing_build_run_id": "${{ needs.validate.outputs.existing_build_run_id }}",
+        "native_reuse_run_id": "${{ needs.validate.outputs.native_reuse_run_id }}",
         "wheel_source_sha": "${{ needs.validate.outputs.wheel_source_sha }}",
     }
     validate = jobs["validate"]
@@ -168,7 +186,12 @@ def test_executor_separates_read_only_pr_execution_and_always_reporting():
     assert "continue-on-error" not in step
     assert validate["outputs"] == {
         key: "${{ steps." + step["id"] + ".outputs." + key + " }}"
-        for key in ("existing_build_run_id", "wheel_source_sha")
+        for key in (
+            "skip_ppu",
+            "existing_build_run_id",
+            "native_reuse_run_id",
+            "wheel_source_sha",
+        )
     }
     report = jobs["report"]
     assert report["if"] == "always()"
@@ -181,7 +204,15 @@ def test_executor_separates_read_only_pr_execution_and_always_reporting():
 
 
 @pytest.mark.parametrize(
-    "name", ["build-ppu-wheels.yaml", "ppu-pin-ut.yaml", "e2e-ppu.yaml"]
+    "name",
+    [
+        "ppu-build-and-test.yaml",
+        "_ppu-build.yaml",
+        "_ppu-pin-ut.yaml",
+        "_ppu-model-tests.yaml",
+        "ppu-ops-tests.yaml",
+        "ppu-debug.yaml",
+    ],
 )
 def test_untrusted_workflows_have_no_write_permissions_or_inherited_secrets(name):
     config = workflow(name)
@@ -197,16 +228,19 @@ def test_untrusted_workflows_have_no_write_permissions_or_inherited_secrets(name
 @pytest.mark.parametrize(
     "name,job_ids",
     [
-        ("build-ppu-wheels.yaml", ["build"]),
-        ("ppu-pin-ut.yaml", ["pin-unit-tests"]),
-        ("e2e-ppu.yaml", ["prepare", "e2e"]),
+        ("_ppu-build.yaml", ["build"]),
+        ("_ppu-pin-ut.yaml", ["pin-unit-tests"]),
+        ("_ppu-model-tests.yaml", ["prepare", "e2e"]),
     ],
 )
 def test_every_pr_checkout_verifies_the_requested_sha_before_execution(name, job_ids):
     config = workflow(name)
     inputs = config[True]["workflow_call"]["inputs"]
-    assert inputs["pr_mode"]["type"] == "boolean"
-    assert inputs["pr_mode"]["default"] is False
+    if name == "_ppu-build.yaml":
+        assert "pr_mode" not in inputs
+    else:
+        assert inputs["pr_mode"]["type"] == "boolean"
+        assert inputs["pr_mode"]["default"] is False
     assert inputs["pr_head_sha"]["type"] == "string"
     assert inputs["pr_head_sha"]["default"] == ""
     for job_id in job_ids:
@@ -216,10 +250,18 @@ def test_every_pr_checkout_verifies_the_requested_sha_before_execution(name, job
         index = job["steps"].index(checkout)
         verify = job["steps"][index + 1]
         assert verify["env"]["EXPECTED_SHA"] == EXPECTED_SHA
-        assert (
-            'test "$(git -c safe.directory="$PWD" rev-parse HEAD)" = "$EXPECTED_SHA"'
-            == verify["run"]
-        )
+        if "SOURCE_DIR" in verify["env"]:
+            assert checkout["with"]["path"] == "${{ steps.runtime.outputs.source_rel }}"
+            assert verify["env"]["SOURCE_DIR"] == "${{ steps.runtime.outputs.source }}"
+            assert (
+                'test "$(git -c safe.directory="$SOURCE_DIR" -C "$SOURCE_DIR" rev-parse HEAD)" = "$EXPECTED_SHA"'
+                == verify["run"]
+            )
+        else:
+            assert (
+                'test "$(git -c safe.directory="$PWD" rev-parse HEAD)" = "$EXPECTED_SHA"'
+                == verify["run"]
+            )
         guard = next(
             step
             for step in job["steps"]
@@ -232,10 +274,10 @@ def test_every_pr_checkout_verifies_the_requested_sha_before_execution(name, job
 @pytest.mark.parametrize(
     "name,job_id",
     [
-        ("build-ppu-wheels.yaml", "build"),
-        ("ppu-pin-ut.yaml", "pin-unit-tests"),
-        ("e2e-ppu.yaml", "prepare"),
-        ("e2e-ppu.yaml", "e2e"),
+        ("_ppu-build.yaml", "build"),
+        ("_ppu-pin-ut.yaml", "pin-unit-tests"),
+        ("_ppu-model-tests.yaml", "prepare"),
+        ("_ppu-model-tests.yaml", "e2e"),
     ],
 )
 def test_sha_verification_allows_different_owner_but_rejects_wrong_sha(
@@ -272,7 +314,7 @@ def test_sha_verification_allows_different_owner_but_rejects_wrong_sha(
         result = subprocess.run(
             ["sh", "-e", "-c", command],
             cwd=tmp_path,
-            env={**env, "EXPECTED_SHA": expected},
+            env={**env, "EXPECTED_SHA": expected, "SOURCE_DIR": str(tmp_path)},
             capture_output=True,
             text=True,
         )
@@ -280,85 +322,584 @@ def test_sha_verification_allows_different_owner_but_rejects_wrong_sha(
         assert not result.stderr
 
 
-def test_build_conditions_preserve_on_demand_and_manual_routes():
-    config = workflow("build-ppu-wheels.yaml")
-    assert set(config[True]) == {"workflow_dispatch", "workflow_call"}
-    assert set(config[True]["workflow_call"]["inputs"]) == {
-        "pr_mode",
+def test_pr_pipeline_structure():
+    config = workflow("ppu-build-and-test.yaml")
+    assert set(config[True]) == {"workflow_call", "pull_request"}
+    inputs = config[True]["workflow_call"]["inputs"]
+    assert set(inputs) == {
         "pr_head_sha",
+        "skip_ppu",
         "existing_build_run_id",
+        "native_reuse_run_id",
         "wheel_source_sha",
     }
-    assert set(config[True]["workflow_dispatch"]["inputs"]) == {
+    assert inputs["pr_head_sha"]["type"] == "string"
+    assert inputs["pr_head_sha"]["required"] is True
+    assert inputs["skip_ppu"] == {
+        "description": "Report success without allocating PPU runners for non-impacting changes",
+        "type": "boolean",
+        "default": False,
+    }
+    for name in (
         "existing_build_run_id",
-        "build_image",
-        "ops_image",
-        "ops_test_scope",
-        "vllm_ref",
-        "pytorch_sail_arch",
+        "native_reuse_run_id",
+        "wheel_source_sha",
+    ):
+        assert inputs[name]["type"] == "string"
+        assert inputs[name]["default"] == ""
+        assert not inputs[name].get("required", False)
+    jobs = config["jobs"]
+    assert set(jobs) == {
+        "runtime-image",
+        "build",
+        "pin-unit-tests",
+        "model-tests",
+        "gate",
+    }
+    runtime = jobs["runtime-image"]
+    assert runtime["runs-on"] == "8-ppu-m890p"
+    assert "!inputs.skip_ppu" in runtime["if"]
+    assert "outputs" not in runtime
+    resolve = next(
+        step
+        for step in runtime["steps"]
+        if step.get("name") == "Resolve the runner-configured CUDA-compatible runtime"
+    )
+    assert "ppu_runtime_image.sh" in resolve["run"]
+    assert "PPU_CI_RUNTIME_IMAGE" not in resolve.get("env", {})
+    build = jobs["build"]
+    assert "ci-preview" in build["if"]
+    assert "inputs.existing_build_run_id || ''" in build["if"]
+    assert build["uses"] == "./.github/workflows/_ppu-build.yaml"
+    assert build["with"] == {
+        "pr_head_sha": "${{ inputs.pr_head_sha || github.sha }}",
+        "native_reuse_run_id": "${{ inputs.native_reuse_run_id || '' }}",
+    }
+    assert build["needs"] == "runtime-image"
+    assert jobs["gate"]["needs"] == [
+        "runtime-image",
+        "build",
+        "pin-unit-tests",
+        "model-tests",
+    ]
+    assert "always()" in jobs["gate"]["if"]
+    assert "ci-preview" in jobs["gate"]["if"]
+    gate = jobs["gate"]["steps"][0]
+    assert gate["env"] == {
+        "JOB_RESULTS": "${{ toJSON(needs) }}",
+        "SKIP_PPU": "${{ inputs.skip_ppu }}",
+        "EXISTING_BUILD_RUN_ID": "${{ inputs.existing_build_run_id || '' }}",
+        "WHEEL_SOURCE_SHA": "${{ inputs.wheel_source_sha || '' }}",
+    }
+    assert "PR_MODE" not in gate["run"]
+    assert "smoke" not in gate["run"]
+    for job_id, name, target in (
+        ("pin-unit-tests", "PPU pin UT", "_ppu-pin-ut.yaml"),
+        ("model-tests", "PPU model tests", "_ppu-model-tests.yaml"),
+    ):
+        job = jobs[job_id]
+        assert job["name"] == name
+        assert job["needs"] == ["runtime-image", "build"]
+        assert job["uses"] == f"./.github/workflows/{target}"
+        assert "!cancelled()" in job["if"]
+        assert "ci-preview" in job["if"]
+        assert "needs.build.result == 'success'" in job["if"]
+        assert job["with"] == {
+            "pr_mode": True,
+            "pr_head_sha": "${{ inputs.pr_head_sha || github.sha }}",
+            "wheel_source_sha": "${{ inputs.wheel_source_sha || '' }}",
+            "build_run_id": "${{ inputs.existing_build_run_id || github.run_id }}",
+        }
+
+
+def test_docs_only_call_uses_hosted_gate_without_ppu_jobs():
+    jobs = workflow("ppu-build-and-test.yaml")["jobs"]
+    context = {
+        "github.event_name": "workflow_dispatch",
+        "inputs.skip_ppu": True,
+        "inputs.existing_build_run_id": "",
+        "inputs.wheel_source_sha": "",
+        "needs.runtime-image.result": "skipped",
+        "needs.build.result": "skipped",
+    }
+    for job_id in ("runtime-image", "build", "pin-unit-tests", "model-tests"):
+        assert not expression(jobs[job_id]["if"], context)
+    assert expression(jobs["gate"]["if"], context)
+    gate = jobs["gate"]["steps"][0]["run"].replace(
+        "python - <<'PYTHON'", f"{sys.executable} - <<'PYTHON'"
+    )
+    result = subprocess.run(
+        ["bash", "-e", "-c", gate],
+        env={
+            **os.environ,
+            "JOB_RESULTS": json.dumps(
+                {
+                    job: {"result": "skipped"}
+                    for job in (
+                        "runtime-image",
+                        "build",
+                        "pin-unit-tests",
+                        "model-tests",
+                    )
+                }
+            ),
+            "SKIP_PPU": "true",
+            "EXISTING_BUILD_RUN_ID": "",
+            "WHEEL_SOURCE_SHA": "",
+        },
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "PPU CI skipped: no PPU-impacting changes" in result.stdout
+
+
+def test_ops_manual_entry_structure():
+    config = workflow("ppu-ops-tests.yaml")
+    assert config["name"] == "PPU ops tests (manual)"
+    assert set(config[True]) == {"workflow_dispatch"}
+    assert config[True]["workflow_dispatch"]["inputs"] == {
+        "build_image": {
+            "description": "Digest-pinned SDK image; CI installs the checksum-pinned SAIL Torch",
+            "required": False,
+            "default": BUILD_IMAGE,
+            "type": "string",
+        },
+        "ops_image": {
+            "description": "Digest-pinned operator runtime image (required; value is not stored in the repository)",
+            "required": True,
+            "type": "string",
+        },
+        "ops_test_scope": {
+            "description": "Initial manual runs always use full; auto remains disabled until qualification",
+            "default": "full",
+            "type": "choice",
+            "options": ["auto", "full"],
+        },
+        "vllm_ref": {
+            "description": "vLLM ref (blank uses .github/vllm-main-verified.commit)",
+            "required": False,
+            "default": "",
+            "type": "string",
+        },
+        "pytorch_sail_arch": {
+            "description": "Semicolon-separated HG architectures",
+            "required": True,
+            "default": "ppu_15;ppu_10",
+            "type": "string",
+        },
+    }
+    assert config["concurrency"] == {
+        "group": "ppu-ops-tests-${{ github.ref }}",
+        "cancel-in-progress": True,
     }
     jobs = config["jobs"]
-    assert jobs["build"]["if"] == (
-        "inputs.existing_build_run_id == '' && "
-        "(inputs.pr_mode || github.event_name != 'workflow_dispatch')"
-    )
-    assert jobs["detect-ops-changes"]["if"] == (
-        "${{ !inputs.pr_mode && github.event_name == 'workflow_dispatch' "
-        "&& inputs.existing_build_run_id == '' }}"
-    )
-    assert jobs["gate"]["if"] == (
-        "${{ always() && (inputs.pr_mode || github.event_name == 'pull_request') }}"
-    )
-    assert config["concurrency"]["cancel-in-progress"] == "${{ !inputs.pr_mode }}"
-    assert "inputs.pr_mode" in config["concurrency"]["group"]
-    assert "github.run_id" in config["concurrency"]["group"]
-    for job_id in ("pin-unit-tests", "smoke"):
-        assert jobs[job_id]["with"]["pr_mode"] == "${{ inputs.pr_mode || false }}"
-        assert jobs[job_id]["with"]["pr_head_sha"] == "${{ inputs.pr_head_sha }}"
-        assert (
-            jobs[job_id]["with"]["wheel_source_sha"] == "${{ inputs.wheel_source_sha }}"
-        )
-        assert jobs[job_id]["with"]["build_run_id"] == (
-            "${{ inputs.existing_build_run_id || github.run_id }}"
-        )
-
-
-def test_pr_wheel_verification_uses_explicit_sha_and_is_not_skippable():
-    pin = workflow("ppu-pin-ut.yaml")["jobs"]["pin-unit-tests"]
-    verify = next(step for step in pin["steps"] if step.get("id") == "manifest")
+    assert set(jobs) == {
+        "detect-ops-changes",
+        "ops-build",
+        "select-ops-tests",
+        "ops-tests",
+    }
+    assert "if" not in jobs["detect-ops-changes"]
+    assert jobs["ops-build"]["needs"] == "detect-ops-changes"
+    assert "if" not in jobs["ops-build"]
+    assert jobs["select-ops-tests"]["needs"] == ["detect-ops-changes", "ops-build"]
+    assert "if" not in jobs["select-ops-tests"]
+    assert jobs["ops-tests"]["needs"] == ["detect-ops-changes", "select-ops-tests"]
     assert (
-        verify["env"]["REQUIRE_PR_ARTIFACT"]
-        == "${{ inputs.pr_mode || github.event_name == 'pull_request' }}"
+        jobs["ops-tests"]["if"] == "needs.select-ops-tests.outputs.has_tests == 'true'"
     )
-    source = "${{ inputs.wheel_source_sha || inputs.pr_head_sha || github.sha }}"
-    assert verify["env"]["WHEEL_SOURCE_SHA"] == source
-    assert "EXISTING_BUILD_RUN_ID" not in verify["run"]
-    e2e = workflow("e2e-ppu.yaml")["jobs"]["e2e"]
-    verifications = [
-        step for step in e2e["steps"] if "ppu_wheel_manifest.py" in step.get("run", "")
+    assert jobs["ops-tests"]["uses"] == "./.github/workflows/_ppu-ops-tests.yaml"
+
+
+def test_debug_structure():
+    config = workflow("ppu-debug.yaml")
+    assert config["name"] == "PPU debug"
+    assert set(config[True]) == {"workflow_dispatch"}
+    inputs = config[True]["workflow_dispatch"]["inputs"]
+    assert set(inputs) == {
+        "build_run_id",
+        "target",
+        "models",
+        "accuracy_models",
+    }
+    assert inputs["build_run_id"]["type"] == "string"
+    assert inputs["build_run_id"]["required"] is True
+    assert inputs["target"]["type"] == "choice"
+    assert inputs["target"]["options"] == [
+        "both",
+        "pin-ut",
+        "model-tests",
+        "accuracy-tests",
     ]
-    assert len(verifications) == 1
-    verify = verifications[0]
-    assert verify["if"] == "inputs.pr_mode || github.event_name == 'pull_request'"
-    assert verify["env"]["WHEEL_SOURCE_SHA"] == source
-    for job in (pin, e2e):
-        for step in job["steps"]:
-            assert "${{ inputs.wheel_source_sha" not in step.get("run", "")
+    assert inputs["target"]["default"] == "both"
+    assert inputs["models"]["type"] == "string"
+    assert inputs["models"]["default"] == "qwen3.8-27b-m890p"
+    assert inputs["accuracy_models"]["type"] == "string"
+    assert inputs["accuracy_models"]["default"] == "qwen3.8-flash-next"
+    assert "concurrency" not in config
+    jobs = config["jobs"]
+    expected_jobs = {
+        "pin-unit-tests": (
+            "inputs.target == 'both' || inputs.target == 'pin-ut'",
+            "_ppu-pin-ut.yaml",
+            {},
+        ),
+        "model-tests": (
+            "inputs.target == 'both' || inputs.target == 'model-tests'",
+            "_ppu-model-tests.yaml",
+            {"models": "${{ inputs.models }}"},
+        ),
+        "accuracy-tests": (
+            "inputs.target == 'accuracy-tests'",
+            "_ppu-accuracy-tests.yaml",
+            {"models": "${{ inputs.accuracy_models }}"},
+        ),
+    }
+    assert set(jobs) == set(expected_jobs)
+    for job_id, (condition, target, extra_inputs) in expected_jobs.items():
+        job = jobs[job_id]
+        assert job["if"] == condition
+        assert "needs" not in job
+        assert job["uses"] == f"./.github/workflows/{target}"
+        assert job["with"] == {
+            "pr_mode": False,
+            "build_run_id": "${{ inputs.build_run_id }}",
+            **extra_inputs,
+        }
+
+
+def test_build_leaf_preserves_retry_identity_and_image_output():
+    config = workflow("_ppu-build.yaml")
+    assert set(config[True]) == {"workflow_call"}
+    call = config[True]["workflow_call"]
+    assert set(call["inputs"]) == {
+        "pr_head_sha",
+        "build_image",
+        "vllm_ref",
+        "pytorch_sail_arch",
+        "native_reuse_run_id",
+    }
+    for value in call["inputs"].values():
+        assert value["type"] == "string"
+        assert value["default"] == ""
+        assert not value.get("required", False)
+    assert set(call["outputs"]) == {"image"}
+    assert call["outputs"]["image"]["value"] == "${{ jobs.build.outputs.image }}"
+    assert set(config["jobs"]) == {"build"}
+    build = config["jobs"]["build"]
+    # The controller identifies successful wheel builds by the leaf job name on retry.
+    assert build["name"] == "PPU wheel build"
+    assert build["outputs"] == {"image": "${{ steps.image.outputs.image }}"}
+    assert "if" not in build
+    assert "needs" not in build
+    caller = workflow("ppu-build-and-test.yaml")["jobs"]["build"]
+    assert caller["uses"] == "./.github/workflows/_ppu-build.yaml"
+    assert caller["with"] == {
+        "pr_head_sha": "${{ inputs.pr_head_sha || github.sha }}",
+        "native_reuse_run_id": "${{ inputs.native_reuse_run_id || '' }}",
+    }
+    download = next(
+        step
+        for step in build["steps"]
+        if step.get("uses") == "actions/download-artifact@v4"
+    )
+    assert download["if"] == "inputs.native_reuse_run_id != ''"
+    assert download["continue-on-error"] is True
+    assert download["with"] == {
+        "name": "ppu-wheels-${{ inputs.native_reuse_run_id }}",
+        "path": "artifacts/native-reuse",
+        "github-token": "${{ github.token }}",
+        "run-id": "${{ inputs.native_reuse_run_id }}",
+    }
+    package = next(
+        step
+        for step in build["steps"]
+        if step.get("name") == "Build or repackage wheels"
+    )
+    assert "VLLM_SAIL_NATIVE_REUSE_DIR" in package["env"]
+
+
+def test_workflow_filenames_distinguish_reusable_calls_from_entrypoints():
+    for path in WORKFLOWS.glob("*.y*ml"):
+        triggers = workflow(path.name)[True]
+        if path.name == "ppu-build-and-test.yaml":
+            assert set(triggers) == {"workflow_call", "pull_request"}
+        elif path.name.startswith("_"):
+            assert set(triggers) == {"workflow_call"}, path.name
+        else:
+            assert "workflow_call" not in triggers, path.name
+
+
+@pytest.mark.parametrize(
+    "name", ["build-ppu-wheels.yaml", "ppu-pin-ut.yaml", "e2e-ppu.yaml"]
+)
+def test_obsolete_workflow_paths_are_absent(name):
+    assert not (WORKFLOWS / name).exists(), name
+
+
+def test_pr_pipeline_is_the_only_ppu_pull_request_route():
+    for path in WORKFLOWS.glob("*.y*ml"):
+        triggers = workflow(path.name)[True]
+        if path.name == "ppu-build-and-test.yaml":
+            assert set(triggers) == {"workflow_call", "pull_request"}
+        elif path.name.startswith(("_ppu-", "ppu-")):
+            assert "pull_request" not in triggers, path.name
+
+
+def test_preview_route_requires_the_ci_preview_label():
+    config = workflow("ppu-build-and-test.yaml")
+    assert config["name"] == "PPU build and test"
+    assert config["run-name"] == (
+        "${{ github.event_name == 'pull_request' && "
+        "format('PPU preview PR #{0} @ {1}', github.event.pull_request.number, "
+        "github.sha) || 'PPU build and test' }}"
+    )
+    assert config[True]["pull_request"] == {
+        "branches": ["main"],
+        "types": [
+            "opened",
+            "synchronize",
+            "reopened",
+            "ready_for_review",
+            "labeled",
+            "unlabeled",
+        ],
+        "paths": [".github/workflows/**", "scripts/ci/**"],
+    }
+    assert not (WORKFLOWS / "ppu-pr-preview.yaml").exists()
+    for job in config["jobs"].values():
+        guard = job["if"]
+        assert "github.event_name != 'pull_request'" in guard
+        assert "!github.event.pull_request.draft" in guard
+        assert "ci-preview" in guard
+        assert "github.event.label.name == 'ci-preview'" in guard
+
+
+def test_preview_label_is_distinct_from_formal_ready_authorization():
+    text = (WORKFLOWS / "ppu-build-and-test.yaml").read_text()
+    assert "ci-preview" in text
+    assert "ready and ready-run-all-tests continue to authorize only" in text
+    for label in ("ready", "ready-run-all-tests"):
+        assert label not in config_preview_guards()
+
+
+def config_preview_guards():
+    return "\n".join(
+        job["if"] for job in workflow("ppu-build-and-test.yaml")["jobs"].values()
+    )
+
+
+def test_preview_cancellation_is_per_pr_and_formal_calls_are_isolated():
+    concurrency = workflow("ppu-build-and-test.yaml")["concurrency"]
+    cancel = concurrency["cancel-in-progress"]
+    assert "github.event.label.name == 'ci-preview'" in cancel
+
+    groups = []
+    for number in (49, 50):
+        context = {
+            "github.event_name": "pull_request",
+            "github.event.action": "synchronize",
+            "github.event.label.name": None,
+            "github.event.pull_request.number": number,
+            "github.run_id": "900",
+        }
+        group = re.sub(
+            r"\$\{\{.*?\}\}",
+            lambda match, context=context: str(expression(match[0], context)),
+            concurrency["group"],
+        )
+        assert group == f"ppu-build-and-test-{number}"
+        assert expression(cancel, context) is True
+        groups.append(group)
+    assert len(set(groups)) == 2
+
+    formal = {
+        "github.event_name": "workflow_dispatch",
+        "github.event.pull_request.number": 0,
+        "github.run_id": "901",
+    }
+    group = re.sub(
+        r"\$\{\{.*?\}\}",
+        lambda match: str(expression(match[0], formal)),
+        concurrency["group"],
+    )
+    assert group == "ppu-build-and-test-901"
+    assert expression(cancel, formal) is False
+
+
+def test_unrelated_label_events_do_not_cancel_or_start_preview():
+    config = workflow("ppu-build-and-test.yaml")
+    concurrency = config["concurrency"]
+    context = {
+        "github.event_name": "pull_request",
+        "github.event.action": "labeled",
+        "github.event.label.name": "ready",
+        "github.event.pull_request.number": 49,
+        "github.event.pull_request.draft": False,
+        "github.event.pull_request.labels.*.name": ["ci-preview", "ready"],
+        "github.run_id": "902",
+        "inputs.existing_build_run_id": "",
+        "inputs.wheel_source_sha": "",
+        "needs.runtime-image.result": "skipped",
+        "needs.build.result": "skipped",
+    }
+    group = re.sub(
+        r"\$\{\{.*?\}\}",
+        lambda match: str(expression(match[0], context)),
+        concurrency["group"],
+    )
+    assert group == "ppu-build-and-test-902"
+    assert expression(concurrency["cancel-in-progress"], context) is False
+    assert all(not expression(job["if"], context) for job in config["jobs"].values())
+
+
+def test_removing_ci_preview_cancels_active_preview_without_starting_jobs():
+    config = workflow("ppu-build-and-test.yaml")
+    concurrency = config["concurrency"]
+    context = {
+        "github.event_name": "pull_request",
+        "github.event.action": "unlabeled",
+        "github.event.label.name": "ci-preview",
+        "github.event.pull_request.number": 49,
+        "github.event.pull_request.draft": False,
+        "github.event.pull_request.labels.*.name": [],
+        "github.run_id": "903",
+        "inputs.existing_build_run_id": "",
+        "inputs.wheel_source_sha": "",
+        "needs.runtime-image.result": "skipped",
+        "needs.build.result": "skipped",
+    }
+    group = re.sub(
+        r"\$\{\{.*?\}\}",
+        lambda match: str(expression(match[0], context)),
+        concurrency["group"],
+    )
+    assert group == "ppu-build-and-test-49"
+    assert expression(concurrency["cancel-in-progress"], context) is True
+    assert all(not expression(job["if"], context) for job in config["jobs"].values())
+
+
+@pytest.mark.parametrize(
+    "caller_id,leaf_name,job_ids",
+    [
+        ("build", "_ppu-build.yaml", ["build"]),
+        ("pin-unit-tests", "_ppu-pin-ut.yaml", ["pin-unit-tests"]),
+        ("model-tests", "_ppu-model-tests.yaml", ["prepare", "e2e"]),
+    ],
+)
+def test_labeled_preview_propagates_merge_sha_to_build_and_test_checkouts(
+    caller_id, leaf_name, job_ids
+):
+    merge_sha, head_sha = "a" * 40, "b" * 40
+    context = {
+        "github.event_name": "pull_request",
+        "github.event.action": "synchronize",
+        "github.event.label.name": None,
+        "github.event.pull_request.draft": False,
+        "github.event.pull_request.labels.*.name": ["ci-preview"],
+        "github.sha": merge_sha,
+        "github.event.pull_request.head.sha": head_sha,
+        "github.run_id": "200",
+        "inputs.pr_head_sha": "",
+        "inputs.existing_build_run_id": "",
+        "inputs.wheel_source_sha": "",
+        "needs.runtime-image.result": "success",
+        "needs.build.result": "success",
+    }
+    pipeline = workflow("ppu-build-and-test.yaml")["jobs"]
+    assert expression(pipeline["build"]["if"], context)
+    caller = pipeline[caller_id]
+    assert caller["uses"] == f"./.github/workflows/{leaf_name}"
+    context["inputs.pr_head_sha"] = expression(caller["with"]["pr_head_sha"], context)
+    assert context["inputs.pr_head_sha"] == merge_sha
+    if caller_id != "build":
+        assert caller["with"]["pr_mode"] is True
+        assert expression(caller["with"]["wheel_source_sha"], context) == ""
+    for job_id in job_ids:
+        job = workflow(leaf_name)["jobs"][job_id]
+        checkout = checkouts(job)[0]
+        assert expression(checkout["with"]["ref"], context) == merge_sha
+        verify = job["steps"][job["steps"].index(checkout) + 1]
+        assert expression(verify["env"]["EXPECTED_SHA"], context) == merge_sha
+
+
+@pytest.mark.parametrize(
+    "labels,draft", [([], False), (["ready"], False), (["ci-preview"], True)]
+)
+def test_preview_jobs_skip_without_an_active_ci_preview_label(labels, draft):
+    jobs = workflow("ppu-build-and-test.yaml")["jobs"]
+    context = {
+        "github.event_name": "pull_request",
+        "github.event.action": "synchronize",
+        "github.event.label.name": None,
+        "github.event.pull_request.draft": draft,
+        "github.event.pull_request.labels.*.name": labels,
+        "inputs.existing_build_run_id": "",
+        "inputs.wheel_source_sha": "",
+        "needs.runtime-image.result": "skipped",
+        "needs.build.result": "skipped",
+    }
+    assert all(not expression(job["if"], context) for job in jobs.values())
+
+
+@pytest.mark.parametrize(
+    "target,expected",
+    [("both", (True, True)), ("pin-ut", (True, False)), ("model-tests", (False, True))],
+)
+def test_debug_targets_select_requested_consumers(target, expected):
+    jobs = workflow("ppu-debug.yaml")["jobs"]
+    context = {"inputs.target": target}
+    assert (
+        tuple(
+            bool(expression(jobs[job_id]["if"], context))
+            for job_id in ("pin-unit-tests", "model-tests")
+        )
+        == expected
+    )
+
+
+def test_pr_wheel_verification_runs_inside_the_runtime_container():
+    source = "${{ inputs.wheel_source_sha || inputs.pr_head_sha || github.sha }}"
+    for workflow_name, job_id in (
+        ("_ppu-pin-ut.yaml", "pin-unit-tests"),
+        ("_ppu-model-tests.yaml", "e2e"),
+    ):
+        job = workflow(workflow_name)["jobs"][job_id]
+        assert not any(
+            "ppu_wheel_manifest.py" in step.get("run", "") for step in job["steps"]
+        )
+        runtime = next(
+            step
+            for step in job["steps"]
+            if "ppu_runtime_container.sh" in step.get("run", "")
+        )
+        assert runtime["env"]["PPU_CI_REQUIRE_PR_ARTIFACT"] == "${{ inputs.pr_mode }}"
+        assert runtime["env"]["PPU_CI_WHEEL_SOURCE_SHA"] == source
+
+    pin_script = (ROOT / "scripts/ci/ppu_pin_ut.sh").read_text()
+    model_script = (ROOT / "scripts/ci/ppu_e2e_smoke.sh").read_text()
+    for script in (pin_script, model_script):
+        assert '--vllm-commit "${EXPECTED_VLLM_COMMIT}"' in script
+        assert '--sail-commit "${EXPECTED_SAIL_COMMIT}"' in script
+    assert "PPU PIN UT SKIP" in pin_script
 
 
 def test_retry_reuses_build_artifacts_but_keeps_pin_diagnostics_per_attempt():
-    build = workflow("build-ppu-wheels.yaml")["jobs"]
-    for job_id in ("build", "ops-build"):
+    for name, job_id in (
+        ("_ppu-build.yaml", "build"),
+        ("ppu-ops-tests.yaml", "ops-build"),
+    ):
         uploads = {
             step["with"]["name"]: step["with"]
-            for step in build[job_id]["steps"]
+            for step in workflow(name)["jobs"][job_id]["steps"]
             if step.get("uses") == "actions/upload-artifact@v4"
         }
         assert uploads["ppu-wheels-${{ github.run_id }}"]["overwrite"] is True
         assert (
             uploads["ppu-build-diagnostics-${{ github.run_id }}"]["overwrite"] is True
         )
-    pin = workflow("ppu-pin-ut.yaml")["jobs"]["pin-unit-tests"]
+    pin = workflow("_ppu-pin-ut.yaml")["jobs"]["pin-unit-tests"]
     upload = next(
         step
         for step in pin["steps"]
@@ -380,7 +921,7 @@ def test_cpu_checks_still_run_automatically_with_read_only_checkout():
 
 
 def test_ops_partial_retry_downloads_diagnostics_from_successful_previous_attempt():
-    build = workflow("build-ppu-wheels.yaml")["jobs"]
+    build = workflow("ppu-ops-tests.yaml")["jobs"]
     producer = next(
         step["with"]["name"]
         for step in build["ops-build"]["steps"]
@@ -410,7 +951,7 @@ def test_ops_partial_retry_downloads_diagnostics_from_successful_previous_attemp
 
 
 @pytest.mark.parametrize(
-    "name", ["build-ppu-wheels.yaml", "ppu-pin-ut.yaml", "e2e-ppu.yaml"]
+    "name", ["ppu-build-and-test.yaml", "_ppu-pin-ut.yaml", "_ppu-model-tests.yaml"]
 )
 def test_wheel_source_is_optional_internal_input_only(name):
     triggers = workflow(name)[True]
@@ -445,16 +986,25 @@ def expression(value, context):
     """Evaluate only the Boolean/context subset used by these workflow guards."""
     value = value.removeprefix("${{").removesuffix("}}").strip()
     value = re.sub(
-        r"\b(?:inputs|github|needs)(?:\.[\w-]+)+",
-        lambda match: repr(context[match[0]]),
+        r"\b(?:inputs|github|needs|steps)(?:\.[\w*-]+)+",
+        lambda match: repr(context.get(match[0])),
         value,
     )
     value = value.replace("always()", "True").replace("cancelled()", "False")
+    value = value.replace("contains(", "contains_value(")
     value = value.replace("&&", " and ").replace("||", " or ")
     value = re.sub(r"!(?!=)", "not ", value)
     value = re.sub(r"\btrue\b", "True", value)
     value = re.sub(r"\bfalse\b", "False", value)
-    return eval(value.strip(), {"__builtins__": {}}, {})
+
+    def contains_value(values, item):
+        return item in values
+
+    return eval(
+        value.strip(),
+        {"__builtins__": {}, "contains_value": contains_value},
+        {},
+    )
 
 
 @pytest.mark.parametrize(
@@ -462,19 +1012,13 @@ def expression(value, context):
     [
         (True, "workflow_dispatch"),
         (False, "workflow_dispatch"),
-        (False, "pull_request"),
-        ("", "workflow_dispatch"),  # Direct manual dispatch has no pr_mode input.
     ],
 )
 def test_e2e_concurrency_isolates_reuse_consumers_only_in_pr_mode(pr_mode, event):
-    concurrency = workflow("e2e-ppu.yaml")["concurrency"]
+    concurrency = workflow("_ppu-model-tests.yaml")["concurrency"]
     assert concurrency["cancel-in-progress"] is False
     assert "queue" not in concurrency
-    refs = (
-        ("refs/pull/47/merge", "refs/pull/48/merge")
-        if event == "pull_request"
-        else ("refs/heads/main", "refs/heads/release")
-    )
+    refs = ("refs/heads/main", "refs/heads/release")
     groups_by_ref = []
     for ref in refs:
         groups_by_attempt = []
@@ -508,46 +1052,31 @@ def test_e2e_concurrency_isolates_reuse_consumers_only_in_pr_mode(pr_mode, event
 
 @pytest.fixture(scope="module")
 def build_jobs():
-    return workflow("build-ppu-wheels.yaml")["jobs"]
+    return workflow("ppu-build-and-test.yaml")["jobs"]
 
 
-@pytest.mark.parametrize(
-    "pr_mode,event",
-    [
-        (True, "workflow_dispatch"),
-        (False, "pull_request"),
-        (False, "workflow_dispatch"),
-    ],
-)
 @pytest.mark.parametrize("build", ["success", "failure", "cancelled", "skipped"])
 @pytest.mark.parametrize(
     "run_id,source", [("", ""), ("123", "a" * 40), ("999", ""), ("", "a" * 40)]
 )
-def test_consumers_require_build_or_valid_reuse(
-    build_jobs, pr_mode, event, build, run_id, source
-):
+def test_consumers_require_build_or_valid_reuse(build_jobs, build, run_id, source):
     context = {
-        "inputs.pr_mode": pr_mode,
-        "github.event_name": event,
+        "github.event_name": "workflow_dispatch",
+        "github.event.pull_request.draft": False,
+        "github.event.pull_request.labels.*.name": [],
+        "inputs.skip_ppu": False,
         "inputs.existing_build_run_id": run_id,
         "inputs.wheel_source_sha": source,
+        "needs.runtime-image.result": "success",
         "needs.build.result": build,
     }
-    manual = not pr_mode and event == "workflow_dispatch"
-    reuse = bool(run_id) and (manual or (pr_mode and bool(source)))
+    reuse = bool(run_id) and bool(source)
     eligible = build == "success" or (build == "skipped" and reuse)
-    for job_id in ("pin-unit-tests", "smoke"):
-        assert bool(expression(build_jobs[job_id]["if"], context)) == (
-            eligible and (job_id == "pin-unit-tests" or not manual)
-        )
-    assert bool(expression(build_jobs["build"]["if"], context)) == (
-        not run_id and not manual
-    )
-    assert bool(expression(build_jobs["detect-ops-changes"]["if"], context)) == (
-        manual and not run_id
-    )
+    for job_id in ("pin-unit-tests", "model-tests"):
+        assert bool(expression(build_jobs[job_id]["if"], context)) == eligible
+    assert bool(expression(build_jobs["build"]["if"], context)) == (not run_id)
     # Gate must execute even after failed/cancelled/skipped dependencies.
-    assert bool(expression(build_jobs["gate"]["if"], context)) == (not manual)
+    assert bool(expression(build_jobs["gate"]["if"], context)) is True
 
 
 @pytest.mark.parametrize(
@@ -555,21 +1084,14 @@ def test_consumers_require_build_or_valid_reuse(
     itertools.product(["success", "failure", "cancelled", "skipped"], repeat=3),
 )
 @pytest.mark.parametrize(
-    "pr_mode,run_id,source",
-    [
-        (True, "", ""),
-        (True, "123", "a" * 40),
-        (True, "999", ""),
-        (True, "", "a" * 40),
-        (False, "123", "a" * 40),
-    ],
+    "run_id,source", [("", ""), ("123", "a" * 40), ("999", ""), ("", "a" * 40)]
 )
 def test_gate_executes_fail_closed_truth_table(
-    build_jobs, monkeypatch, states, pr_mode, run_id, source
+    build_jobs, monkeypatch, states, run_id, source
 ):
     step = build_jobs["gate"]["steps"][0]
     context = {
-        "inputs.pr_mode": pr_mode,
+        "inputs.skip_ppu": False,
         "inputs.existing_build_run_id": run_id,
         "inputs.wheel_source_sha": source,
     }
@@ -579,9 +1101,10 @@ def test_gate_executes_fail_closed_truth_table(
             monkeypatch.setenv(
                 key, str(resolved).lower() if isinstance(resolved, bool) else resolved
             )
-    results = dict(
+    results = {"runtime-image": {"result": "success"}}
+    results.update(
         zip(
-            ("build", "pin-unit-tests", "smoke"),
+            ("build", "pin-unit-tests", "model-tests"),
             ({"result": state} for state in states),
             strict=False,
         )
@@ -596,184 +1119,43 @@ def test_gate_executes_fail_closed_truth_table(
         passed = False
     expected = (
         states[0] == "success"
-        or (states[0] == "skipped" and pr_mode and bool(run_id) and bool(source))
+        or (states[0] == "skipped" and bool(run_id) and bool(source))
     ) and states[1:] == ("success", "success")
     assert passed is expected
 
 
-@pytest.fixture
-def wheel_artifacts(tmp_path):
-    from scripts.ci.ppu_wheel_manifest import wheel_records
-
-    wheels = tmp_path / "wheels"
-    wheels.mkdir()
-    for package in ("vllm", "vllm_sail"):
-        with zipfile.ZipFile(
-            wheels / f"{package}-1.0-py3-none-any.whl", "w"
-        ) as archive:
-            archive.writestr(
-                f"{package}-1.0.dist-info/METADATA", f"Name: {package}\nVersion: 1.0\n"
-            )
-            if package == "vllm":
-                archive.writestr("vllm/vllm-rs", "test executable")
-                archive.writestr("vllm/_rust_tool_parser.abi3.so", "test extension")
-            else:
-                for module in ("_C", "_moe_C", "_upstream_C", "_upstream_moe_C"):
-                    archive.writestr(f"vllm_sail/{module}.abi3.so", "test extension")
-    (tmp_path / "scripts").symlink_to(ROOT / "scripts", target_is_directory=True)
-    (tmp_path / ".github").mkdir()
-    pin = (ROOT / ".github/vllm-main-verified.commit").read_text().strip()
-    (tmp_path / ".github/vllm-main-verified.commit").write_text(pin + "\n")
-    return wheels, {
-        "schema": 1,
-        "wheels": wheel_records(wheels),
-        "commits": {"vllm": pin},
-    }
-
-
-@pytest.mark.parametrize(
-    "name,job_id", [("ppu-pin-ut.yaml", "pin-unit-tests"), ("e2e-ppu.yaml", "e2e")]
-)
-@pytest.mark.parametrize("legacy_override", ["", "999"])
-@pytest.mark.parametrize(
-    "pr_mode,event,build_id,source,head,actual,wrong_pin,passes",
-    [
-        (True, "workflow_dispatch", "200", "", "b", "b", False, True),
-        (True, "workflow_dispatch", "200", "", "b", "c", False, False),
-        (True, "workflow_dispatch", "123", "a", "b", "a", False, True),
-        (True, "workflow_dispatch", "123", "a", "b", "b", False, False),
-        (True, "workflow_dispatch", "123", "a", "b", "c", False, False),
-        (True, "workflow_dispatch", "123", "a", "b", "a", True, False),
-        (True, "workflow_dispatch", "999", "", "b", "a", False, False),
-        (True, "workflow_dispatch", "999", "", "b", "b", False, True),
-        (True, "workflow_dispatch", "999", "", "", "c", False, False),
-        (False, "pull_request", "200", "", "", "d", False, True),
-        (False, "pull_request", "200", "", "", "c", False, False),
-        (False, "pull_request", "200", "", "", "d", True, False),
-        (False, "workflow_dispatch", "123", "", "", "a", False, True),
-        (False, "workflow_dispatch", "123", "", "", "a", True, True),
-    ],
-)
-def test_manifest_shell_checks_actual_source_and_current_pin(
-    name,
-    job_id,
-    legacy_override,
-    pr_mode,
-    event,
-    build_id,
-    source,
-    head,
-    actual,
-    wrong_pin,
-    passes,
-    wheel_artifacts,
-    tmp_path,
-):
-    wheels, data = wheel_artifacts
-    data["commits"]["vllm-sail"] = actual * 40
-    if wrong_pin:
-        data["commits"]["vllm"] = "e" * 40
-    (wheels / "wheel-manifest.json").write_text(json.dumps(data))
-    context = {
-        "inputs.pr_mode": pr_mode,
-        "github.event_name": event,
-        "inputs.build_run_id": build_id,
-        "github.run_id": "200",
-        "inputs.wheel_source_sha": source * 40,
-        "inputs.pr_head_sha": head * 40,
-        "github.sha": "d" * 40,
-    }
-    env = {
-        "PATH": str(Path(sys.executable).parent) + os.pathsep + os.defpath,
-        "WHEELS_DIR": str(wheels),
-        "GITHUB_OUTPUT": str(tmp_path / "output"),
-        "GITHUB_STEP_SUMMARY": str(tmp_path / "summary"),
-        # Even a stale inherited variable must never bypass SAIL verification.
-        "EXISTING_BUILD_RUN_ID": legacy_override,
-    }
-    steps = [
+def test_runtime_workflows_use_the_checked_in_docker_wrapper():
+    pin = workflow("_ppu-pin-ut.yaml")["jobs"]["pin-unit-tests"]
+    model = workflow("_ppu-model-tests.yaml")["jobs"]["e2e"]
+    pin_step = next(
         step
-        for step in workflow(name)["jobs"][job_id]["steps"]
-        if "ppu_wheel_manifest.py" in step.get("run", "")
-    ]
-    executed = 0
-    for step in steps:
-        if "if" in step and not expression(step["if"], context):
-            continue
-        executed += 1
-        for key, value in step.get("env", {}).items():
-            resolved = expression(value, context)
-            env[key] = str(resolved).lower() if isinstance(resolved, bool) else resolved
-        result = subprocess.run(
-            [
-                "/bin/bash",
-                "--noprofile",
-                "--norc",
-                "-eo",
-                "pipefail",
-                "-c",
-                step["run"],
-            ],
-            cwd=tmp_path,
-            env=env,
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-        assert (result.returncode == 0) is passes, result.stdout + result.stderr
-        if not passes:
-            assert "source commit differs" in result.stderr
-    assert executed == (
-        1 if name == "ppu-pin-ut.yaml" or pr_mode or event == "pull_request" else 0
+        for step in pin["steps"]
+        if "ppu_runtime_container.sh" in step.get("run", "")
     )
-    if name == "ppu-pin-ut.yaml" and passes:
-        assert (
-            tmp_path / "output"
-        ).read_text() == f"matches={str(not wrong_pin).lower()}\n"
-
-
-def scheduler_command(name):
-    for job in workflow(name)["jobs"].values():
-        for step in job.get("steps", []):
-            if "ppu-scheduler-action" in step.get("uses", ""):
-                return step["with"]["command"]
-    raise AssertionError(f"No scheduler step in {name}")
-
-
-# Privileged worker pods see every card on the host; without this binding the
-# runtime defaults to cards 0..N-1, which may belong to other jobs.
-@pytest.mark.parametrize(
-    "name,script",
-    [("e2e-ppu.yaml", "ppu_e2e_smoke.sh"), ("ppu-pin-ut.yaml", "ppu_pin_ut.sh")],
-)
-@pytest.mark.parametrize("allocated", ["3", "6,7", None, ""])
-def test_device_workers_bind_allocated_cards_before_running(
-    tmp_path, name, script, allocated
-):
-    bin_dir = tmp_path / "bin"
-    bin_dir.mkdir()
-    fake = bin_dir / "bash"
-    fake.write_text(
-        '#!/bin/sh\nprintf "%s %s\\n" "${CUDA_VISIBLE_DEVICES-<unset>}" "$*"\n'
+    model_step = next(
+        step
+        for step in model["steps"]
+        if "ppu_runtime_container.sh" in step.get("run", "")
     )
-    fake.chmod(0o755)
-    env = {"PATH": f"{bin_dir}{os.pathsep}{os.defpath}", "CUDA_VISIBLE_DEVICES": "0,1"}
-    if allocated is not None:
-        env["NVIDIA_VISIBLE_DEVICES"] = allocated
-    command = scheduler_command(name).replace(
-        "/workspace/source", shlex.quote(str(ROOT))
+    assert (
+        pin_step["run"]
+        == 'bash "${PPU_CI_SOURCE_DIR}/scripts/ci/ppu_runtime_container.sh" pin-ut'
     )
-    result = subprocess.run(
-        ["/bin/bash", "--noprofile", "--norc", "-c", command],
-        env=env,
-        capture_output=True,
-        text=True,
-        timeout=10,
+    assert pin_step["env"]["PPU_CI_DEVICE_COUNT"] == "1"
+    assert "PPU_RUNTIME_IMAGE" not in pin_step["env"]
+    assert pin_step["env"]["PPU_CI_REQUIRE_PR_ARTIFACT"] == "${{ inputs.pr_mode }}"
+    assert (
+        model_step["run"]
+        == 'bash "${PPU_CI_SOURCE_DIR}/scripts/ci/ppu_runtime_container.sh" model-test'
     )
-    if not allocated:
-        assert result.returncode != 0
-        assert "NVIDIA_VISIBLE_DEVICES" in result.stderr
-        assert result.stdout == ""
-    else:
-        assert result.returncode == 0, result.stderr
-        assert result.stdout == f"{allocated} scripts/ci/{script}\n"
+    assert model_step["env"]["PPU_CI_DEVICE_COUNT"] == "${{ matrix.model.tp }}"
+    assert model_step["env"]["PPU_CI_REQUIRE_PR_ARTIFACT"] == "${{ inputs.pr_mode }}"
+    assert pin_step["env"]["PPU_CI_SOURCE_DIR"] == "${{ steps.runtime.outputs.source }}"
+    assert (
+        model_step["env"]["PPU_CI_SOURCE_DIR"] == "${{ steps.runtime.outputs.source }}"
+    )
+    assert model_step["env"]["MODEL_PATH"] == "${{ matrix.model.checkpoint }}"
+    assert "ppu-scheduler-action" not in (WORKFLOWS / "_ppu-pin-ut.yaml").read_text()
+    assert (
+        "ppu-scheduler-action" not in (WORKFLOWS / "_ppu-model-tests.yaml").read_text()
+    )

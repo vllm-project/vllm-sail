@@ -553,7 +553,7 @@ def execute(env):
                     [
                         sys.executable,
                         stack_script,
-                        "prepare",
+                        "capture",
                         *stack_args,
                         "--constraints",
                         child_env["PIP_CONSTRAINT"],

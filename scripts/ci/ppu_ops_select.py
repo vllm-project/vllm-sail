@@ -96,9 +96,7 @@ def validate_profiles(profiles):
     for board, name in BOARDS.items():
         item = profiles[board]
         keys(item, ("runner_group", "node_selector", "nproc_per_node", "group_count"))
-        require(
-            item["runner_group"] == "k8s-runner-group-cpu-thead", "Unknown CPU runner"
-        )
+        require(item["runner_group"] == "8-ppu-m890p", "Unknown community PPU runner")
         require(item["node_selector"] == {"board-type": name}, "Invalid board routing")
         for key in ("nproc_per_node", "group_count"):
             require(
@@ -305,7 +303,9 @@ def validate_config(config, repo):
         for directory in catalog_directories
         for path in directory.glob("test_*.py")
     }
-    require(discovered == tests, f"Test catalog is incomplete: {sorted(discovered ^ tests)}")
+    require(
+        discovered == tests, f"Test catalog is incomplete: {sorted(discovered ^ tests)}"
+    )
     rules = config["selection_rules"]
     keys(rules, ("full", "no_effect", "source_to_tests"))
     for category in ("full", "no_effect"):

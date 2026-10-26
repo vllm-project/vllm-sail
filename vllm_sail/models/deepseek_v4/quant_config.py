@@ -226,6 +226,21 @@ class DeepseekV4FP8Config(Fp8Config):
                 fused_mapping=self.packed_modules_mapping,
                 match_mode="substring",
             )
+            # PPU MODIFICATION: begin
+            # 0.31's cross-layer ``context_wkv_proj`` is populated from every
+            # draft layer's ``attn.wkv`` shards, so it must use the same
+            # channel-wise scheme. It can never match the checkpoint's
+            # ``fp8_channelwise_layers`` entries (those name per-layer
+            # ``...attn.wkv`` paths), and ``configure_quant_config`` skips
+            # ``apply_vllm_mapper`` for models implementing ``SupportsQuant``
+            # (DSpark does), so match it explicitly. Left on the default
+            # per-tensor path its scale parameter is
+            # ``PerTensorScaleParameter`` and the [N, 1] channel-wise shard
+            # from ``_duplicate_context_wkv_weights`` trips
+            # ``assert loaded_weight.shape[0] == 1``.
+            if not matched and prefix.split(".")[-1] == "context_wkv_proj":
+                matched = True
+            # PPU MODIFICATION: end
             if matched:
                 from compressed_tensors.quantization import (
                     QuantizationArgs,

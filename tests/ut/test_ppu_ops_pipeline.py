@@ -63,9 +63,7 @@ def test_ops_assets_have_no_legacy_namespace():
 def test_ops_workflow_artifact_contract():
     path = ROOT / ".github/workflows/_ppu-ops-tests.yaml"
     assert path.is_file()
-    caller = yaml.safe_load(
-        (ROOT / ".github/workflows/build-ppu-wheels.yaml").read_text()
-    )
+    caller = yaml.safe_load((ROOT / ".github/workflows/ppu-ops-tests.yaml").read_text())
     workflow = yaml.safe_load(path.read_text())
     jobs = caller["jobs"]
     selection = next(
@@ -358,8 +356,8 @@ def test_summary_cli_rejects_extra_partial_artifact(
 @pytest.mark.parametrize(
     "filename",
     [
-        "build-ppu-wheels.yaml",
-        "e2e-ppu.yaml",
+        "ppu-ops-tests.yaml",
+        "_ppu-model-tests.yaml",
         "_ppu-ops-tests.yaml",
     ],
 )
@@ -371,7 +369,7 @@ def test_device_workflows_have_no_chinese_text(filename):
         )
 
 
-@pytest.mark.parametrize("filename", ["build-ppu-wheels.yaml", "_ppu-ops-tests.yaml"])
+@pytest.mark.parametrize("filename", ["ppu-ops-tests.yaml", "_ppu-ops-tests.yaml"])
 def test_device_workflows_do_not_expose_qualification_mode(filename):
     text = (ROOT / ".github/workflows" / filename).read_text()
     assert "qualification_mode" not in text.lower()
@@ -379,14 +377,18 @@ def test_device_workflows_do_not_expose_qualification_mode(filename):
 
 def test_manual_ops_image_input_contract():
     workflow = yaml.safe_load(
-        (ROOT / ".github/workflows/build-ppu-wheels.yaml").read_text()
+        (ROOT / ".github/workflows/ppu-ops-tests.yaml").read_text()
     )
     inputs = workflow.get("on", workflow.get(True))["workflow_dispatch"]["inputs"]
     assert "ops_image" in inputs
     assert "device_image" not in inputs
     assert inputs["ops_image"]["type"] == "string"
-    assert inputs["ops_image"]["default"] == inputs["build_image"]["default"]
-    assert re.fullmatch(r".+@sha256:[0-9a-f]{64}", inputs["ops_image"]["default"])
+    assert inputs["ops_image"]["required"] is True
+    assert "default" not in inputs["ops_image"]
+    assert (
+        "download.t-head.cn/docker_release/pytorch" in inputs["build_image"]["default"]
+    )
+    assert re.fullmatch(r".+@sha256:[0-9a-f]{64}", inputs["build_image"]["default"])
     step = next(
         s
         for s in workflow["jobs"]["detect-ops-changes"]["steps"]
@@ -399,7 +401,7 @@ def test_manual_ops_image_input_contract():
 def test_manual_detection_accepts_unapproved_environment(tmp_path, monkeypatch):
     from scripts.ci import ppu_ops_select as selector
 
-    path = ROOT / ".github/workflows/build-ppu-wheels.yaml"
+    path = ROOT / ".github/workflows/ppu-ops-tests.yaml"
     workflow = yaml.safe_load(path.read_text())
     step = next(
         s
@@ -442,16 +444,25 @@ def test_manual_detection_accepts_unapproved_environment(tmp_path, monkeypatch):
 
 
 def test_manual_workflow_does_not_change_pr_gate():
+    pipeline = yaml.safe_load(
+        (ROOT / ".github/workflows/ppu-build-and-test.yaml").read_text()
+    )["jobs"]
+    assert pipeline["gate"]["needs"] == [
+        "runtime-image",
+        "build",
+        "pin-unit-tests",
+        "model-tests",
+    ]
+    assert not any("ops-" in job_id for job_id in pipeline)
+    assert pipeline["build"]["needs"] == "runtime-image"
     workflow = yaml.safe_load(
-        (ROOT / ".github/workflows/build-ppu-wheels.yaml").read_text()
+        (ROOT / ".github/workflows/ppu-ops-tests.yaml").read_text()
     )
     jobs = workflow["jobs"]
-    assert jobs["gate"]["needs"] == ["build", "pin-unit-tests", "smoke"]
-    assert "needs" not in jobs["build"]
+    assert "gate" not in jobs
     assert "detect-ops-changes" in jobs
-    assert "workflow_dispatch" in jobs["detect-ops-changes"]["if"]
-    assert "existing_build_run_id" in jobs["detect-ops-changes"]["if"]
-    assert "schedule" not in workflow.get(True, workflow.get("on", {}))
+    assert "if" not in jobs["detect-ops-changes"]
+    assert set(workflow.get(True, workflow.get("on", {}))) == {"workflow_dispatch"}
     assert jobs["ops-tests"]["uses"] == "./.github/workflows/_ppu-ops-tests.yaml"
     assert (
         jobs["ops-build"]["container"]["image"]
@@ -510,7 +521,7 @@ def test_reusable_workflow_contract():
     assert workflow["permissions"] == {"contents": "read", "actions": "read"}
     jobs = workflow["jobs"]
     device = jobs["ops-tests"]
-    assert device["runs-on"] == "k8s-runner-group-cpu-thead"
+    assert device["runs-on"] == "8-ppu-m890p"
     assert device["container"]["image"] == "${{ inputs.image }}"
     assert device["timeout-minutes"] == 90
     assert device["strategy"]["fail-fast"] is False
@@ -542,7 +553,7 @@ def test_reusable_workflow_contract():
 @pytest.mark.parametrize(
     "filename,job_id",
     [
-        ("build-ppu-wheels.yaml", "ops-build"),
+        ("ppu-ops-tests.yaml", "ops-build"),
         ("_ppu-ops-tests.yaml", "ops-tests"),
     ],
 )
@@ -785,9 +796,9 @@ def test_summary_does_not_inherit_container_git_config():
 @pytest.mark.parametrize(
     "filename,job_id",
     [
-        ("build-ppu-wheels.yaml", "detect-ops-changes"),
-        ("build-ppu-wheels.yaml", "ops-build"),
-        ("build-ppu-wheels.yaml", "select-ops-tests"),
+        ("ppu-ops-tests.yaml", "detect-ops-changes"),
+        ("ppu-ops-tests.yaml", "ops-build"),
+        ("ppu-ops-tests.yaml", "select-ops-tests"),
         ("_ppu-ops-tests.yaml", "ops-tests"),
         ("_ppu-ops-tests.yaml", "ops-summary"),
     ],
@@ -804,9 +815,7 @@ def test_device_checkout_is_bound_to_workflow_sha(filename, job_id):
 
 
 def test_device_identity_cannot_be_overridden_by_reusable_input():
-    caller = yaml.safe_load(
-        (ROOT / ".github/workflows/build-ppu-wheels.yaml").read_text()
-    )
+    caller = yaml.safe_load((ROOT / ".github/workflows/ppu-ops-tests.yaml").read_text())
     workflow = yaml.safe_load(
         (ROOT / ".github/workflows/_ppu-ops-tests.yaml").read_text()
     )

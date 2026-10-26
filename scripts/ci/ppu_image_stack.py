@@ -207,6 +207,7 @@ def main():
     parser.add_argument("--sdk", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--constraints", type=Path)
+    parser.add_argument("--require-ppu-headers", action="store_true")
     args = parser.parse_args()
     capture = args.command in ("capture", "prepare")
     if capture and args.constraints is None:
@@ -219,12 +220,13 @@ def main():
     import torch
 
     if (
-        replaced
+        args.require_ppu_headers
         and not (
             Path(torch.__file__).parent / ".ppu_compat/compatible_wrapper.h"
         ).is_file()
     ):
-        raise ValueError("prepared Torch is missing .ppu_compat/compatible_wrapper.h")
+        source = "prepared" if replaced else "image-provided"
+        raise ValueError(f"{source} Torch is missing .ppu_compat/compatible_wrapper.h")
     observed = snapshot(
         args.sdk,
         Path(torch.__file__).parent,

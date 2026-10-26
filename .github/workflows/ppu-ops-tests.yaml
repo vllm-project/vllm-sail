@@ -1,0 +1,190 @@
+name: PPU ops tests (manual)
+
+on:
+  workflow_dispatch:
+    inputs:
+      build_image:
+        description: Digest-pinned SDK image; CI installs the checksum-pinned SAIL Torch
+        required: false
+        default: download.t-head.cn/docker_release/pytorch@sha256:a33a67832f7ec442c481421e94255518dd67e464406f8e610c15d2b594b21f80
+        type: string
+      ops_image:
+        description: Digest-pinned operator runtime image (required; value is not stored in the repository)
+        required: true
+        type: string
+      ops_test_scope:
+        description: Initial manual runs always use full; auto remains disabled until qualification
+        default: full
+        type: choice
+        options: [auto, full]
+      vllm_ref:
+        description: vLLM ref (blank uses .github/vllm-main-verified.commit)
+        required: false
+        default: ""
+        type: string
+      pytorch_sail_arch:
+        description: Semicolon-separated HG architectures
+        required: true
+        default: ppu_15;ppu_10
+        type: string
+
+permissions:
+  contents: read
+  actions: read
+cache-mode: none
+
+concurrency:
+  group: ppu-ops-tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # This pipeline remains manual until both board types are qualified.
+  detect-ops-changes:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      build_image: ${{ steps.detect.outputs.build_image }}
+      runtime_image: ${{ steps.detect.outputs.runtime_image }}
+      expected_vllm_commit: ${{ steps.detect.outputs.expected_vllm_commit }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Pin manual validation identity and images
+        id: detect
+        env:
+          BUILD_IMAGE_OVERRIDE: ${{ inputs.build_image }}
+          OPS_IMAGE_OVERRIDE: ${{ inputs.ops_image }}
+          VLLM_REF_OVERRIDE: ${{ inputs.vllm_ref }}
+        run: |
+          python - <<'PY'
+          import json, os
+          from pathlib import Path
+          from scripts.ci.ppu_ops_select import (
+              validate_config, validate_environment, resolve_build_image,
+              digest_image, sha, github_outputs, collect_changes, write_json,
+          )
+          root = Path.cwd()
+          environment = json.loads(Path('scripts/ci/ppu_ops_environment.json').read_bytes())
+          validate_config(json.loads(Path('scripts/ci/ppu_ops_tests.json').read_bytes()), root)
+          validate_environment(environment)
+          image = resolve_build_image(environment, os.environ['BUILD_IMAGE_OVERRIDE'])
+          runtime = digest_image(os.environ['OPS_IMAGE_OVERRIDE'] or environment['runtime_image'])
+          expected = sha(os.environ['VLLM_REF_OVERRIDE'] or Path('.github/vllm-main-verified.commit').read_text().strip())
+          github_outputs(dict(build_image=image, runtime_image=runtime, expected_vllm_commit=expected))
+          write_json('changes.json', collect_changes(root, None, None, os.environ['GITHUB_SHA']))
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ppu-ops-changes-${{ github.run_id }}-${{ github.run_attempt }}
+          path: changes.json
+          if-no-files-found: error
+          retention-days: 14
+
+  ops-build:
+    needs: detect-ops-changes
+    runs-on: 8-ppu-m890p
+    timeout-minutes: 180
+    container:
+      image: ${{ needs.detect-ops-changes.outputs.build_image }}
+    env:
+      GIT_CONFIG_NOSYSTEM: "1"
+      VLLM_SAIL_BUILD_IMAGE: ${{ needs.detect-ops-changes.outputs.build_image }}
+      VLLM_REF: ${{ needs.detect-ops-changes.outputs.expected_vllm_commit }}
+      PYTORCH_SAIL_ARCH: ${{ inputs.pytorch_sail_arch }}
+      ARTIFACT_DIR: ${{ github.workspace }}/artifacts
+    steps:
+      - name: Prepare isolated job-local Git configuration
+        id: git-config
+        shell: bash
+        run: |
+          # Checkout writes safe.directory; retain this config through post-job cleanup.
+          config="$(mktemp "${RUNNER_TEMP}/git-config.XXXXXX")"
+          printf 'GIT_CONFIG_GLOBAL=%s\n' "$config" >> "$GITHUB_ENV"
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Build qualification wheels for this run
+        run: bash scripts/ci/build_ppu_wheels.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ppu-wheels-${{ github.run_id }}
+          path: artifacts/wheels/
+          if-no-files-found: error
+          retention-days: 14
+          overwrite: true
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ppu-build-diagnostics-${{ github.run_id }}
+          overwrite: true
+          path: |
+            artifacts/logs/**
+            artifacts/build-manifest.txt
+          if-no-files-found: error
+          retention-days: 14
+
+  select-ops-tests:
+    needs: [detect-ops-changes, ops-build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    outputs:
+      mode: ${{ steps.select.outputs.mode }}
+      matrix: ${{ steps.select.outputs.matrix }}
+      has_tests: ${{ steps.select.outputs.has_tests }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          name: ppu-ops-changes-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ops-selection
+      - uses: actions/download-artifact@v4
+        with:
+          name: ppu-wheels-${{ github.run_id }}
+          path: ops-wheels
+      - uses: actions/download-artifact@v4
+        with:
+          name: ppu-build-diagnostics-${{ github.run_id }}
+          path: ops-build-diagnostics
+      - name: Validate artifacts and generate the full test selection
+        id: select
+        env:
+          BUILD_IMAGE: ${{ needs.detect-ops-changes.outputs.build_image }}
+          RUNTIME_IMAGE: ${{ needs.detect-ops-changes.outputs.runtime_image }}
+          EXPECTED_VLLM_COMMIT: ${{ needs.detect-ops-changes.outputs.expected_vllm_commit }}
+        run: |
+          cp scripts/ci/ppu_ops_tests.json scripts/ci/ppu_ops_environment.json ops-selection/
+          python scripts/ci/ppu_ops_select.py select --repo . \
+            --config ops-selection/ppu_ops_tests.json --environment ops-selection/ppu_ops_environment.json \
+            --changes ops-selection/changes.json --build-manifest ops-build-diagnostics/build-manifest.txt \
+            --wheel-manifest ops-wheels/wheel-manifest.json --build-run-id "$GITHUB_RUN_ID" \
+            --build-image "$BUILD_IMAGE" --runtime-image "$RUNTIME_IMAGE" \
+            --expected-vllm-commit "$EXPECTED_VLLM_COMMIT" --scope full --output ops-selection/selection.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ppu-ops-selection-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ops-selection/
+          if-no-files-found: error
+          retention-days: 14
+
+  ops-tests:
+    needs: [detect-ops-changes, select-ops-tests]
+    if: needs.select-ops-tests.outputs.has_tests == 'true'
+    uses: ./.github/workflows/_ppu-ops-tests.yaml
+    permissions:
+      contents: read
+      actions: read
+    with:
+      build_run_id: ${{ github.run_id }}
+      matrix: ${{ needs.select-ops-tests.outputs.matrix }}
+      selection_artifact: ppu-ops-selection-${{ github.run_id }}-${{ github.run_attempt }}
+      build_image: ${{ needs.detect-ops-changes.outputs.build_image }}
+      expected_vllm_commit: ${{ needs.detect-ops-changes.outputs.expected_vllm_commit }}
+      image: ${{ needs.detect-ops-changes.outputs.runtime_image }}

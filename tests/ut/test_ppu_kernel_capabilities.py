@@ -316,6 +316,8 @@ def test_warmup_excludes_cutedsl_only_on_ppu(
     modules, ppu, process_local_only, jit_enabled
 ):
     ns = types.SimpleNamespace
+    import contextlib
+
     calls = []
     modules("vllm.platforms", current_platform=ns(is_ppu=lambda: ppu))
     modules("vllm.logger", init_logger=lambda _: ns(warning=lambda *a: None))
@@ -332,6 +334,10 @@ def test_warmup_excludes_cutedsl_only_on_ppu(
         def compile_many(self, keys):
             calls.append("triton")
 
+    class SamplerKernel:
+        def compile_many(self, keys):
+            calls.append("sampler_compiled")
+
     modules(
         "vllm.model_executor.warmup.jit_warmup_cutedsl_helper",
         VllmCuTeDSLJitKernel=VllmCuTeDSLJitKernel,
@@ -339,8 +345,23 @@ def test_warmup_excludes_cutedsl_only_on_ppu(
     cute, triton = CuTeKernel(), TritonKernel()
     registrations = {cute: [((), {})], triton: [((), {"head_dim": 128})]}
     retained = registrations[triton]
+
+    def register_top_k_top_p_warmups():
+        calls.append("sampler_registered")
+        registrations[SamplerKernel()] = [((), {})]
+
+    modules(
+        "vllm.v1.sample.ops.topk_topp_sampler",
+        register_top_k_top_p_warmups=register_top_k_top_p_warmups,
+    )
     worker = ns(
-        model_runner=ns(jit_warmup_registry=ns(_registrations=registrations)),
+        model_runner=ns(
+            jit_warmup_registry=ns(
+                _registrations=registrations, activate=lambda: contextlib.nullcontext()
+            ),
+            is_last_pp_rank=True,
+            is_pooling_model=False,
+        ),
         vllm_config=ns(
             kernel_config=ns(enable_jit_warmup=jit_enabled, enable_cutedsl_warmup=True)
         ),
@@ -381,9 +402,14 @@ def test_warmup_excludes_cutedsl_only_on_ppu(
         provider.kernel_warmup(worker, process_local_only=process_local_only)
         == "result"
     )
-    expected = [("upstream", process_local_only)]
+    expected = []
+    if ppu:
+        expected += ["sampler_registered"]
+    expected += [("upstream", process_local_only)]
     if jit_enabled:
         expected += ["triton"] if ppu else ["cute", "triton"]
+        if ppu:
+            expected += ["sampler_compiled"]
     if not ppu:
         expected += ["legacy"]
     elif not process_local_only:

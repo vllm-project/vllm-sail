@@ -206,6 +206,7 @@ _bf16_gemm_nt_impl: Callable[..., Any] | None = None
 _bf16_grouped_nopad_impl: Callable[..., Any] | None = None
 _bf16_grouped_masked_impl: Callable[..., Any] | None = None
 _fp4_grouped_nopad_impl: Callable[..., Any] | None = None
+_fp4_grouped_fused_impl: Callable[..., Any] | None = None
 _fp4_grouped_masked_impl: Callable[..., Any] | None = None
 _w4a16_grouped_nopad_impl: Callable[..., Any] | None = None
 _w4a16_grouped_fused_impl: Callable[..., Any] | None = None
@@ -239,7 +240,7 @@ def _lazy_init() -> None:
     global _int8_grouped_nopad_impl, _int8_grouped_masked_impl
     global _bf16_gemm_nt_impl
     global _bf16_grouped_nopad_impl, _bf16_grouped_masked_impl
-    global _fp4_grouped_nopad_impl, _fp4_grouped_masked_impl
+    global _fp4_grouped_nopad_impl, _fp4_grouped_fused_impl, _fp4_grouped_masked_impl
     global \
         _w4a16_grouped_nopad_impl, \
         _w4a16_grouped_fused_impl, \
@@ -269,6 +270,7 @@ def _lazy_init() -> None:
         or _bf16_grouped_nopad_impl is not None
         or _bf16_grouped_masked_impl is not None
         or _fp4_grouped_nopad_impl is not None
+        or _fp4_grouped_fused_impl is not None
         or _fp4_grouped_masked_impl is not None
         or _w4a16_grouped_nopad_impl is not None
         or _w4a16_grouped_fused_impl is not None
@@ -338,6 +340,7 @@ def _lazy_init() -> None:
         _dg, "m_grouped_gemm_bf16_bf16_bf16_nt_masked", None
     )
     _fp4_grouped_nopad_impl = getattr(_dg, "m_grouped_gemm_fp4_fp4_bf16_nt_nopad", None)
+    _fp4_grouped_fused_impl = getattr(_dg, "m_grouped_gemm_fp4_fp4_bf16_nt_fused", None)
     _fp4_grouped_masked_impl = getattr(
         _dg, "m_grouped_gemm_fp4_fp4_bf16_nt_masked", None
     )
@@ -455,6 +458,13 @@ def m_grouped_fp4_gemm_nt_nopad(*args, **kwargs):
     if _fp4_grouped_nopad_impl is None:
         return _missing(*args, **kwargs)
     return _fp4_grouped_nopad_impl(*args, **kwargs)
+
+
+def m_grouped_fp4_gemm_nt_fused(*args, **kwargs):
+    _lazy_init()
+    if _fp4_grouped_fused_impl is None:
+        return _missing(*args, **kwargs)
+    return _fp4_grouped_fused_impl(*args, **kwargs)
 
 
 def fp4_m_grouped_gemm_nt_masked(*args, **kwargs):
@@ -1127,6 +1137,7 @@ __all__ = [
     "m_grouped_bf16_gemm_nt_nopad",
     "bf16_m_grouped_gemm_nt_masked",
     "m_grouped_fp4_gemm_nt_nopad",
+    "m_grouped_fp4_gemm_nt_fused",
     "fp4_m_grouped_gemm_nt_masked",
     "m_grouped_w4a16_gemm_nt_nopad",
     "m_grouped_w4a16_gemm_nt_fused",
