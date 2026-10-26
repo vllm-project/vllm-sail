@@ -44,6 +44,51 @@ quoting prevents the shell from interpreting the semicolon as a command boundary
 
 ## 2. Install matching vLLM
 
+### Build both wheels from the checkout's verified vLLM commit
+
+After activating the SAIL SDK and SAIL PyTorch environment from step 1, run
+from your vLLM SAIL checkout on Linux (Bash 4+, Python 3.10–3.13):
+
+```bash
+BUILD_JOBS=8 bash scripts/build_wheels.sh
+# Or select an empty output directory:
+bash scripts/build_wheels.sh --output-dir /path/to/new-wheelhouse
+```
+
+The script reads `.github/vllm-main-verified.commit` from this checkout and
+fetches that exact upstream commit into a temporary directory. It builds vLLM
+with `VLLM_TARGET_DEVICE=empty` and `VLLM_REQUIRE_RUST_FRONTEND=1`, explicitly
+compiles the Rust frontend and parser, installs the resulting vLLM wheel with
+`--no-deps`, then builds the current vLLM SAIL sources. Both builds use the
+active SAIL PyTorch without build isolation. No device is needed to compile.
+
+Use a dedicated build environment: the script installs Python build requirements
+and replaces its installed vLLM. It constrains SDK Python packages to their
+installed versions, uses your current pip index configuration and verifies the
+SDK/PyTorch stack after building. Runtime-only dependencies and the final
+vllm-sail wheel are not installed. Rustup is installed if absent and downloads
+the toolchain specified by upstream `rust-toolchain.toml`; the default Rust
+mirrors are `rsproxy.cn`, overridable with `RUSTUP_DIST_SERVER` and
+`RUSTUP_UPDATE_ROOT`. Network access is required for source, toolchain and
+dependency downloads. `VLLM_REPOSITORY` may point to a local upstream Git mirror.
+
+The default output is a fresh `artifacts/local-<run>/` directory containing:
+
+- `wheels/vllm/*.whl` and `wheels/vllm-sail/*.whl`.
+- `wheels/wheel-manifest.json` with source commits, wheel versions and SHA256 hashes.
+- `build-manifest.txt` and `logs/`, including the explicit Rust build log.
+
+The build rejects missing Rust artifacts and missing native SAIL extensions.
+Output directories must be empty. Existing source checkouts are not reset or
+cleaned; the temporary upstream checkout is removed on exit. The SAIL build
+uses the current checkout, including local source edits. Wheel validation is
+packaging evidence; use step 4 and the verification guide for runtime checks.
+See `bash scripts/build_wheels.sh --help` for SDK, architecture, mirror and
+parallelism controls. When `BUILD_JOBS` is omitted, parallelism is capped by
+available memory and at most 16 jobs.
+
+### Install a separately supplied vLLM build
+
 Install a vLLM build with `VLLM_TARGET_DEVICE=empty` in the same environment.
 This lets the PPU plugin provide the native operations used by the engine.
 The plugin accepts `>=0.31.0,<0.32.0`; its generated upstream kernel sources use
