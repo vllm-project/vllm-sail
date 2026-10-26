@@ -119,7 +119,7 @@ kind = "module"
 module = "vllm/envs.py"
 symbol = "environment_variables"
 present = true
-fingerprint = "sha256:163b0a51c2a5211bb3cf96b7a04bbfc7ed8ab97863043b55732b0d7e169878d1"
+fingerprint = "sha256:980e86b46538c981bbee841b939d02b5c5c3507e6ae067d601984f8e6a10138e"
 
 [[patch_target]]
 name = "vllm.lora.layers.utils.try_get_optimal_moe_config"
