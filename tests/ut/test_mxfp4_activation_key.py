@@ -104,16 +104,23 @@ def test_humming_converter_retains_checkpoint_key_unless_explicit_override(
         w13_weight_scale=object(),
         w2_weight_scale=object(),
     )
-    converter = function(
-        path,
-        "convert_weight_to_mxfp4_moe_kernel_format",
-        {
-            "Mxfp4MoeBackend": backend,
-            "envs": NS(VLLM_HUMMING_INPUT_QUANT_CONFIG=override),
-            "current_platform": NS(is_rocm=lambda: False),
-            "B12X_BACKENDS": (),
-        },
-    )
+    namespace = {
+        "Mxfp4MoeBackend": backend,
+        "envs": NS(VLLM_HUMMING_INPUT_QUANT_CONFIG=override),
+        "current_platform": NS(is_rocm=lambda: False),
+        "B12X_BACKENDS": (),
+        "QuantizationConfigArgs": type("QuantizationArgs", (), {}),
+        "get_current_vllm_config": lambda: NS(
+            model_config=NS(quantization_config=None)
+        ),
+    }
+    for name in (
+        "_user_moe_activation_override",
+        "_resolve_activation_key",
+        "_humming_input_schema",
+    ):
+        function(path, name, namespace)
+    converter = function(path, "convert_weight_to_mxfp4_moe_kernel_format", namespace)
     converter("humming", layer, *[object() for _ in range(4)], activation_key=key)
     assert key_calls == ([] if override else [key])
     assert conversions == [

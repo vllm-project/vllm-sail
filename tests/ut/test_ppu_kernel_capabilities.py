@@ -11,6 +11,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.support.source import function
+
 ROOT = Path(__file__).parents[2]
 
 
@@ -178,7 +180,7 @@ def test_compressor_uses_supported_kernel(modules, ppu, head, two_stage, expecte
         capturing=False,
     )
     cache = types.SimpleNamespace(shape=(2, 64, 2048), dtype="u8")
-    cls = type("DeepseekCompressor", (), {"forward": lambda *a: None})
+    cls = type("DeepseekCompressor", (), {"_compress_norm_rope_store": lambda *a: None})
     module = modules(
         f"{base}.compressor",
         DeepseekCompressor=cls,
@@ -199,6 +201,10 @@ def test_compressor_uses_supported_kernel(modules, ppu, head, two_stage, expecte
         compress_norm_rope_store_triton=kernel("triton"),
         compress_norm_rope_store_two_stage_triton=kernel("two_stage"),
     )
+    original_forward = function(
+        "tests/fixtures/deepseek_v4_compressor_forward.py", "forward", module.__dict__
+    )
+    cls.forward = original_forward
     if not ppu:
         modules(
             f"{base}.nvidia.ops.sparse_attn_compress_cutedsl",
@@ -231,6 +237,8 @@ def test_compressor_uses_supported_kernel(modules, ppu, head, two_stage, expecte
     assert [name for name, _ in calls] == ["save", expected]
     assert ("store_full_kv" in calls[-1][1]) == (expected == "cute")
     assert obj.forward.__func__.__globals__ is module.__dict__
+    assert obj.forward.__func__ is original_forward
+    assert obj._compress_norm_rope_store.__func__.__globals__ is module.__dict__
     # Non-boundary C128 steps still save partial state, except full graph capture.
     if not two_stage and head == 512:
         obj.compress_ratio = 128
@@ -265,7 +273,9 @@ def test_compressor_constructor_registers_supported_warmup(
     def noop(*a, **k):
         return object()
 
-    cls = type("DeepseekCompressor", (), {"forward": noop})
+    cls = type(
+        "DeepseekCompressor", (), {"forward": noop, "_compress_norm_rope_store": noop}
+    )
     provider = modules(
         f"{base}.compressor",
         DeepseekCompressor=cls,
