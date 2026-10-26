@@ -231,7 +231,7 @@ def _forward(
     g1 = g1[:, :num_actual_tokens]
     beta = beta[:, :num_actual_tokens]
 
-    conv_state, recurrent_state, *recoverssm_records = self.kv_cache
+    conv_state, recurrent_state = self.kv_cache[:2]
     # The convolution kernels consume (..., dim, width - 1).
     if not is_conv_state_dim_first():
         conv_state = conv_state.transpose(-1, -2)
@@ -388,65 +388,44 @@ def _forward(
     if has_spec_decode:
         assert spec_state_indices_tensor is not None
         assert spec_query_start_loc is not None
-        spec_conv_indices = spec_state_indices_tensor[:, 0][: m.num_spec_decodes]
-        spec_max_query_len = (
-            self.spec_query_len
-            if self.use_recoverssm
-            else spec_state_indices_tensor.size(-1)
-        )
-        spec_conv_out = torch.empty_like(mixed_qkv_spec)
-        mixed_qkv_spec = causal_conv1d_update(
-            mixed_qkv_spec,
-            conv_state,
-            conv_weights,
-            self.conv1d.bias,
-            activation="silu",
-            conv_state_indices=spec_conv_indices,
-            num_accepted_tokens=num_accepted_tokens,
-            query_start_loc=spec_query_start_loc,
-            max_query_len=spec_max_query_len,
-            validate_data=False,
-            out=spec_conv_out,
-        )
-        q_spec, k_spec, v_spec = (
-            rearrange(x, "n (h d) -> 1 n h d", d=self.head_dim)
-            for x in mixed_qkv_spec.split(self.local_projection_size, dim=-1)
-        )
         spec_cu_seqlens = spec_query_start_loc[: m.num_spec_decodes + 1]
         spec_out = (
-            core_attn_out[:, : q_spec.shape[1]]
+            core_attn_out[:, : mixed_qkv_spec.shape[0]]
             if m.num_prefills == 0 and m.num_decodes == 0
             else None
         )
         if spec_token_start is not None:
             spec_out = core_attn_out[:, spec_slice]
         if self.use_recoverssm:
-            from vllm.models.kimi_k3.nvidia.ops.recoverssm import (
-                kda_recoverssm_verify,
-            )
-
-            if len(recoverssm_records) != 2:
-                raise ValueError(
-                    "KDA RecoverSSM requires correction and key/gate buffers"
-                )
-            core_attn_out_spec = kda_recoverssm_verify(
-                q=q_spec,
-                k=k_spec,
-                v=v_spec,
-                raw_g=g1_spec,
-                raw_beta=beta_spec,
-                A_log=self.A_log,
-                dt_bias=self.dt_bias,
-                lower_bound=self.gate_lower_bound,
-                checkpoint_state=recurrent_state,
-                correction_cache=recoverssm_records[0],
-                kg_cache=recoverssm_records[1],
-                query_start_loc=spec_cu_seqlens,
-                state_indices=spec_state_indices_tensor[: m.num_spec_decodes, 0],
-                spec_query_len=self.spec_query_len,
-                out=spec_out,
+            core_attn_out_spec = self._recoverssm_verify(
+                m,
+                mixed_qkv_spec,
+                g1_spec,
+                beta_spec,
+                conv_weights,
+                spec_cu_seqlens,
+                spec_out,
             )
         else:
+            mixed_qkv_spec = causal_conv1d_update(
+                mixed_qkv_spec,
+                conv_state,
+                conv_weights,
+                self.conv1d.bias,
+                activation="silu",
+                conv_state_indices=spec_state_indices_tensor[:, 0][
+                    : m.num_spec_decodes
+                ],
+                num_accepted_tokens=num_accepted_tokens,
+                query_start_loc=spec_query_start_loc,
+                max_query_len=spec_state_indices_tensor.size(-1),
+                validate_data=False,
+                out=torch.empty_like(mixed_qkv_spec),
+            )
+            q_spec, k_spec, v_spec = (
+                rearrange(x, "n (h d) -> 1 n h d", d=self.head_dim)
+                for x in mixed_qkv_spec.split(self.local_projection_size, dim=-1)
+            )
             core_attn_out_spec, _ = fused_recurrent_kda(
                 q=q_spec,
                 k=k_spec,
@@ -817,6 +796,70 @@ def _init(
         self.gate_lower_bound,
         self.use_recoverssm,
     )
+    # RecoverSSM: this layer's verify records of a speculative step, and its
+    # verify and commit kernels: "cute" (SM10x, the short convolution fused
+    # into the verify) where they can run, else "triton".
+    self.recoverssm_backend: Literal["cute", "triton"] | None = None
+    self.recoverssm_records: KDARecoverSSMRecords | None = None
+    self.recoverssm_verify: CuteRecoverSSMVerify | None = None
+    if self.use_recoverssm:
+        self.recoverssm_records = KDARecoverSSMRecords.allocate(
+            vllm_config.scheduler_config.max_num_seqs,
+            self.local_num_heads,
+            self.spec_query_len,
+            self.head_dim,
+            vllm_config.model_config.dtype,
+            self.conv1d.weight.device,
+        )
+        max_num_seqs = vllm_config.scheduler_config.max_num_seqs
+        records_bytes = len(kda_config["kda_layers"]) * sum(
+            t.numel() * t.element_size()
+            for t in (
+                self.recoverssm_records.correction,
+                self.recoverssm_records.key_gate,
+            )
+        )
+        logger.info_once(
+            "Allocated the KDA RecoverSSM verify records: %.2f GiB in total "
+            "for %d requests (%.2f MiB per request).",
+            records_bytes / 2**30,
+            max_num_seqs,
+            records_bytes / max_num_seqs / 2**20,
+        )
+        supported, reason = can_use_cute_recoverssm(
+            head_dim=self.head_dim,
+            window=self.spec_query_len,
+            conv_width=self.conv_size,
+            has_conv_bias=self.conv1d.bias is not None,
+            activation_dtype=vllm_config.model_config.dtype,
+            conv_state_dtype=conv_state_dtype,
+            state_dtype=recurrent_state_dtype,
+            conv_weight_dtype=self.conv1d.weight.dtype,
+            lower_bound=self.gate_lower_bound,
+        )
+        self.recoverssm_backend = "cute" if supported else "triton"
+        if self.recoverssm_backend == "triton":
+            logger.info_once(
+                "Using the Triton KDA RecoverSSM verify and commit: the CuTe "
+                "kernels cannot run (%s).",
+                reason,
+            )
+        else:
+            logger.info_once("Using the CuTe KDA RecoverSSM verify and commit.")
+            self.recoverssm_verify = CuteRecoverSSMVerify(
+                num_heads=self.local_num_heads,
+                window=self.spec_query_len,
+                conv_dim_first=is_conv_state_dim_first(),
+                conv_weight_dtype=self.conv1d.weight.dtype,
+                device=self.conv1d.weight.device,
+            )
+            self.recoverssm_verify.compile()
+            compile_state_commit(
+                self.local_num_heads,
+                self.spec_query_len,
+                self.conv1d.weight.device,
+                align=self.cache_config.mamba_cache_mode == "align",
+            )
     decode_conv1d_weight = None
     if (
         self.kda_decode_backend != "triton"
