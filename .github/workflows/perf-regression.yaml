@@ -147,7 +147,7 @@ jobs:
             nproc: 8
             suite: kernel
             test_path: tests/e2e/perf/test_kernel_perf.py
-            model_path: ""
+            hf_home: ""
             timeout: 60
           # --- 890P kernel (cap89 + generic ppu; cap80 auto-skip by conftest)
           - chip: 890p
@@ -155,7 +155,7 @@ jobs:
             nproc: 8
             suite: kernel
             test_path: tests/e2e/perf/test_kernel_perf.py
-            model_path: ""
+            hf_home: ""
             timeout: 60
           # --- 810E model (offline LLM, TP=8 derived from chip profile)
           - chip: 810e
@@ -163,7 +163,7 @@ jobs:
             nproc: 8
             suite: model
             test_path: tests/e2e/perf/test_model_perf.py
-            model_path: /nas_aisw/datasets/checkpoints/LLM/Qwen/v3.8/Qwen3.8-27B
+            hf_home: /nas_aisw/datasets/hf_home
             timeout: 180
           # --- 890P model (offline LLM, TP=8 derived from chip profile)
           - chip: 890p
@@ -171,7 +171,7 @@ jobs:
             nproc: 8
             suite: model
             test_path: tests/e2e/perf/test_model_perf.py
-            model_path: /nas_aisw/datasets/checkpoints/LLM/Qwen/v3.8/Qwen3.8-27B
+            hf_home: /nas_aisw/datasets/hf_home
             timeout: 180
     steps:
       - name: Disable internal GitHub mirror rewrite
@@ -218,7 +218,7 @@ jobs:
           job_suffix: perf-${{ matrix.chip }}-${{ matrix.suite }}
           source_dir: /workspace/source
           artifact_paths: wheels/**
-          extra_env: SUITE=${{ matrix.suite }},TEST_PATH=${{ matrix.test_path }},PYTEST_MARKER=perf,MODEL_PATH=${{ matrix.model_path }},RESULTS_DIR=/mnt/wl_nas/devops/${{ github.run_id }}-${{ github.run_attempt }}/perf-${{ matrix.chip }}-${{ matrix.suite }},WHEELS_DIR=/workspace/source/wheels,VLLM_USE_RUST_FRONTEND=0,VLLM_USE_RUST_BENCH=0,UPDATE_BASELINE=${{ inputs.update_baseline && '1' || '0' }}
+          extra_env: SUITE=${{ matrix.suite }},TEST_PATH=${{ matrix.test_path }},PYTEST_MARKER=perf,HF_HOME=${{ matrix.hf_home }},HF_HUB_OFFLINE=1,RESULTS_DIR=/mnt/wl_nas/devops/${{ github.run_id }}-${{ github.run_attempt }}/perf-${{ matrix.chip }}-${{ matrix.suite }},WHEELS_DIR=/workspace/source/wheels,VLLM_USE_RUST_FRONTEND=0,VLLM_USE_RUST_BENCH=0,UPDATE_BASELINE=${{ inputs.update_baseline && '1' || '0' }}
           container_options: |
             privileged: true
             host_ipc: true

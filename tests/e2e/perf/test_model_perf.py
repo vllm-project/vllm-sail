@@ -10,8 +10,10 @@ the numeric model suite (``tests/e2e/models``) -- no server, no OpenAI client --
 so the two lanes stay comparable, but it measures *speed* instead of numerics.
 
 Fixed-config contract (mirrors ``_offline_runner``):
-  * the model weight path is the ONLY runtime input, overridable through
-    ``VLLM_SAIL_MODEL_ROOT`` (``resolve_checkpoint``);
+  * models are identified by HuggingFace model IDs (e.g.
+    ``Qwen/Qwen3.8-Flash-Next``); weights are resolved locally through
+    ``HF_HOME`` + ``HF_HUB_OFFLINE=1`` (same mechanism as the GSM8K accuracy
+    E2E lane);
   * tensor parallelism follows the detected chip profile (ZW-810E -> 8,
     ZW-890P -> 8) via the shared ``offline_llm`` factory;
   * every other knob -- ``max_model_len``, dtype, greedy sampling, the prompt
@@ -61,10 +63,7 @@ if not current_platform.is_ppu():
     pytest.skip("requires a PPU platform (is_ppu() is False)", allow_module_level=True)
 
 from tests.e2e.models import _offline_runner  # noqa: E402
-from tests.e2e.models._offline_runner import (  # noqa: E402
-    ModelConfig,
-    resolve_checkpoint,
-)
+from tests.e2e.models._offline_runner import ModelConfig  # noqa: E402
 from tests.e2e.perf._perf_harness import PerfHarness, summarize  # noqa: E402
 
 pytestmark = [pytest.mark.ppu, pytest.mark.perf]
@@ -109,7 +108,7 @@ PERF_MODELS = [
     pytest.param(
         PerfModel(
             key="qwen3_next",
-            checkpoint="/nas_aisw/datasets/checkpoints/LLM/Qwen/v3.8/Qwen3.8-27B",
+            checkpoint="Qwen/Qwen3.8-Flash-Next",
         ),
         id="qwen3_next",
     ),
@@ -168,7 +167,7 @@ def perf_llm_factory(offline_llm):
                 trust_remote_code=model.trust_remote_code,
                 env=model.env,
             )
-            cache[model.key] = offline_llm(resolve_checkpoint(model.checkpoint), config)
+            cache[model.key] = offline_llm(model.checkpoint, config)
         return cache[model.key]
 
     return build

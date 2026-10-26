@@ -22,7 +22,8 @@
 #   PYTEST_MARKER      pytest -m expression (default: "perf")
 #   WHEELS_DIR         directory holding the downloaded *.whl artifacts
 #   RESULTS_DIR        absolute output dir for xml/logs/report/baseline/ppu-smi
-#   MODEL_PATH         (model suite) checkpoint path -> VLLM_SAIL_MODEL_ROOT
+#   HF_HOME            (model suite) HuggingFace cache root for offline model resolution
+#   HF_HUB_OFFLINE     (model suite) set to "1" to prevent HF Hub network access
 #   BASELINE_ROOT      override the baseline root (default: repo baselines dir)
 #   UPDATE_BASELINE    "1" to pass --update-baseline (default: "0")
 set -Eeuo pipefail
@@ -38,7 +39,8 @@ TEST_PATH="${TEST_PATH:?TEST_PATH is required}"
 PYTEST_MARKER="${PYTEST_MARKER:-perf}"
 WHEELS_DIR="${WHEELS_DIR:?WHEELS_DIR is required}"
 RESULTS_DIR="${RESULTS_DIR:?RESULTS_DIR is required}"
-MODEL_PATH="${MODEL_PATH:-}"
+HF_HOME="${HF_HOME:-}"
+HF_HUB_OFFLINE="${HF_HUB_OFFLINE:-1}"
 BASELINE_ROOT="${BASELINE_ROOT:-}"
 UPDATE_BASELINE="${UPDATE_BASELINE:-0}"
 
@@ -53,7 +55,7 @@ log() { printf '\n=== %s ===\n' "$1"; }
 # ------------------------------------------------------------------
 log "environment"
 echo "SUITE=${SUITE} TEST_PATH=${TEST_PATH} PYTEST_MARKER=${PYTEST_MARKER:-<none>}"
-echo "MODEL_PATH=${MODEL_PATH:-<none>} BASELINE_ROOT=${BASELINE_ROOT:-<repo>}"
+echo "HF_HOME=${HF_HOME:-<none>} HF_HUB_OFFLINE=${HF_HUB_OFFLINE} BASELINE_ROOT=${BASELINE_ROOT:-<repo>}"
 echo "UPDATE_BASELINE=${UPDATE_BASELINE} RESULTS_DIR=${RESULTS_DIR}"
 python -c 'import sys; print("python", sys.version)'
 
@@ -100,13 +102,12 @@ print("vLLM SAIL:", vllm_sail.__version__)
 PY
 
 # ------------------------------------------------------------------
-# For the model suite, bridge MODEL_PATH -> VLLM_SAIL_MODEL_ROOT so the perf
-# test's resolve_checkpoint() picks up the CI-provided weight path.
-if [[ "${SUITE}" == "model" && -n "${MODEL_PATH}" ]]; then
-    export VLLM_SAIL_MODEL_ROOT="${MODEL_PATH}"
-    test -d "${MODEL_PATH}" || { echo "checkpoint dir missing: ${MODEL_PATH}"; exit 1; }
-    test -f "${MODEL_PATH}/config.json" || { echo "config.json missing in ${MODEL_PATH}"; exit 1; }
-    log "model checkpoint verified: ${MODEL_PATH}"
+# For the model suite, export HF_HOME + HF_HUB_OFFLINE so that vLLM resolves
+# HuggingFace model IDs from the local cache without network access.
+if [[ "${SUITE}" == "model" && -n "${HF_HOME}" ]]; then
+    export HF_HOME HF_HUB_OFFLINE
+    test -d "${HF_HOME}" || { echo "HF_HOME directory missing: ${HF_HOME}"; exit 1; }
+    log "model weights via HF_HOME=${HF_HOME} (offline=${HF_HUB_OFFLINE})"
 fi
 
 # ------------------------------------------------------------------
