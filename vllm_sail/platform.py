@@ -35,29 +35,6 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
-
-def _is_qwen35_w8a8_int8(model_config: object) -> bool:
-    text_config = getattr(model_config, "hf_text_config", None)
-    if getattr(text_config, "model_type", None) != "qwen3_5_moe_text":
-        return False
-    hf_config = getattr(model_config, "hf_config", None)
-    quantization = getattr(hf_config, "quantization_config", None)
-    if not isinstance(quantization, dict):
-        return False
-    # compressed-tensors also includes FP8 and weight-only schemes.
-    for group in (quantization.get("config_groups") or {}).values():
-        weights = group.get("weights") or {}
-        activations = group.get("input_activations") or {}
-        if (
-            weights.get("num_bits") == 8
-            and weights.get("type") == "int"
-            and activations.get("num_bits") == 8
-            and activations.get("type") == "int"
-        ):
-            return True
-    return False
-
-
 # PyTorch >= 2.5 enables the cuDNN SDPA backend by default, which crashes on
 # some models. See https://github.com/huggingface/diffusers/issues/9704.
 torch.backends.cuda.enable_cudnn_sdp(False)
@@ -233,29 +210,6 @@ class PPUPlatform(NvmlCudaPlatform):
 
         compilation_config = vllm_config.compilation_config
         attention_config = vllm_config.attention_config
-
-        model_config = getattr(vllm_config, "model_config", None)
-        if (
-            _is_qwen35_w8a8_int8(model_config)
-            and not model_config.enforce_eager
-            and cls.is_device_capability((8, 9))
-        ):
-            from vllm.config.compilation import CUDAGraphMode
-
-            # Graph replay can corrupt padded prefill and batched decode on
-            # this path. Keep compilation without graph capture by default.
-            # Explicitly selected full-only modes remain user overrides.
-            if compilation_config.cudagraph_mode in (
-                None,
-                CUDAGraphMode.PIECEWISE,
-                CUDAGraphMode.FULL_AND_PIECEWISE,
-            ):
-                compilation_config.cudagraph_mode = CUDAGraphMode.NONE
-                logger.info_once(
-                    "Disabling CUDA graphs by default for Qwen3.5 W8A8 INT8 on "
-                    "Zhenwu M890; padded prefill and batched decode graph replay "
-                    "can produce incorrect outputs."
-                )
 
         # 0 disables CUDA-graph-time split-KV heuristics, which measurably helps
         # FA3 on PPU.
