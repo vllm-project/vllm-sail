@@ -88,6 +88,19 @@ PY
 log "collect_env"
 python -c "from vllm_sail import collect_env; collect_env()"
 
+log "resolve model path"
+# Resolve a model_id from the local HF cache only when no local path was given.
+if [ -n "${MODEL_PATH}" ] && [ ! -d "${MODEL_PATH}" ]; then
+    export HF_HOME="${HF_HOME:?HF_HOME must be set for model_id resolution}"
+    export HF_HUB_OFFLINE=1
+    resolved=$(python -c "
+from huggingface_hub import snapshot_download
+print(snapshot_download('${MODEL_PATH}', local_files_only=True))
+" 2>/dev/null) || { echo "ERROR: Cannot resolve model_id '${MODEL_PATH}' from HF cache"; exit 1; }
+    echo "Resolved model_id '${MODEL_PATH}' -> '${resolved}'"
+    export MODEL_PATH="${resolved}"
+fi
+
 log "checkpoint"
 test -d "${MODEL_PATH}" || { echo "checkpoint dir missing: ${MODEL_PATH}"; exit 1; }
 test -f "${MODEL_PATH}/config.json" || { echo "config.json missing in checkpoint"; exit 1; }
