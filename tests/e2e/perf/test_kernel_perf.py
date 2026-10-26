@@ -59,11 +59,6 @@ from vllm.platforms import current_platform  # noqa: E402
 if not current_platform.is_ppu():
     pytest.skip("requires a PPU platform (is_ppu() is False)", allow_module_level=True)
 
-from vllm.third_party.flash_linear_attention.ops import (  # noqa: E402
-    fused_sigmoid_gating_delta_rule_update,
-)
-from vllm.v1.attention.ops import flashmla as mla_ops  # noqa: E402
-
 from tests.e2e.kernels import _reference as ref  # noqa: E402
 from tests.e2e.perf._perf_harness import (  # noqa: E402
     TIMED_ITERS,
@@ -80,6 +75,11 @@ from vllm_sail.utils.deep_gemm import (  # noqa: E402
     m_grouped_fp4_gemm_nt_nopad,
     m_grouped_int8_gemm_nt_nopad,
 )
+
+from vllm.third_party.flash_linear_attention.ops import (  # noqa: E402
+    fused_sigmoid_gating_delta_rule_update,
+)
+from vllm.v1.attention.ops import flashmla as mla_ops  # noqa: E402
 
 pytestmark = [pytest.mark.ppu, pytest.mark.perf]
 
@@ -320,7 +320,6 @@ def test_deepgemm_w8a8_fp8_dense_perf(perf_harness, m, n, k):
 def test_deepgemm_mxfp4_grouped_perf(perf_harness, tokens, experts, n, k):
     """Grouped MXFP4 GEMM (ZW-890P only), production downcast operands."""
     from deep_gemm import preprocess_mxfp4_scales
-
     from vllm_sail.model_executor.layers.quantization.utils.mxfp4_utils import (
         ScaleFormat,
         downcast_to_mxfp4,
@@ -426,11 +425,15 @@ def _acext_callables(
     elif scheme == "w8a8_int8":
         # CPU generation + quantisation mirrors the numeric suite and keeps
         # the [E, 2I, H] fp32 intermediate off the device.
+        cpu_generator = torch.Generator(device="cpu").manual_seed(101)
         w1 = (
-            torch.randn((experts, 2 * inter, hidden), generator=generator).float()
+            torch.randn((experts, 2 * inter, hidden), generator=cpu_generator).float()
             * 0.05
         )
-        w2 = torch.randn((experts, hidden, inter), generator=generator).float() * 0.05
+        w2 = (
+            torch.randn((experts, hidden, inter), generator=cpu_generator).float()
+            * 0.05
+        )
         # [E, N, K] expert stacks need the 3-D quantiser: reducing over every
         # axis except ``dim`` would collapse the expert axis too and give every
         # expert the same dequant scale, which changes the bytes the kernel is
@@ -508,12 +511,12 @@ def test_acext_fused_moe_w4a8_int8_perf(
     perf_harness, tokens, experts, top_k, hidden, inter
 ):
     """ACEXT packed-int4 MoE (``W4AInt8MoEMethod.apply``), ZW-810E only."""
-    from vllm.model_executor.layers.fused_moe.activation import MoEActivation
-
     from vllm_sail.model_executor.layers.quantization.mixed_precision_w4 import (
         MixedPrecisionW4Config,
         W4AInt8MoEMethod,
     )
+
+    from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 
     quant_config = MixedPrecisionW4Config()
     method = W4AInt8MoEMethod.__new__(W4AInt8MoEMethod)
