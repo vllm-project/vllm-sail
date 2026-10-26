@@ -3,17 +3,20 @@
 
 from __future__ import annotations
 
+import ast
+from types import MethodType
 from types import SimpleNamespace as NS
 from typing import cast
 
 import pytest
 
-from tests.support.source import function
+from tests.support.source import ROOT, definition, function
 from tests.ut.test_ppu_kernel_capabilities import modules as _modules
 
 modules = _modules
 PATCH = "vllm_sail/patch/enhancement/models/deepseek_v4_compressor.py"
 UPSTREAM = "vllm/models/deepseek_v4/compressor.py"
+FORWARD_FIXTURE = "tests/fixtures/deepseek_v4_compressor_forward.py"
 CASES = [
     (False, False, "FULL", False),
     (False, False, "NONE", False),
@@ -90,6 +93,9 @@ def run_forward(path, name, modules, capturing, boundary, mode, expected):
         _token_stride=object(),
         _scale_dim=object(),
     )
+    layer._compress_norm_rope_store = MethodType(
+        function(PATCH, "_compress_norm_rope_store", namespace), layer
+    )
     positions, rope = object(), NS(cos_sin_cache=object())
 
     function(path, name, namespace)(
@@ -116,7 +122,9 @@ def run_forward(path, name, modules, capturing, boundary, mode, expected):
 def test_ppu_compressor_uses_capture_state(
     modules, capturing, boundary, mode, expected
 ):
-    run_forward(PATCH, "forward", modules, capturing, boundary, mode, expected)
+    run_forward(
+        FORWARD_FIXTURE, "forward", modules, capturing, boundary, mode, expected
+    )
 
 
 @pytest.mark.upstream_source
@@ -133,3 +141,10 @@ def test_upstream_compressor_uses_the_same_capture_policy(
         mode,
         expected,
     )
+
+
+@pytest.mark.upstream_source
+def test_cpu_forward_fixture_matches_the_actual_provider(upstream_source_root):
+    donor = definition(ROOT / FORWARD_FIXTURE, "forward")
+    actual = definition(upstream_source_root / UPSTREAM, "DeepseekCompressor.forward")
+    assert ast.dump(donor) == ast.dump(actual)
