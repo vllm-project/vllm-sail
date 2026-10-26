@@ -68,6 +68,52 @@ def xml_counts(root, reference):
     return skipped
 
 
+def _verify_schema_parser(root, policy, post, bound):
+    reference = policy.get("schema_parser")
+    require(isinstance(reference, dict), "Schema parser receipt required")
+    require(
+        {"file", "remote_key", "schemas", "schema_sha256"} <= reference.keys(),
+        "Incomplete schema parser reference",
+    )
+    require(
+        type(reference["schemas"]) is int and reference["schemas"] > 0,
+        "Invalid schema parser count",
+    )
+    require(
+        isinstance(reference["schema_sha256"], str)
+        and re.fullmatch("[a-f0-9]{64}", reference["schema_sha256"]),
+        "Invalid schema parser resource hash",
+    )
+    name, remote = reference["file"], reference["remote_key"]
+    require(
+        policy["postproof_artifacts"].get(remote) == name,
+        "Schema parser postproof mapping mismatch",
+    )
+    proof = bound(name)
+    require(
+        proof.get("status") == "all-generated-schemas-real-Torch-parser-passed",
+        "Schema parser did not pass",
+    )
+    require(proof.get("commits") == policy["commits"], "Schema parser commit mismatch")
+    require(
+        type(proof.get("schemas")) is int and proof["schemas"] == reference["schemas"],
+        "Schema parser count mismatch",
+    )
+    require(
+        proof.get("schema_sha256") == reference["schema_sha256"],
+        "Schema parser resource mismatch",
+    )
+    require(
+        post["artifact_hashes"].get(remote) == digest(artifact(root, name)),
+        "Schema parser raw receipt mismatch",
+    )
+    require(
+        proof.get("wheel_manifest_sha256")
+        == digest(artifact(root, policy["wheel_manifest"])),
+        "Schema parser wheel mismatch",
+    )
+
+
 def verify(root, policy):
     require(
         root.is_absolute() and root.is_dir() and not root.is_symlink(),
@@ -229,6 +275,7 @@ def verify(root, policy):
         and post["wheels"]["commits"] == commits,
         "Final wheel pair mismatch",
     )
+    _verify_schema_parser(root, policy, post, bound)
     for container, expected in policy["stacks"].items():
         actual = post["stack_verification"][container]
         require(

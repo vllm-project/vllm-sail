@@ -44,6 +44,13 @@ The policy schema is version `1` and declares:
   absent obsolete bridges. Discover that contract from the pinned source rather
   than assuming one historical layout.
 - `postproof_artifacts`: remote receipt-relative keys mapped to local artifacts.
+- `schema_parser`: mandatory `{file, remote_key, schemas, schema_sha256}` for
+  the real Torch parser receipt. Require this exact mapping in
+  `postproof_artifacts`, a bound raw receipt, passed status, exact commits, a
+  positive reviewed schema count and the generated resource SHA. Its raw hash
+  must match the same postproof and its `wheel_manifest_sha256` must match the
+  same raw final wheel manifest. A substituted receipt fails even if policy
+  artifact hashes are refreshed.
 - `xfail_causes`: `file` and exact `cases`; each case requires an `exception` and
   `traceback_contains` list. Preserve new raw causes at every checkpoint.
 - `models`: every agreed profile, each with `audit`, `request_budget`, required

@@ -11,6 +11,8 @@ Use this for upstream pin migrations in vLLM SAIL. Read the repository's contrib
 
 Resolve the starting SAIL commit, release endpoints and target main SHA once. Keep plans and run records outside the repository. Use [sample_commits.py](scripts/sample_commits.py) with explicit start, release and frozen target refs to write a new immutable sampling plan. Sample the frozen main first-parent history using the chosen calendar timezone and intervals. Include release tag commits as mandatory endpoints even when they belong to a release branch. Later upstream commits belong to a subsequent run.
 
+Assign distinct source, build, metadata, test and receipt namespaces to each checkpoint and attempt. Check the rendered destinations and referenced predecessor receipts against the accepted artifact map before dispatch. Preserve rejected attempts and review corrected controls as a new immutable revision. After transport loss, reconcile durable controller and stage receipts through a fresh read-only connection before deciding whether to continue or retry; an absent success message does not establish a failed stage.
+
 Bind authorized source roots, node, existing build/test environments and model profiles. Capture the SAIL SDK and both Torch identities. Preserve dirty, untracked and needed ignored content plus live work before source changes. Continue within already authorized bounds without repeating approvals; additional nodes, replacement environments and publication need their own scope authorization.
 
 ## Advance one checkpoint
@@ -28,12 +30,14 @@ Capture conditional aliases in both cold and preloaded consumer processes when t
 
 Recheck release-branch API ownership at mandatory off-main endpoints; do not assume main and the release tag provide the same helper. Audit real-environment fixtures as well as production adapters: a bare-CPU or source-only pass can skip a fixture that imports the real provider. Exercise that provider in the compatible Torch environment, preserve a focused failing case and retain all behavioral assertions when adapting the fixture. At a release-range transition update patch declarations, coarse compatibility policy, tests and maintained user guides together. The full-SHA pin remains authoritative.
 
-For source relocations, represent deleted tracked files separately from present and new files. Preserve their original Git bytes and the patch before cleanup; [owned_source.py](scripts/owned_source.py) supplies these captures. [source_transition.py](scripts/source_transition.py) preserves and restores only an exact reviewed snapshot. Prove target-added ignored paths cannot collide before using Git no-overwrite-ignore for the final switch. Do not rebuild a generated directory over unowned files. Distinguish intentional older-layout fixtures from current-corpus assertions.
+For source relocations, represent deleted tracked files separately from present and new files. Preserve their original Git bytes and the patch before cleanup; [owned_source.py](scripts/owned_source.py) supplies these captures. [source_transition.py](scripts/source_transition.py) preserves and restores only an exact reviewed snapshot. Prove target-added ignored paths cannot collide before using Git no-overwrite-ignore for the final switch. Do not rebuild a generated directory over unowned files. Exercise the actual final preparation path with the complete reviewed WIP snapshot, including exact new paths and deletions; an inherited empty-untracked assumption can reject newly added regressions before the clean switch. Distinguish intentional older-layout fixtures from current-corpus assertions.
 
 ## Package and publish
 
 Keep upstream follow-up candidates separate from plugin fixes. Preserve each accepted pin as a checkoutable commit. Publish only to owned topic branches and create the requested PR sequence; do not merge without authorization. State exact checkpoint ranges and validation actually completed.
 
 Bind model requests, metrics and shutdown logs to the same final wheel pair. Review both pre-shutdown and post-shutdown ERROR counts; a runner exit of zero does not waive either. Distinguish abort ordering from draining and retain genuine failure reporting in regressions.
+
+Before executing a generated verifier launcher, exercise its real pre-write path from an unrelated working directory, including its self-file hash and missing, rejected or stale peer inputs. Keep these fixtures separate from runtime acceptance.
 
 After a completed milestone, reconcile this workflow with observed failures and validate reusable scripts. Keep machine paths, run logs and attempt receipts outside the project skill.

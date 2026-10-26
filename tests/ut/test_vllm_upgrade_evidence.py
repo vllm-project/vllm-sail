@@ -171,6 +171,22 @@ def synthetic_receipts(root):
             },
         },
     )
+    schema = write(
+        "schema.json",
+        {
+            "status": "all-generated-schemas-real-Torch-parser-passed",
+            "commits": commits,
+            "schemas": 2,
+            "schema_sha256": "8" * 64,
+            "wheel_manifest_sha256": digest("wheels.json"),
+        },
+    )
+    policy["schema_parser"] = {
+        "file": "schema.json",
+        "remote_key": "pin-ut/schema-parser-proof.json",
+        "schemas": schema["schemas"],
+        "schema_sha256": schema["schema_sha256"],
+    }
     entries = {
         "vllm": {"vllm/vllm-rs": "1" * 64},
         "vllm-sail": {
@@ -308,7 +324,10 @@ def synthetic_receipts(root):
                 }
                 for k, v in entries.items()
             },
-            "artifact_hashes": {"pin-ut.xml": digest("installed.xml")},
+            "artifact_hashes": {
+                "pin-ut.xml": digest("installed.xml"),
+                "pin-ut/schema-parser-proof.json": digest("schema.json"),
+            },
             "models": {
                 "fixture-model": {
                     "complete_answer_receipt": complete,
@@ -318,7 +337,10 @@ def synthetic_receipts(root):
             },
         },
     )
-    policy["postproof_artifacts"] = {"pin-ut.xml": "installed.xml"}
+    policy["postproof_artifacts"] = {
+        "pin-ut.xml": "installed.xml",
+        "pin-ut/schema-parser-proof.json": "schema.json",
+    }
     accepted = {
         "status": "accepted",
         "pending": [],
@@ -521,3 +543,73 @@ def _rebind_model_inventory(root, policy, write, digest, audit, post):
     write("acceptance.json", accepted)
     for name in ("model-audit.json", "post.json", "acceptance.json"):
         policy["artifacts"][name] = digest(name)
+
+
+@pytest.mark.parametrize(
+    "conflict,message",
+    [
+        ("omitted-policy", "Schema parser receipt required"),
+        ("foreign-commit", "Schema parser commit mismatch"),
+        ("wrong-count", "Schema parser count mismatch"),
+        ("wrong-resource", "Schema parser resource mismatch"),
+        ("stale-wheel", "Schema parser wheel mismatch"),
+        ("failed-parser", "Schema parser did not pass"),
+        ("missing-postproof-hash", "Schema parser raw receipt mismatch"),
+        ("mapping-omitted", "Schema parser postproof mapping mismatch"),
+        ("unbound-receipt", "Unbound receipt"),
+        ("substituted-raw", "raw receipt mismatch|Postproof artifact mismatch"),
+    ],
+)
+def test_schema_parser_receipt_requires_same_final_wheel_and_raw_postproof(
+    tmp_path, evidence_api, conflict, message
+):
+    root = tmp_path / "evidence"
+    policy, write, digest = synthetic_receipts(root)
+    schema = json.loads((root / "schema.json").read_text())
+    post = json.loads((root / "post.json").read_text())
+    remote = "pin-ut/schema-parser-proof.json"
+    if conflict == "omitted-policy":
+        policy.pop("schema_parser")
+    elif conflict == "foreign-commit":
+        schema["commits"]["vllm"] = "c" * 40
+    elif conflict == "wrong-count":
+        schema["schemas"] = 3
+    elif conflict == "wrong-resource":
+        schema["schema_sha256"] = "9" * 64
+    elif conflict == "stale-wheel":
+        schema["wheel_manifest_sha256"] = "9" * 64
+    elif conflict == "failed-parser":
+        schema["status"] = "failed"
+    elif conflict == "missing-postproof-hash":
+        post["artifact_hashes"].pop(remote)
+    elif conflict == "mapping-omitted":
+        policy["postproof_artifacts"].pop(remote)
+    elif conflict == "unbound-receipt":
+        policy["artifacts"].pop("schema.json")
+    else:
+        # Same identities/count/resource, different original receipt bytes.
+        schema["substituted"] = True
+    if conflict in {
+        "foreign-commit",
+        "wrong-count",
+        "wrong-resource",
+        "stale-wheel",
+        "failed-parser",
+        "substituted-raw",
+    }:
+        write("schema.json", schema)
+        policy["artifacts"]["schema.json"] = digest("schema.json")
+        if conflict != "substituted-raw":
+            post["artifact_hashes"][remote] = digest("schema.json")
+    # Refresh every unrelated hash/reference so the relevant semantic gate
+    # rejects the contradiction, rather than an incidental stale summary.
+    write("post.json", post)
+    accepted = json.loads((root / "acceptance.json").read_text())
+    accepted["runtime_postproof"]["sha256"] = digest("post.json")
+    write("acceptance.json", accepted)
+    for name in ("post.json", "acceptance.json"):
+        policy["artifacts"][name] = digest(name)
+    before = {p.name: p.read_bytes() for p in root.iterdir()}
+    with pytest.raises(evidence_api["InvalidEvidence"], match=message):
+        evidence_api["verify"](root, policy)
+    assert {p.name: p.read_bytes() for p in root.iterdir()} == before
