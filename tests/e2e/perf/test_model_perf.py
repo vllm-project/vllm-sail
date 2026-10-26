@@ -26,10 +26,16 @@ same store / tolerance / promotion contract as the kernel suite (see
 never fails; a regression beyond ``FAIL_THRESHOLD`` (25%) fails the lane; drift
 beyond ``WARN_THRESHOLD`` (10%) only warns.
 
-Measurement protocol: one small warmup generation (compiles/loads paths, fills
-the KV cache allocator) followed by ``MODEL_REPEATS`` timed generations; the
-authoritative value is the median wall clock and the tail is the nearest-rank
-p90.  TTFT / TPOT are derived from vLLM's per-request metrics object when the
+Measurement protocol (two-phase warmup):
+  1. A tiny 8-token generation settles lazy init (KV cache allocator, weight
+     loading, basic compilation paths).
+  2. A full-workload untimed generation with the actual batch size and
+     ``max_tokens`` triggers any remaining JIT kernel compilations so the
+     subsequent timed runs reflect steady-state performance.
+After warmup, ``MODEL_REPEATS`` timed generations follow; the authoritative
+value is the median wall clock and the tail is the nearest-rank p90.
+
+TTFT / TPOT are derived from vLLM's per-request metrics object when the
 running vLLM exposes it and are silently omitted otherwise, so a metrics-API
 change never fails the throughput lane.
 
@@ -224,6 +230,10 @@ def test_model_e2e_perf(perf_llm_factory, perf_harness, model, workload):
     prompts = list(workload.prompts)
 
     _warmup(llm)
+
+    # Full-workload warmup: triggers JIT compilation for the actual
+    # batch size / max_tokens shape so timed runs reflect steady state.
+    llm.generate(prompts, params)
 
     wall_times: list = []
     output_tokens: list = []
