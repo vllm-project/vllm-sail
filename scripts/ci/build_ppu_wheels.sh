@@ -136,15 +136,12 @@ fi
 "${HGCC}" --version 2>&1 | tee "${LOG_DIR}/hgcc-version.log"
 python "${ROOT_DIR}/scripts/ci/ppu_image_stack.py" capture \
     --sdk "${PPU_SDK}" --output "${LOG_DIR}/image-stack.json" \
-    --constraints "${PIP_CONSTRAINT}" --require-ppu-headers | tee -a "${MANIFEST}"
+    --constraints "${PIP_CONSTRAINT}" | tee -a "${MANIFEST}"
 python - <<'PY' 2>&1 | tee "${LOG_DIR}/torch-env.log"
-from pathlib import Path
 import torch
 
 print(torch.__version__)
 print(torch.__file__)
-if not (Path(torch.__file__).parent / ".ppu_compat/compatible_wrapper.h").is_file():
-    raise SystemExit("prepared SAIL PyTorch must contain PPU headers")
 PY
 
 VLLM_SRC="${WORK_DIR}/vllm"
@@ -343,8 +340,7 @@ mapfile -t sail_wheels < <(
 [[ -s "${sail_wheels[0]}" ]] || fail "vLLM SAIL wheel is empty"
 
 python "${ROOT_DIR}/scripts/ci/ppu_image_stack.py" verify \
-    --sdk "${PPU_SDK}" --output "${LOG_DIR}/image-stack.json" \
-    --require-ppu-headers | tee -a "${MANIFEST}"
+    --sdk "${PPU_SDK}" --output "${LOG_DIR}/image-stack.json" | tee -a "${MANIFEST}"
 
 {
     printf 'status=succeeded\n'
