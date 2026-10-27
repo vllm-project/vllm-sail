@@ -319,7 +319,10 @@ def test_warmup_excludes_cutedsl_only_on_ppu(
     import contextlib
 
     calls = []
-    modules("vllm.platforms", current_platform=ns(is_ppu=lambda: ppu))
+    modules(
+        "vllm.platforms",
+        current_platform=ns(is_ppu=lambda: ppu, has_device_capability=lambda _: True),
+    )
     modules("vllm.logger", init_logger=lambda _: ns(warning=lambda *a: None))
 
     class VllmCuTeDSLJitKernel:
@@ -423,6 +426,109 @@ def test_warmup_excludes_cutedsl_only_on_ppu(
     calls.clear()
     legacy_module.cutedsl_warmup()
     assert calls == ([] if ppu else ["legacy"])
+
+
+@pytest.mark.parametrize(
+    "ppu,arch,sm80_skipped",
+    [
+        (True, (8, 0), True),
+        (True, (8, 9), False),
+        (False, (8, 0), False),
+    ],
+)
+def test_warmup_excludes_fp8_kernels_without_native_fp8(
+    modules, ppu, arch, sm80_skipped
+):
+    """Triton rejects tl.float8e4nv on sm80-class devices, so drop those warmups."""
+    ns = types.SimpleNamespace
+    import contextlib
+
+    compiled = []
+
+    def has_device_capability(capability):
+        wanted = (
+            (capability // 10, capability % 10)
+            if isinstance(capability, int)
+            else capability
+        )
+        return arch >= wanted
+
+    modules(
+        "vllm.platforms",
+        current_platform=ns(
+            is_ppu=lambda: ppu, has_device_capability=has_device_capability
+        ),
+    )
+    modules("vllm.logger", init_logger=lambda _: ns(warning=lambda *a: None))
+
+    def kernel(module, name):
+        def compile_many(self, keys):
+            compiled.append(name)
+
+        return type(name, (), {"__module__": module, "compile_many": compile_many})()
+
+    deepseek_v4 = "vllm.models.deepseek_v4.common.ops"
+    tainted = {
+        name: kernel(module, name)
+        for module, name in (
+            (f"{deepseek_v4}.cache_utils", "DequantizeAndGatherKCacheKernel"),
+            (
+                f"{deepseek_v4}.fused_compress_quant_cache",
+                "FusedKVCompressNormRopeInsertIndexerTritonKernel",
+            ),
+            (f"{deepseek_v4}.fused_indexer_q", "FusedIndexerQRopeQuantTritonKernel"),
+            (f"{deepseek_v4}.fused_inv_rope_fp8_quant", "FusedInvRopeFP8QuantKernel"),
+        )
+    }
+    keep = kernel("vllm.v1.attention.ops.common", "PackSeqTritonKernel")
+    registrations = {**{item: [((), {})] for item in tainted.values()}}
+    registrations[keep] = [((), {})]
+
+    class VllmCuTeDSLJitKernel:
+        pass
+
+    modules(
+        "vllm.model_executor.warmup.jit_warmup_cutedsl_helper",
+        VllmCuTeDSLJitKernel=VllmCuTeDSLJitKernel,
+    )
+    modules(
+        "vllm.v1.sample.ops.topk_topp_sampler",
+        register_top_k_top_p_warmups=lambda: None,
+    )
+    worker = ns(
+        model_runner=ns(
+            jit_warmup_registry=ns(
+                _registrations=registrations, activate=lambda: contextlib.nullcontext()
+            ),
+            is_last_pp_rank=True,
+            is_pooling_model=False,
+        ),
+        vllm_config=ns(kernel_config=ns(enable_jit_warmup=True)),
+        get_model=lambda: "model",
+        scheduler_config=ns(max_num_batched_tokens=64),
+    )
+
+    def upstream(actual_worker, *, process_local_only=False):
+        for actual_kernel, keys in list(registrations.items()):
+            actual_kernel.compile_many(keys)
+        return "result"
+
+    provider = modules(
+        "vllm.model_executor.warmup.kernel_warmup",
+        kernel_warmup=upstream,
+        cutedsl_warmup=lambda: None,
+    )
+    modules("vllm.model_executor.warmup.cutedsl_warmup", cutedsl_warmup=lambda: None)
+    patched = load_patch("vllm_sail/patch/enhancement/kernel_warmup.py")
+    patched._ppu_deep_gemm_warmup_enabled = lambda: False
+    assert provider.kernel_warmup(worker) == "result"
+
+    skipped = {name for name, item in tainted.items() if item not in registrations}
+    assert skipped == (set(tainted) if sm80_skipped else set())
+    assert keep in registrations
+    for name in tainted:
+        assert (name in compiled) is (name not in skipped)
+    assert len(compiled) == 5 - len(skipped)
 
 
 @pytest.mark.parametrize(

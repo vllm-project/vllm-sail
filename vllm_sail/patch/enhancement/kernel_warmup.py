@@ -20,6 +20,15 @@ The PPU DeepGEMM warmup is appended with the fork's gate — never when
 only when the PPU DeepGEMM wrapper reports support, and only when at least one
 of the MoE / dense backend selectors still allows DeepGEMM.
 
+PPU 1.0 (810E) reports sm80-class capability, where Triton rejects
+``tl.float8e4nv`` outright ("type fp8e4nv not supported in this architecture")
+regardless of whether the cast or a bitcast is traced. A handful of DeepSeek V4
+upstream kernels take that dtype unconditionally in their ``@triton.jit`` body,
+so upstream registers warmups that cannot compile on that generation — and whose
+runtime call sites the plugin routes to INT8 or software-E4M3 ops anyway. Those
+registrations are discarded on devices without native FP8; devices with it (PPU
+890P and up) keep the upstream warmup.
+
 The target module imports the full worker/warmup stack at module scope. On
 hosts where that chain cannot run (e.g. a minimal test venv without vLLM's
 engine dependencies) there is also no warmup entry point for the patch to act
@@ -41,6 +50,18 @@ logger = init_logger(__name__)
 _MODULE = "vllm.model_executor.warmup.kernel_warmup"
 _CUTEDSL_MODULE = "vllm.model_executor.warmup.cutedsl_warmup"
 
+# Kernel classes whose ``@triton.jit`` body uses ``tl.float8e4nv`` without a
+# capability guard, keyed by ``<module>.<qualname>`` so no import is needed to
+# identify a registration. Each one's runtime call site is replaced on PPU 1.0:
+# the indexer query and the compressor store emit INT8, and the packed K-cache
+# gather uses software E4M3 decoding.
+_SM80_UNSUPPORTED_WARMUPS: tuple[str, ...] = (
+    "vllm.models.deepseek_v4.common.ops.cache_utils.DequantizeAndGatherKCacheKernel",
+    "vllm.models.deepseek_v4.common.ops.fused_compress_quant_cache.FusedKVCompressNormRopeInsertIndexerTritonKernel",  # noqa: E501
+    "vllm.models.deepseek_v4.common.ops.fused_indexer_q.FusedIndexerQRopeQuantTritonKernel",
+    "vllm.models.deepseek_v4.common.ops.fused_inv_rope_fp8_quant.FusedInvRopeFP8QuantKernel",
+)
+
 
 def _exclude_ppu_cutedsl_registrations(worker) -> None:
     from vllm.model_executor.warmup.jit_warmup_cutedsl_helper import (
@@ -61,6 +82,31 @@ def _exclude_ppu_cutedsl_registrations(worker) -> None:
     if unsupported:
         logger.warning(
             "Skipping unsupported CuTeDSL JIT warmup on PPU: %s",
+            ", ".join(type(kernel).__name__ for kernel in unsupported),
+        )
+
+
+def _exclude_sm80_fp8_registrations(worker) -> None:
+    """Drop DeepSeek V4 warmups Triton cannot compile without native FP8."""
+    from vllm.platforms import current_platform
+
+    if current_platform.has_device_capability(89):
+        return
+    registry = getattr(worker.model_runner, "jit_warmup_registry", None)
+    if registry is None:
+        return
+    registrations = registry._registrations
+    unsupported = [
+        kernel
+        for kernel in registrations
+        if f"{type(kernel).__module__}.{type(kernel).__qualname__}"
+        in _SM80_UNSUPPORTED_WARMUPS
+    ]
+    for kernel in unsupported:
+        del registrations[kernel]
+    if unsupported:
+        logger.warning(
+            "Skipping JIT warmups that need native FP8 on this PPU architecture: %s",
             ", ".join(type(kernel).__name__ for kernel in unsupported),
         )
 
@@ -140,7 +186,10 @@ else:
         _MODULE,
         "kernel_warmup",
         reason=(
-            "Exclude unsupported CuTeDSL JIT registrations on PPU. "
+            "Exclude unsupported CuTeDSL JIT registrations on PPU, and the "
+            "DeepSeek V4 FP8 warmups whose Triton bodies use fp8e4nv "
+            "unconditionally, which PPU 1.0's sm80-class capability cannot "
+            "compile. "
             "Register native top-k/top-p sampler warmups that V2 only "
             "registers on ROCm. "
             "Upstream's DeepGEMM warmup is gated on support_deep_gemm() "
@@ -154,7 +203,9 @@ else:
             "upstream gives kernel_warmup a per-platform warmup registry (or "
             "vllm.utils.deep_gemm dispatches on current_platform), so the PPU "
             "warmup can register itself. Sampler warmups: remove once upstream "
-            "V2 registers native top-k/top-p on PPU for non-speculative paths."
+            "V2 registers native top-k/top-p on PPU for non-speculative paths. "
+            "FP8 warmups: remove once upstream gates those DeepSeek V4 "
+            "registrations on native FP8 support."
         ),
     )
     def kernel_warmup(worker, *, process_local_only: bool = False):
@@ -162,6 +213,7 @@ else:
 
         if current_platform.is_ppu():
             _exclude_ppu_cutedsl_registrations(worker)
+            _exclude_sm80_fp8_registrations(worker)
             _register_ppu_sampler_warmups(worker)
         result = _upstream_kernel_warmup(worker, process_local_only=process_local_only)
 
