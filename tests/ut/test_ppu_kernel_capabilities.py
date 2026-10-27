@@ -428,8 +428,56 @@ def test_warmup_excludes_cutedsl_only_on_ppu(
     assert calls == ([] if ppu else ["legacy"])
 
 
+class _TritonLang:
+    """Nameable stand-in for ``triton.language`` inside never-executed fixtures."""
+
+    float8e4nv = "fp8e4nv"
+    bfloat16 = "bfloat16"
+
+
+tl = _TritonLang()
+
+
+def _fp8_direct(x):
+    return x.to(tl.float8e4nv)
+
+
+def _e4m3_helper(x):
+    return x.to(tl.float8e4nv)
+
+
+# ``@triton.jit`` helpers are inlined at trace time, so only their ``fn`` is read.
+_INLINE_E4M3 = types.SimpleNamespace(fn=_e4m3_helper)
+
+
+def _fp8_inlined(x):
+    return _INLINE_E4M3(x)
+
+
+def _bf16_only(x):
+    return x.to(tl.bfloat16)
+
+
+_FP8_COMPILE_ERROR = ValueError(
+    "type fp8e4nv not supported in this architecture. "
+    "The supported fp8 dtypes are ('fp8e4b15', 'fp8e5')"
+)
+
+
+def _fixture_kernel(name, jit_fn, compiled, *, error=None):
+    """Build a warmup registration shaped like a vLLM Triton kernel wrapper."""
+
+    def compile_many(self, keys):
+        compiled.append(name)
+        if error is not None:
+            raise error
+
+    attrs = {"kernel": staticmethod(jit_fn), "compile_many": compile_many}
+    return type(name, (), attrs)()
+
+
 @pytest.mark.parametrize(
-    "ppu,arch,sm80_skipped",
+    "ppu,arch,fp8_skipped",
     [
         (True, (8, 0), True),
         (True, (8, 9), False),
@@ -437,13 +485,57 @@ def test_warmup_excludes_cutedsl_only_on_ppu(
     ],
 )
 def test_warmup_excludes_fp8_kernels_without_native_fp8(
-    modules, ppu, arch, sm80_skipped
+    modules, ppu, arch, fp8_skipped
 ):
     """Triton rejects tl.float8e4nv on sm80-class devices, so drop those warmups."""
+    compiled = []
+    direct = _fixture_kernel("FusedInvRopeFP8QuantKernel", _fp8_direct, compiled)
+    inlined = _fixture_kernel(
+        "FusedIndexerQRopeQuantTritonKernel", _fp8_inlined, compiled
+    )
+    clean = _fixture_kernel("PackSeqTritonKernel", _bf16_only, compiled)
+    registrations = {item: [((), {})] for item in (direct, inlined, clean)}
+
+    assert _run_ppu_warmup(modules, ppu, arch, registrations) == "result"
+
+    skipped = fp8_skipped and ppu
+    assert (direct in registrations) is not skipped
+    assert (inlined in registrations) is not skipped
+    assert clean in registrations
+    assert len(compiled) == 3 - 2 * skipped
+
+
+def test_warmup_tolerates_signature_level_fp8_on_sm80(modules):
+    """A compile key that passes an E4M3 tensor only fails at trace time."""
+    compiled = []
+    signature_only = _fixture_kernel(
+        "SignatureFp8Kernel", _bf16_only, compiled, error=_FP8_COMPILE_ERROR
+    )
+    clean = _fixture_kernel("PackSeqTritonKernel", _bf16_only, compiled)
+
+    registrations = {signature_only: [((), {})], clean: [((), {})]}
+    assert _run_ppu_warmup(modules, True, (8, 0), registrations) == "result"
+
+    # Source inspection cannot see the dtype, so the registration is kept and
+    # the guard turns the resulting compile error into a warning.
+    assert compiled == ["SignatureFp8Kernel", "PackSeqTritonKernel"]
+    assert signature_only in registrations
+
+
+def test_warmup_propagates_other_compile_errors(modules):
+    """Only the unsupported-fp8 rejection is tolerated."""
+    broken = _fixture_kernel(
+        "BrokenKernel", _bf16_only, [], error=RuntimeError("fused build failed")
+    )
+
+    with pytest.raises(RuntimeError, match="fused build failed"):
+        _run_ppu_warmup(modules, True, (8, 0), {broken: [((), {})]})
+
+
+def _run_ppu_warmup(modules, ppu, arch, registrations):
+    """Install the PPU patch and run the warmup over ``registrations`` in order."""
     ns = types.SimpleNamespace
     import contextlib
-
-    compiled = []
 
     def has_device_capability(capability):
         wanted = (
@@ -460,36 +552,9 @@ def test_warmup_excludes_fp8_kernels_without_native_fp8(
         ),
     )
     modules("vllm.logger", init_logger=lambda _: ns(warning=lambda *a: None))
-
-    def kernel(module, name):
-        def compile_many(self, keys):
-            compiled.append(name)
-
-        return type(name, (), {"__module__": module, "compile_many": compile_many})()
-
-    deepseek_v4 = "vllm.models.deepseek_v4.common.ops"
-    tainted = {
-        name: kernel(module, name)
-        for module, name in (
-            (f"{deepseek_v4}.cache_utils", "DequantizeAndGatherKCacheKernel"),
-            (
-                f"{deepseek_v4}.fused_compress_quant_cache",
-                "FusedKVCompressNormRopeInsertIndexerTritonKernel",
-            ),
-            (f"{deepseek_v4}.fused_indexer_q", "FusedIndexerQRopeQuantTritonKernel"),
-            (f"{deepseek_v4}.fused_inv_rope_fp8_quant", "FusedInvRopeFP8QuantKernel"),
-        )
-    }
-    keep = kernel("vllm.v1.attention.ops.common", "PackSeqTritonKernel")
-    registrations = {**{item: [((), {})] for item in tainted.values()}}
-    registrations[keep] = [((), {})]
-
-    class VllmCuTeDSLJitKernel:
-        pass
-
     modules(
         "vllm.model_executor.warmup.jit_warmup_cutedsl_helper",
-        VllmCuTeDSLJitKernel=VllmCuTeDSLJitKernel,
+        VllmCuTeDSLJitKernel=type("VllmCuTeDSLJitKernel", (), {}),
     )
     modules(
         "vllm.v1.sample.ops.topk_topp_sampler",
@@ -521,14 +586,7 @@ def test_warmup_excludes_fp8_kernels_without_native_fp8(
     modules("vllm.model_executor.warmup.cutedsl_warmup", cutedsl_warmup=lambda: None)
     patched = load_patch("vllm_sail/patch/enhancement/kernel_warmup.py")
     patched._ppu_deep_gemm_warmup_enabled = lambda: False
-    assert provider.kernel_warmup(worker) == "result"
-
-    skipped = {name for name, item in tainted.items() if item not in registrations}
-    assert skipped == (set(tainted) if sm80_skipped else set())
-    assert keep in registrations
-    for name in tainted:
-        assert (name in compiled) is (name not in skipped)
-    assert len(compiled) == 5 - len(skipped)
+    return provider.kernel_warmup(worker)
 
 
 @pytest.mark.parametrize(
