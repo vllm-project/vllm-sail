@@ -46,6 +46,7 @@ from vllm.model_executor.layers.quantization.utils.int8_utils import (  # noqa: 
 from tests.e2e.kernels import _reference as ref  # noqa: E402
 from vllm_sail.utils.deep_gemm import (  # noqa: E402
     bf16_gemm_nt,
+    bf16_gemm_fp32_nt,
     get_deep_gemm_config,
     get_mk_alignment_for_contiguous_layout,
     m_grouped_fp4_gemm_nt_nopad,
@@ -142,6 +143,88 @@ def test_bf16_dense_gemm_nt(m, n, k):
     ref.assert_close(out, expected, "bf16")
 
 
+@pytest.mark.parametrize(("m", "n", "k"), DENSE_SHAPES)
+def test_bf16_dense_gemm_fp32_nt(m, n, k):
+    """``bf16_gemm_fp32_nt`` writes an fp32 D against the fp32 golden."""
+    x = _randn(m, k, seed=11)
+    w = _randn(n, k, seed=12) * 0.05
+    out = torch.empty((m, n), device="cuda", dtype=torch.float32)
+
+    bf16_gemm_fp32_nt(x, w, out)
+    torch.cuda.synchronize()
+
+    expected = ref.ref_gemm(x, w)
+    assert out.shape == (m, n) and out.dtype == torch.float32
+    ref.assert_close(out, expected, "bf16", atol=1e-3, rtol=1e-3)
+
+
+@pytest.mark.parametrize(("m", "n", "k"), SMALL_SHAPES)
+def test_bf16_dense_linear_matches_ref(m, n, k):
+    """``bf16_dense_linear`` (the runtime wrapper) matches the fp32 golden.
+
+    Both chips can reach this path through an explicit
+    ``VLLM_SAIL_DENSE_BF16_DEEPGEMM=1``, so the reshape/out wrapper is covered
+    wherever the DeepGEMM kernel itself is.
+    """
+    from vllm_sail.utils.deep_gemm import bf16_dense_linear
+
+    x = _randn(m, k, seed=11)
+    w = _randn(n, k, seed=12) * 0.05
+
+    out = bf16_dense_linear(x, w)
+    torch.cuda.synchronize()
+
+    assert out.shape == (m, n) and out.dtype == torch.bfloat16
+    ref.assert_close(out, ref.ref_gemm(x, w), "bf16")
+
+
+@pytest.mark.parametrize(("m", "n", "k"), SMALL_SHAPES)
+def test_bf16_dense_linear_fp32_out_matches_ref(m, n, k):
+    """``out_dtype=torch.float32`` fuses the bf16->fp32 epilogue in the kernel.
+
+    This replaces the ``torch.mm(x, w.T, out_dtype=torch.float32)`` that
+    upstream runs for an fp32 lm_head (``LogitsProcessor._apply_head``) and for
+    fp32 MoE router logits (``GateLinear.forward`` tier 4), so the output must
+    be fp32 and stay inside a band far tighter than the bf16 output uses: both
+    operands are exact bf16 values and the addition chain is fp32 here too.
+    """
+    from vllm_sail.utils.deep_gemm import bf16_dense_linear
+
+    x = _randn(m, k, seed=11)
+    w = _randn(n, k, seed=12) * 0.05
+
+    out = bf16_dense_linear(x, w, out_dtype=torch.float32)
+    torch.cuda.synchronize()
+
+    assert out.shape == (m, n) and out.dtype == torch.float32
+    ref.assert_close(out, ref.ref_gemm(x, w), "bf16", atol=1e-3, rtol=1e-3)
+
+
+@pytest.mark.parametrize(("m", "n", "k"), SMALL_SHAPES[:2])
+def test_ppu_bf16_deepgemm_linear_fp32_op(m, n, k):
+    """The registered fp32-output custom op runs and its fake impl agrees.
+
+    ``_apply_head``/``GateLinear.forward`` go through
+    ``torch.ops.vllm.ppu_bf16_deepgemm_linear_fp32`` so that torch.compile and
+    CUDA-graph capture see a static shape; the fake impl is what they
+    trace, hence the meta-device shape/dtype assertion.
+    """
+    import vllm_sail.patch.enhancement.dense  # noqa: F401
+
+    x = _randn(m, k, seed=11)
+    w = _randn(n, k, seed=12) * 0.05
+
+    meta_x = torch.empty((m, k), device="meta", dtype=torch.bfloat16)
+    meta_w = torch.empty((n, k), device="meta", dtype=torch.bfloat16)
+    meta_out = torch.ops.vllm.ppu_bf16_deepgemm_linear_fp32(meta_x, meta_w, None)
+    assert meta_out.shape == (m, n) and meta_out.dtype == torch.float32
+
+    out = torch.ops.vllm.ppu_bf16_deepgemm_linear_fp32(x, w, None)
+    torch.cuda.synchronize()
+    assert out.shape == (m, n) and out.dtype == torch.float32
+    ref.assert_close(out, ref.ref_gemm(x, w), "bf16", atol=1e-3, rtol=1e-3)
+
+
 @pytest.mark.parametrize(("tokens", "experts", "n", "k"), GROUPED_SHAPES)
 def test_m_grouped_bf16_gemm_nt_nopad(tokens, experts, n, k):
     """Grouped BF16 GEMM against the per-expert FP32 golden."""
@@ -161,26 +244,44 @@ def test_m_grouped_bf16_gemm_nt_nopad(tokens, experts, n, k):
 
 @pytest.mark.parametrize(("tokens", "experts", "n", "k"), GROUPED_SHAPES)
 def test_bf16_dense_linear_dispatch_gating(tokens, experts, n, k, monkeypatch):
-    """BF16 dense DeepGEMM support is chip- *and* env-gated (capability != default).
+    """BF16 dense DeepGEMM is an env-gated opt-in, one switch per epilogue.
 
-    Both PPU chips can build bf16 DeepGEMM candidates, but auto-enablement
-    additionally requires PPU 1.5 (890P) plus ``VLLM_SAIL_DENSE_BF16_DEEPGEMM``.
+    Both PPU chips can build bf16 DeepGEMM candidates, but each epilogue stays
+    off until its own switch is set: ``gemm_bf16_bf16_bf16_nt`` exists in every
+    build, while ``gemm_bf16_bf16_fp32_nt`` only ships in newer ones.
     """
     from vllm_sail import envs as ppu_envs
 
+    bf16_name = "VLLM_SAIL_DENSE_BF16_DEEPGEMM"
+    fp32_name = "VLLM_SAIL_DENSE_BF16_FP32_OUT_DEEPGEMM"
     x = _randn(tokens, k, seed=13)
     w = _randn(n, k, seed=14) * 0.05
-    is_890p = current_platform.is_device_capability((8, 9))
 
-    monkeypatch.setenv("VLLM_SAIL_DENSE_BF16_DEEPGEMM", "0")
+    for name in (bf16_name, fp32_name):
+        monkeypatch.delenv(name, raising=False)
+        monkeypatch.delenv(name.replace("VLLM_SAIL_", "VLLM_PPU_"), raising=False)
     assert ppu_envs.VLLM_SAIL_DENSE_BF16_DEEPGEMM is False
+    assert ppu_envs.VLLM_SAIL_DENSE_BF16_FP32_OUT_DEEPGEMM is False
     assert should_use_deepgemm_for_bf16_linear(x, w) is False
+    assert should_use_deepgemm_for_bf16_linear(x, w, out_dtype=torch.float32) is False
 
-    monkeypatch.setenv("VLLM_SAIL_DENSE_BF16_DEEPGEMM", "1")
-    assert should_use_deepgemm_for_bf16_linear(x, w) is is_890p
+    monkeypatch.setenv(bf16_name, "1")
+    assert should_use_deepgemm_for_bf16_linear(x, w) is True
+    # The BF16 switch never enables the fp32 epilogue.
+    assert should_use_deepgemm_for_bf16_linear(x, w, out_dtype=torch.float32) is False
+
+    monkeypatch.setenv(fp32_name, "1")
+    assert should_use_deepgemm_for_bf16_linear(x, w, out_dtype=torch.float32) is True
+    # An fp16 output never uses either kernel.
+    assert should_use_deepgemm_for_bf16_linear(x, w, out_dtype=torch.float16) is False
+
     # A bias forces the acblas fallback on every chip.
     bias = _randn(n, seed=15)
     assert should_use_deepgemm_for_bf16_linear(x, w, bias) is False
+    assert (
+        should_use_deepgemm_for_bf16_linear(x, w, bias, out_dtype=torch.float32)
+        is False
+    )
 
 
 # ---------------------------------------------------------------------------

@@ -17,10 +17,11 @@ ACEXT                bf16, w8a8-int8, w4a8-int8  unavailable
 ===================  ==========================  =======================================
 
 Hardware capability support is deliberately kept distinct from *default
-auto-selection* (e.g. BF16 dense DeepGEMM auto-enable is gated by
-``VLLM_SAIL_DENSE_BF16_DEEPGEMM`` on PPU 1.5, and the 810E default dense
-backend is ACEXT). Those two layers are covered by ``test_backend_selection``
-and ``test_acext_deepgemm_gating``.
+_auto-selection*: BF16 dense DeepGEMM is an explicit opt-in on every chip, with
+one switch per epilogue (``VLLM_SAIL_DENSE_BF16_DEEPGEMM`` for the BF16 output,
+``VLLM_SAIL_DENSE_BF16_FP32_OUT_DEEPGEMM`` for the fp32 one), because the two
+resolve different DeepGEMM entry points. Those two layers are covered by
+``test_backend_selection`` and ``test_acext_deepgemm_gating``.
 """
 
 from __future__ import annotations

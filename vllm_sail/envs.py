@@ -11,7 +11,8 @@ Rules (enforced in review):
    depend on that difference.
 3. ``VLLM_SAIL_*`` names take precedence over their ``VLLM_PPU_*`` aliases,
    including explicit false or empty values. Legacy Python attributes use the
-   same resolution. Defaults are unchanged from the in-tree PPU fork.
+   same resolution. Defaults follow the in-tree PPU fork unless a comment
+   next to the declaration notes a deliberate deviation.
 """
 
 from __future__ import annotations
@@ -34,6 +35,7 @@ if TYPE_CHECKING:
     VLLM_SAIL_FUSED_RMSNORM_QUANT: bool = False
     VLLM_SAIL_USE_OPT_TOKEN_GROUP_QUANT: bool = False
     VLLM_SAIL_DENSE_BF16_DEEPGEMM: bool = False
+    VLLM_SAIL_DENSE_BF16_FP32_OUT_DEEPGEMM: bool = False
     VLLM_SAIL_USE_PLA: bool = True
     VLLM_SAIL_DEEPGEMM_MOE_TP_FUSED: bool = True
     VLLM_SAIL_MOE_BACKEND: str | None = None
@@ -53,6 +55,7 @@ if TYPE_CHECKING:
     VLLM_PPU_FUSED_RMSNORM_QUANT: bool = False
     VLLM_PPU_USE_OPT_TOKEN_GROUP_QUANT: bool = False
     VLLM_PPU_DENSE_BF16_DEEPGEMM: bool = False
+    VLLM_PPU_DENSE_BF16_FP32_OUT_DEEPGEMM: bool = False
     VLLM_PPU_USE_PLA: bool = True
     VLLM_PPU_DEEPGEMM_MOE_TP_FUSED: bool = True
     VLLM_PPU_MOE_BACKEND: str | None = None
@@ -129,7 +132,15 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_SAIL_USE_OPT_TOKEN_GROUP_QUANT": _bool(
         "VLLM_SAIL_USE_OPT_TOKEN_GROUP_QUANT", False
     ),
+    # BF16 dense DeepGEMM is opt-in on every chip, and the two epilogues have
+    # their own switch because they need different DeepGEMM entry points: the
+    # BF16-output one resolves ``gemm_bf16_bf16_bf16_nt`` (present in every
+    # build), the fp32-output one needs ``gemm_bf16_bf16_fp32_nt``, which older
+    # builds do not expose.
     "VLLM_SAIL_DENSE_BF16_DEEPGEMM": _bool("VLLM_SAIL_DENSE_BF16_DEEPGEMM", False),
+    "VLLM_SAIL_DENSE_BF16_FP32_OUT_DEEPGEMM": _bool(
+        "VLLM_SAIL_DENSE_BF16_FP32_OUT_DEEPGEMM", False
+    ),
     "VLLM_SAIL_USE_PLA": _bool("VLLM_SAIL_USE_PLA", True),
     "VLLM_SAIL_DEEPGEMM_MOE_TP_FUSED": _bool("VLLM_SAIL_DEEPGEMM_MOE_TP_FUSED", True),
     # -- MoE ---------------------------------------------------------------

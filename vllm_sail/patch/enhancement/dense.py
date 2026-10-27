@@ -1,5 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Optional PPU 1.5 BF16 dense DeepGEMM selection with a compile-safe op."""
+"""Optional BF16 dense DeepGEMM selection with a compile-safe op.
+
+Opt-in on every chip and per epilogue: ``VLLM_SAIL_DENSE_BF16_DEEPGEMM=1``
+enables the BF16-output kernel (``gemm_bf16_bf16_bf16_nt``, present in every
+DeepGEMM build), while ``VLLM_SAIL_DENSE_BF16_FP32_OUT_DEEPGEMM=1`` enables the
+fp32-output one (``gemm_bf16_bf16_fp32_nt``, newer builds only). The two ops
+registered below are used by ``dispatch_unquantized_gemm`` and by upstream's
+``torch.mm(..., out_dtype=float32)`` call sites (see ``dense_fp32_out``).
+"""
 
 from __future__ import annotations
 
@@ -27,9 +35,10 @@ def ppu_unquantized_gemm(
     weight: torch.Tensor,
     bias: torch.Tensor | None = None,
 ):
-    # PPU NOTE: when VLLM_PPU_DENSE_BF16_DEEPGEMM is enabled, route K-major
-    # BF16 dense GEMMs on PPU 1.5 to DeepGEMM; everything else keeps the
-    # default acblas path (F.linear).
+    # PPU NOTE: K-major BF16 dense GEMMs go to DeepGEMM only when
+    # VLLM_SAIL_DENSE_BF16_DEEPGEMM=1 is set explicitly (the bf16->fp32 epilogue
+    # has its own switch, see dense_fp32_out); everything else keeps the default
+    # acblas path (F.linear).
     from vllm_sail.utils.deep_gemm import should_use_deepgemm_for_bf16_linear
 
     if should_use_deepgemm_for_bf16_linear(x, weight, bias):
@@ -56,6 +65,27 @@ direct_register_custom_op(
     op_name="ppu_bf16_deepgemm_linear",
     op_func=ppu_bf16_deepgemm_linear_impl,
     fake_impl=ppu_bf16_deepgemm_linear_fake,
+)
+
+
+def ppu_bf16_deepgemm_linear_fp32_impl(
+    x: torch.Tensor, weight: torch.Tensor, bias: torch.Tensor | None = None
+) -> torch.Tensor:
+    from vllm_sail.utils.deep_gemm import bf16_dense_linear
+
+    return bf16_dense_linear(x, weight, bias, out_dtype=torch.float32)
+
+
+def ppu_bf16_deepgemm_linear_fp32_fake(
+    x: torch.Tensor, weight: torch.Tensor, bias: torch.Tensor | None = None
+) -> torch.Tensor:
+    return x.new_empty((*x.shape[:-1], weight.shape[0]), dtype=torch.float32)
+
+
+direct_register_custom_op(
+    op_name="ppu_bf16_deepgemm_linear_fp32",
+    op_func=ppu_bf16_deepgemm_linear_fp32_impl,
+    fake_impl=ppu_bf16_deepgemm_linear_fp32_fake,
 )
 _original = _utils.dispatch_unquantized_gemm
 

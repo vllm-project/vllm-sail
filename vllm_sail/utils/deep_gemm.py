@@ -203,6 +203,7 @@ _int8_einsum_impl: Callable[..., Any] | None = None
 _int8_grouped_nopad_impl: Callable[..., Any] | None = None
 _int8_grouped_masked_impl: Callable[..., Any] | None = None
 _bf16_gemm_nt_impl: Callable[..., Any] | None = None
+_bf16_gemm_fp32_nt_impl: Callable[..., Any] | None = None
 _bf16_grouped_nopad_impl: Callable[..., Any] | None = None
 _bf16_grouped_masked_impl: Callable[..., Any] | None = None
 _fp4_grouped_nopad_impl: Callable[..., Any] | None = None
@@ -238,7 +239,7 @@ def _lazy_init() -> None:
     global _grouped_masked_impl, _fp8_grouped_nopad_impl
     global _int8_gemm_nt_impl, _int8_einsum_impl
     global _int8_grouped_nopad_impl, _int8_grouped_masked_impl
-    global _bf16_gemm_nt_impl
+    global _bf16_gemm_nt_impl, _bf16_gemm_fp32_nt_impl
     global _bf16_grouped_nopad_impl, _bf16_grouped_masked_impl
     global _fp4_grouped_nopad_impl, _fp4_grouped_fused_impl, _fp4_grouped_masked_impl
     global \
@@ -267,6 +268,7 @@ def _lazy_init() -> None:
         or _int8_grouped_nopad_impl is not None
         or _int8_grouped_masked_impl is not None
         or _bf16_gemm_nt_impl is not None
+        or _bf16_gemm_fp32_nt_impl is not None
         or _bf16_grouped_nopad_impl is not None
         or _bf16_grouped_masked_impl is not None
         or _fp4_grouped_nopad_impl is not None
@@ -332,7 +334,12 @@ def _lazy_init() -> None:
     _int8_grouped_masked_impl = getattr(
         _dg, "m_grouped_gemm_int8_int8_bf16_nt_masked", None
     )
+    # Two epilogues, two entry points: the BF16-output kernel keeps the name that
+    # every build exposes, while ``gemm_bf16_bf16_fp32_nt`` (an fp32 ``D``) only
+    # exists in newer DeepGEMM builds -- resolving it with ``getattr`` is the
+    # version probe, and a missing symbol simply leaves the gate closed.
     _bf16_gemm_nt_impl = getattr(_dg, "gemm_bf16_bf16_bf16_nt", None)
+    _bf16_gemm_fp32_nt_impl = getattr(_dg, "gemm_bf16_bf16_fp32_nt", None)
     _bf16_grouped_nopad_impl = getattr(
         _dg, "m_grouped_gemm_bf16_bf16_bf16_nt_nopad", None
     )
@@ -444,6 +451,14 @@ def bf16_gemm_nt(*args, **kwargs):
     if _bf16_gemm_nt_impl is None:
         return _missing(*args, **kwargs)
     return _bf16_gemm_nt_impl(*args, **kwargs)
+
+
+def bf16_gemm_fp32_nt(*args, **kwargs):
+    """BF16 x BF16 -> fp32 dense GEMM (needs ``gemm_bf16_bf16_fp32_nt``)."""
+    _lazy_init()
+    if _bf16_gemm_fp32_nt_impl is None:
+        return _missing(*args, **kwargs)
+    return _bf16_gemm_fp32_nt_impl(*args, **kwargs)
 
 
 def m_grouped_bf16_gemm_nt_nopad(*args, **kwargs):
@@ -950,28 +965,44 @@ def should_use_deepgemm_for_bf16_linear(
     x: torch.Tensor,
     weight: torch.Tensor,
     bias: torch.Tensor | None = None,
+    *,
+    out_dtype: torch.dtype | None = None,
 ) -> bool:
     """Decide whether an unquantized BF16 dense GEMM should run on DeepGEMM.
 
-    Requires `VLLM_SAIL_DENSE_BF16_DEEPGEMM` and PPU 1.5; DeepGEMM dense
-    GEMM only supports K-major (nt) operands, so both A `[..., K]` and
-    B `[N, K]` must be contiguous BF16.  When *bias* is present the caller
-    must fall back to acblas (``F.linear``) to avoid the extra elementwise
-    add overhead.  Otherwise (no bias) callers can use DeepGEMM when all
-    conditions are satisfied.
+    Requires an explicit env opt-in (one switch per epilogue, both off by
+    default because the kernel API depends on the DeepGEMM version), the global
+    `VLLM_USE_DEEP_GEMM` switch plus an installed DeepGEMM; DeepGEMM dense GEMM
+    only supports K-major (nt) operands, so both A `[..., K]` and B `[N, K]`
+    must be contiguous BF16.  When *bias* is present the caller must fall back
+    to acblas (``F.linear``) to avoid the extra elementwise add overhead.
+    Otherwise (no bias) callers can use DeepGEMM when all conditions are
+    satisfied.
+
+    ``out_dtype`` selects both the epilogue and the switch that allows it:
+    ``None``/``torch.bfloat16`` writes BF16 behind
+    ``VLLM_SAIL_DENSE_BF16_DEEPGEMM`` (``gemm_bf16_bf16_bf16_nt``), while
+    ``torch.float32`` writes the fp32 logits upstream otherwise computes with
+    ``torch.mm(..., out_dtype=torch.float32)`` (fp32 lm_head, fp32 MoE router
+    logits) and needs ``VLLM_SAIL_DENSE_BF16_FP32_OUT_DEEPGEMM`` plus a
+    DeepGEMM exposing ``gemm_bf16_bf16_fp32_nt``.
     """
     if bias is not None:
         return False
 
-    if not ppu_envs.VLLM_SAIL_DENSE_BF16_DEEPGEMM:
+    if out_dtype is not None and out_dtype not in (torch.bfloat16, torch.float32):
         return False
 
-    if not (current_platform.is_ppu() and has_deep_gemm()):
+    if out_dtype is torch.float32:
+        # The fp32 epilogue has its own kernel entry point, so it has its own
+        # switch; a DeepGEMM without that symbol keeps it closed everywhere.
+        if not ppu_envs.VLLM_SAIL_DENSE_BF16_FP32_OUT_DEEPGEMM:
+            return False
+    elif not ppu_envs.VLLM_SAIL_DENSE_BF16_DEEPGEMM:
         return False
 
-    # BF16 dense GEMM is only optimized on PPU 1.5 for now; PPU 1.0 will be
-    # enabled once the kernel-side optimization lands.
-    if not is_ppu_15():
+    # Reuse the shared gate so `VLLM_USE_DEEP_GEMM=0` also disables this path.
+    if not is_deep_gemm_supported():
         return False
 
     return (
@@ -987,17 +1018,29 @@ def bf16_dense_linear(
     x: torch.Tensor,
     weight: torch.Tensor,
     bias: torch.Tensor | None = None,
+    *,
+    out_dtype: torch.dtype | None = None,
 ) -> torch.Tensor:
     """BF16 dense linear via DeepGEMM (K-major operands only).
 
     Callers must check `should_use_deepgemm_for_bf16_linear` first.
+    ``out_dtype=torch.float32`` switches to the fp32-output kernel, replacing
+    the cuBLAS ``torch.mm(out_dtype=torch.float32)`` epilogue that upstream runs
+    for an fp32 lm_head or fp32 MoE router logits.
     """
     original_shape = x.shape
     x_2d = x.reshape(-1, original_shape[-1])
     m = x_2d.shape[0]
     n = weight.shape[0]
-    output = torch.empty((m, n), dtype=torch.bfloat16, device=x.device)
-    bf16_gemm_nt(x_2d, weight, output)
+    output = torch.empty(
+        (m, n),
+        dtype=torch.bfloat16 if out_dtype is None else out_dtype,
+        device=x.device,
+    )
+    if out_dtype is torch.float32:
+        bf16_gemm_fp32_nt(x_2d, weight, output)
+    else:
+        bf16_gemm_nt(x_2d, weight, output)
     if bias is not None:
         output = output + bias
     return output.view(*original_shape[:-1], n)
@@ -1131,6 +1174,7 @@ __all__ = [
     "fp8_m_grouped_gemm_nt_masked",
     "int8_gemm_nt",
     "bf16_gemm_nt",
+    "bf16_gemm_fp32_nt",
     "bf16_dense_linear",
     "m_grouped_int8_gemm_nt_nopad",
     "int8_m_grouped_gemm_nt_masked",

@@ -11,7 +11,7 @@
 schema = 1
 vllm_version_range = ">=0.31.0,<0.32.0"
 key_interface_count = 10
-target_count = 261
+target_count = 263
 
 [[key_interface]]
 symbol = "vllm.platforms.interface.PlatformEnum"
@@ -730,6 +730,14 @@ present = true
 fingerprint = "sha256:12dd5d8f3119900d50febe5bd36cb1fc2d1f37a6d47d796f7361163846f09506"
 
 [[patch_target]]
+name = "vllm.model_executor.layers.fused_moe.router.gate_linear.GateLinear.forward"
+kind = "class"
+module = "vllm/model_executor/layers/fused_moe/router/gate_linear.py"
+symbol = "GateLinear.forward"
+present = true
+fingerprint = "sha256:4cd49dce1602ff486938beeb5bcdecd657313afc356905659892b7ac0bb50b76"
+
+[[patch_target]]
 name = "vllm.model_executor.layers.fused_moe.unquantized_fused_moe_method.select_unquantized_moe_backend"
 kind = "module"
 module = "vllm/model_executor/layers/fused_moe/unquantized_fused_moe_method.py"
@@ -752,6 +760,14 @@ module = "vllm/model_executor/layers/linear.py"
 symbol = "dispatch_unquantized_gemm"
 present = true
 fingerprint = "sha256:70696c5e110409041f69e463f5473e7e6bdc9ceee29cfaa5a8d51205f348e247"
+
+[[patch_target]]
+name = "vllm.model_executor.layers.logits_processor.LogitsProcessor._apply_head"
+kind = "class"
+module = "vllm/model_executor/layers/logits_processor.py"
+symbol = "LogitsProcessor._apply_head"
+present = true
+fingerprint = "sha256:0f2f6baeb9aa65bf70af9cabb0000c69b9c53e5447f2fe4ad596aa5fcc04360e"
 
 [[patch_target]]
 name = "vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn.ChunkGatedDeltaRule.__init__"

@@ -31,7 +31,8 @@ application in the allowlist.
 | --- | --- | --- |
 | `VLLM_SAIL_MOE_BACKEND` | Automatic | `deepgemm`, `acext`, `triton` |
 | `VLLM_SAIL_DENSE_BACKEND` | Automatic | `deepgemm`, `acext`, `triton` |
-| `VLLM_SAIL_DENSE_BF16_DEEPGEMM` | `0` | Opt into the PPU 1.5 BF16 dense DeepGEMM path |
+| `VLLM_SAIL_DENSE_BF16_DEEPGEMM` | `0` | BF16 dense DeepGEMM (BF16 output); opt-in on every chip with `1` |
+| `VLLM_SAIL_DENSE_BF16_FP32_OUT_DEEPGEMM` | `0` | BF16 dense DeepGEMM writing FP32 logits; opt-in with `1`, requires a DeepGEMM exposing `gemm_bf16_bf16_fp32_nt` |
 | `VLLM_SAIL_DEEPGEMM_MOE_TP_FUSED` | `1` | Enable the supported fused tensor-parallel MoE path |
 | `VLLM_SAIL_USE_PLA` | `1` | Allow PLA linear-attention paths where available |
 | `VLLM_GDN_DECODE_KERNEL` | `auto` on PPU | `auto`, `cuda`, `pla`, `triton`; selects GDN decode independently of prefill and KDA |
@@ -50,6 +51,23 @@ Leave backend variables unset for normal capability-based selection. An explicit
 choice still requires the corresponding library, device support and compatible
 tensor layout. Avoid setting overlapping backend controls while diagnosing a
 selection issue.
+
+`VLLM_SAIL_DENSE_BF16_DEEPGEMM` is off by default on every chip: setting it to
+`1` routes unquantized BF16 dense GEMMs to DeepGEMM, while leaving it unset keeps
+the default ACEXT/acblas path (`F.linear`). The path is limited to contiguous
+BF16 K-major operands without a bias and is also disabled by the global
+`VLLM_USE_DEEP_GEMM=0` switch. It needs the DeepGEMM entry point
+`gemm_bf16_bf16_bf16_nt`, which every build exposes.
+
+`VLLM_SAIL_DENSE_BF16_FP32_OUT_DEEPGEMM` covers the BF16-to-FP32 GEMMs that
+upstream otherwise issues as `torch.mm(..., out_dtype=torch.float32)`: an FP32
+lm_head (via `--hf-overrides '{"head_dtype": "float32"}'`) and FP32 MoE router
+logits. It is a separate switch because it needs a different kernel entry point,
+`gemm_bf16_bf16_fp32_nt` (`gemm_bf16_bf16_bf16_nt` asserts a BF16 output), which
+only newer DeepGEMM builds ship; the symbol is resolved with `getattr`, so an
+older build stays on upstream's `torch.mm` instead of failing. The two switches
+are independent, and the same operand, bias and `VLLM_USE_DEEP_GEMM` constraints
+apply. A quantized lm_head keeps upstream's `ValueError`.
 
 On PPU, GDN decode `auto` prefers PLA when the legacy `VLLM_SAIL_USE_PLA`
 switch permits it and the model uses supported head dimensions and FP32 SSM

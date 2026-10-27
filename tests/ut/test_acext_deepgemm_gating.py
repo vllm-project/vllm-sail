@@ -17,8 +17,10 @@ Three gating branches, each asserted hard (fail on mismatch):
 * **w8a8-fp8 / mxfp4 DeepGEMM** -- gated to ZW-890P ``(8, 9)``; never
   constructed on ZW-810E ``(8, 0)``.
 * **bf16 / w8a8-int8 DeepGEMM** -- hardware-supported (constructible) on *both*
-  chips, but BF16 *dense* auto-enable additionally requires
-  ``VLLM_SAIL_DENSE_BF16_DEEPGEMM`` and PPU 1.5, so it fires only on ZW-890P.
+  chips. BF16 *dense* auto-enable is opt-in on both and split per epilogue: the
+  BF16 output needs ``VLLM_SAIL_DENSE_BF16_DEEPGEMM=1``, the fp32 output
+  ``VLLM_SAIL_DENSE_BF16_FP32_OUT_DEEPGEMM=1``, because they resolve different
+  DeepGEMM entry points (``gemm_bf16_bf16_fp32_nt`` only ships in newer builds).
   This is the "capability support != default auto-enable" distinction.
 """
 
@@ -98,7 +100,7 @@ def platform_double(chip: str) -> types.SimpleNamespace:
     )
 
 
-_TORCH = types.SimpleNamespace(bfloat16="bf16")
+_TORCH = types.SimpleNamespace(bfloat16="bf16", float32="fp32", float16="fp16")
 
 
 # ---------------------------------------------------------------------------
@@ -187,14 +189,25 @@ def _mxfp4_activation_key(monkeypatch: pytest.MonkeyPatch, chip: str):
 
 
 def _should_use_bf16_linear(
-    monkeypatch: pytest.MonkeyPatch, chip: str, *, bf16_env: bool, bias: bool
+    monkeypatch: pytest.MonkeyPatch,
+    chip: str,
+    *,
+    bf16_env: bool | None,
+    fp32_env: bool | None = None,
+    bias: bool,
+    out_dtype=None,
 ) -> bool:
-    if bf16_env:
-        monkeypatch.setenv("VLLM_SAIL_DENSE_BF16_DEEPGEMM", "1")
-    else:
-        monkeypatch.delenv("VLLM_SAIL_DENSE_BF16_DEEPGEMM", raising=False)
-        monkeypatch.delenv("VLLM_PPU_DENSE_BF16_DEEPGEMM", raising=False)
-    platform = platform_double(chip)
+    """``*_env``: ``None`` leaves the variable at its (off) default."""
+    switches = (
+        ("DENSE_BF16_DEEPGEMM", bf16_env),
+        ("DENSE_BF16_FP32_OUT_DEEPGEMM", fp32_env),
+    )
+    for suffix, value in switches:
+        for prefix in ("VLLM_SAIL_", "VLLM_PPU_"):
+            if value is None:
+                monkeypatch.delenv(prefix + suffix, raising=False)
+            else:
+                monkeypatch.setenv(prefix + suffix, "1" if value else "0")
     x = types.SimpleNamespace(dtype="bf16", is_contiguous=lambda: True)
     weight = types.SimpleNamespace(
         dtype="bf16", dim=lambda: 2, is_contiguous=lambda: True
@@ -205,12 +218,10 @@ def _should_use_bf16_linear(
         {
             "ppu_envs": ppu_envs,
             "torch": _TORCH,
-            "current_platform": platform,
-            "has_deep_gemm": lambda: True,
-            "is_ppu_15": lambda: platform.is_device_capability((8, 9)),
+            "is_deep_gemm_supported": lambda: True,
         },
     )
-    return bool(fn(x, weight, object() if bias else None))
+    return bool(fn(x, weight, object() if bias else None, out_dtype=out_dtype))
 
 
 # ===========================================================================
@@ -281,7 +292,8 @@ def test_mxfp4_deepgemm_gated_to_890p(monkeypatch, chip) -> None:
 
 
 # ===========================================================================
-# BF16 / INT8 DeepGEMM: constructible on both, dense auto-enable only on 890P.
+# BF16 / INT8 DeepGEMM: constructible on both; BF16 dense auto-enable is an
+# explicit, per-epilogue opt-in on every chip.
 # ===========================================================================
 @pytest.mark.parametrize("chip", CHIPS)
 def test_bf16_and_int8_deepgemm_constructible_on_both_chips(
@@ -293,15 +305,75 @@ def test_bf16_and_int8_deepgemm_constructible_on_both_chips(
 
 
 @pytest.mark.parametrize("chip", CHIPS)
-def test_bf16_dense_autoenable_only_on_890p_with_env(monkeypatch, chip) -> None:
-    """BF16 dense DeepGEMM auto-enable needs the env *and* PPU 1.5 (890P)."""
-    # Env unset: never auto-enabled, on either chip.
+def test_bf16_dense_optin_on_both_chips(monkeypatch, chip) -> None:
+    """BF16 dense DeepGEMM is opt-in on both chips (never auto-enabled)."""
+    # Default: no env set -> disabled on both chips, ACEXT/acblas keeps BF16.
+    assert (
+        _should_use_bf16_linear(monkeypatch, chip, bf16_env=None, bias=False) is False
+    )
+    # Explicit opt-out keeps it off.
     assert (
         _should_use_bf16_linear(monkeypatch, chip, bf16_env=False, bias=False) is False
     )
-    # Env set: auto-enabled only on ZW-890P; ZW-810E default dense stays ACEXT.
-    assert _should_use_bf16_linear(monkeypatch, chip, bf16_env=True, bias=False) is (
-        chip == "890p"
-    )
+    # Explicit opt-in enables it on both chips (the kernel exists on 810E too).
+    assert _should_use_bf16_linear(monkeypatch, chip, bf16_env=True, bias=False) is True
     # A present bias always forces the acblas/F.linear fallback.
     assert _should_use_bf16_linear(monkeypatch, chip, bf16_env=True, bias=True) is False
+
+
+@pytest.mark.parametrize("chip", CHIPS)
+def test_bf16_fp32_out_has_its_own_switch(monkeypatch, chip) -> None:
+    """The bf16->fp32 epilogue needs ``..._FP32_OUT_...``, not the BF16 switch.
+
+    The two epilogues resolve different DeepGEMM entry points
+    (``gemm_bf16_bf16_fp32_nt`` only ships in newer builds), so neither switch
+    may enable the other; any other output dtype keeps the upstream path.
+    """
+    # The BF16 switch never enables the fp32 epilogue.
+    assert (
+        _should_use_bf16_linear(
+            monkeypatch, chip, bf16_env=True, bias=False, out_dtype=_TORCH.float32
+        )
+        is False
+    )
+    # The fp32 switch covers only that epilogue (fp32 lm_head / router logits).
+    assert (
+        _should_use_bf16_linear(
+            monkeypatch,
+            chip,
+            bf16_env=None,
+            fp32_env=True,
+            bias=False,
+            out_dtype=_TORCH.float32,
+        )
+        is True
+    )
+    assert (
+        _should_use_bf16_linear(
+            monkeypatch, chip, bf16_env=None, fp32_env=True, bias=False
+        )
+        is False
+    )
+    # A bias, or any other output dtype, keeps upstream's torch.mm.
+    assert (
+        _should_use_bf16_linear(
+            monkeypatch,
+            chip,
+            bf16_env=None,
+            fp32_env=True,
+            bias=True,
+            out_dtype=_TORCH.float32,
+        )
+        is False
+    )
+    assert (
+        _should_use_bf16_linear(
+            monkeypatch,
+            chip,
+            bf16_env=None,
+            fp32_env=True,
+            bias=False,
+            out_dtype=_TORCH.float16,
+        )
+        is False
+    )

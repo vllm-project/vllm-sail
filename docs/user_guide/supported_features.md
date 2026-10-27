@@ -36,7 +36,7 @@ need workload-specific tuning.
 
 | Format | Implemented scope | Constraints |
 | --- | --- | --- |
-| BF16 / FP16 | Dense, attention and unquantized MoE paths | Individual backends may accept only a subset; BF16 dense DeepGEMM is opt-in on PPU 1.5 |
+| BF16 / FP16 | Dense, attention and unquantized MoE paths; the BF16 dense DeepGEMM path also writes FP32 logits (fp32 lm_head, fp32 MoE router) | Individual backends may accept only a subset; both BF16 dense DeepGEMM epilogues are opt-in on every chip (`VLLM_SAIL_DENSE_BF16_DEEPGEMM=1` for the BF16 output, `VLLM_SAIL_DENSE_BF16_FP32_OUT_DEEPGEMM=1` for the FP32 one, which needs a DeepGEMM exposing `gemm_bf16_bf16_fp32_nt`) |
 | INT8 | Quantized dense and MoE compute | Scaling mode and weight layout must match the selected backend |
 | FP8 | Dense, MoE and selected cache paths | Device-specific representation and scaling requirements; not every attention path accepts FP8 |
 | MXFP8 | Dense weight dequantization to BF16 using upstream emulation | FP8 E4M3 values with E8M0 scales for each 32 elements along K; execution uses BF16/FP16 linear operations |

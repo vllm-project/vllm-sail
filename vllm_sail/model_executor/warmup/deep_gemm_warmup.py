@@ -48,7 +48,6 @@ from vllm_sail.utils.deep_gemm import (
     get_deep_gemm_config,
     get_mk_alignment_for_contiguous_layout,
     int8_gemm_nt,
-    is_ppu_15,
     m_grouped_bf16_gemm_nt_nopad,
     m_grouped_fp4_gemm_nt_nopad,
     m_grouped_fp8_gemm_nt_nopad,
@@ -476,11 +475,11 @@ def _bf16_linear_may_use_deep_gemm(module: torch.nn.Module) -> bool:
     if getattr(module, "bias", None) is not None:
         return False
 
-    # DeepGEMM dense GEMM only supports K-major operands, and the BF16
-    # kernel is only optimized on PPU 1.5 for now.
+    # DeepGEMM dense GEMM only supports K-major operands; the env opt-in above
+    # already mirrors the runtime gate in `should_use_deepgemm_for_bf16_linear`,
+    # so warmup covers exactly what will run.
     return (
         has_deep_gemm()
-        and is_ppu_15()
         and w.ndim == 2
         and w.dtype == torch.bfloat16
         and w.is_contiguous()

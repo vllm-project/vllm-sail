@@ -15,10 +15,12 @@ Covered:
   ``ValueError``; every legal choice is accepted verbatim.
 * ``VLLM_SAIL_MOE_BACKEND`` overrides the unquantized / fp8 MoE candidate lists.
 * ``VLLM_SAIL_DENSE_BACKEND`` overrides the dense fp8 DeepGEMM decision.
-* ``VLLM_SAIL_DENSE_BF16_DEEPGEMM`` gates BF16 dense DeepGEMM auto-enable, and
-  only on ZW-890P (PPU 1.5). ZW-810E hardware supports BF16 DeepGEMM but its
-  default dense backend stays ACEXT, so the env does not flip it there -- the
-  "capability support != default auto-selection" distinction the user called out.
+* ``VLLM_SAIL_DENSE_BF16_DEEPGEMM`` gates BF16 dense DeepGEMM auto-enable. It
+  is off by default on every chip and needs an explicit `1` (or the
+  ``VLLM_PPU_*`` alias) -- the "capability support != default auto-selection"
+  distinction the user called out. ``VLLM_SAIL_DENSE_BF16_FP32_OUT_DEEPGEMM`` is
+  its sibling for the bf16->fp32 epilogue: the two resolve different DeepGEMM
+  entry points, so neither switch enables the other.
 * With every env unset, selection falls back exactly to the defaults asserted in
   ``test_backend_selection.py`` (the default path is not polluted by env logic).
 """
@@ -45,6 +47,7 @@ _ENV_ALIASES = {
     "VLLM_SAIL_MOE_BACKEND": "VLLM_PPU_MOE_BACKEND",
     "VLLM_SAIL_DENSE_BACKEND": "VLLM_PPU_DENSE_BACKEND",
     "VLLM_SAIL_DENSE_BF16_DEEPGEMM": "VLLM_PPU_DENSE_BF16_DEEPGEMM",
+    "VLLM_SAIL_DENSE_BF16_FP32_OUT_DEEPGEMM": "VLLM_PPU_DENSE_BF16_FP32_OUT_DEEPGEMM",
 }
 
 
@@ -140,7 +143,7 @@ class _Fp8MoeBackend(enum.Enum):
     TRITON = "TRITON"
 
 
-_TORCH = types.SimpleNamespace(bfloat16="bf16")
+_TORCH = types.SimpleNamespace(bfloat16="bf16", float32="fp32", float16="fp16")
 
 
 def _moe_config(*, batched: bool = False, has_bias: bool = False, backend="auto"):
@@ -214,8 +217,7 @@ def _should_use_fp8_linear(weight_shape=(128, 256)) -> bool:
     return bool(fn("bf16", weight_shape))
 
 
-def _should_use_bf16_linear(chip: str, *, bias: bool) -> bool:
-    platform = platform_double(chip)
+def _should_use_bf16_linear(chip: str, *, bias: bool, out_dtype=None) -> bool:
     x = types.SimpleNamespace(dtype="bf16", is_contiguous=lambda: True)
     weight = types.SimpleNamespace(
         dtype="bf16", dim=lambda: 2, is_contiguous=lambda: True
@@ -226,12 +228,10 @@ def _should_use_bf16_linear(chip: str, *, bias: bool) -> bool:
         {
             "ppu_envs": ppu_envs,
             "torch": _TORCH,
-            "current_platform": platform,
-            "has_deep_gemm": lambda: True,
-            "is_ppu_15": lambda: platform.is_device_capability((8, 9)),
+            "is_deep_gemm_supported": lambda: True,
         },
     )
-    return bool(fn(x, weight, object() if bias else None))
+    return bool(fn(x, weight, object() if bias else None, out_dtype=out_dtype))
 
 
 # ===========================================================================
@@ -345,23 +345,59 @@ def test_dense_fp8_linear_still_respects_shape_gate(monkeypatch) -> None:
 
 
 @pytest.mark.parametrize("chip", CHIPS)
-def test_dense_bf16_deepgemm_env_autonables_only_on_890p(monkeypatch, chip) -> None:
-    """BF16 dense DeepGEMM auto-enable needs the env *and* PPU 1.5 (890P).
+def test_dense_bf16_deepgemm_is_optin_on_every_chip(monkeypatch, chip) -> None:
+    """BF16 dense DeepGEMM is off until the env explicitly turns it on.
 
-    ZW-810E hardware supports BF16 DeepGEMM, but its default dense backend is
-    ACEXT, so ``VLLM_SAIL_DENSE_BF16_DEEPGEMM=1`` must not flip BF16 dense onto
-    DeepGEMM there -- capability support is not default auto-selection.
+    The gate itself is chip-independent now: the path depends on the installed
+    DeepGEMM API, so ``VLLM_SAIL_DENSE_BF16_DEEPGEMM=1`` (or the ``VLLM_PPU_*``
+    alias) is what enables it on either chip.
     """
     name = "VLLM_SAIL_DENSE_BF16_DEEPGEMM"
+    alias = _ENV_ALIASES[name]
 
     _clear_env(monkeypatch, name)
     assert _should_use_bf16_linear(chip, bias=False) is False
 
+    monkeypatch.setenv(name, "0")
+    assert _should_use_bf16_linear(chip, bias=False) is False
+
     monkeypatch.setenv(name, "1")
-    assert _should_use_bf16_linear(chip, bias=False) is (chip == "890p")
+    assert _should_use_bf16_linear(chip, bias=False) is True
+
+    # The legacy PPU spelling is an explicit request too.
+    _clear_env(monkeypatch, name)
+    monkeypatch.setenv(alias, "1")
+    assert _should_use_bf16_linear(chip, bias=False) is True
 
     # A present bias always forces the acblas/F.linear fallback.
     assert _should_use_bf16_linear(chip, bias=True) is False
+
+
+@pytest.mark.parametrize("chip", CHIPS)
+def test_dense_bf16_fp32_out_has_its_own_switch(monkeypatch, chip) -> None:
+    """The bf16->fp32 epilogue needs ``..._FP32_OUT_...``, not the BF16 switch.
+
+    The two epilogues resolve different DeepGEMM entry points
+    (``gemm_bf16_bf16_fp32_nt`` only ships in newer builds), so neither switch
+    enables the other, and any other output dtype is rejected so an fp16/fp64
+    caller cannot be silently downcast.
+    """
+    bf16_name = "VLLM_SAIL_DENSE_BF16_DEEPGEMM"
+    fp32_name = "VLLM_SAIL_DENSE_BF16_FP32_OUT_DEEPGEMM"
+    for name in (bf16_name, fp32_name):
+        _clear_env(monkeypatch, name)
+
+    assert _should_use_bf16_linear(chip, bias=False, out_dtype=_TORCH.float32) is False
+
+    monkeypatch.setenv(bf16_name, "1")
+    assert _should_use_bf16_linear(chip, bias=False, out_dtype=_TORCH.float32) is False
+
+    _clear_env(monkeypatch, bf16_name)
+    monkeypatch.setenv(fp32_name, "1")
+    assert _should_use_bf16_linear(chip, bias=False, out_dtype=_TORCH.float32) is True
+    # The fp32 switch leaves the BF16 epilogue alone.
+    assert _should_use_bf16_linear(chip, bias=False) is False
+    assert _should_use_bf16_linear(chip, bias=False, out_dtype=_TORCH.float16) is False
 
 
 def test_env_unset_matches_default_selection(monkeypatch) -> None:

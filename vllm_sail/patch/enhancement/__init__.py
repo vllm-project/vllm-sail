@@ -40,6 +40,8 @@ mxfp4.install()
 from vllm_sail.patch.enhancement import triton_moe  # noqa: F401
 
 from vllm_sail.patch.enhancement import dense  # noqa: F401
+# Needs the fp32-output custom op registered by ``dense``.
+from vllm_sail.patch.enhancement import dense_fp32_out  # noqa: F401
 
 from vllm_sail.patch.enhancement import fp8_quant  # noqa: F401
 from vllm_sail.patch.enhancement.models import qwen3_fused_quant  # noqa: F401
