@@ -22,8 +22,9 @@ Plugin headers resolve within that directory before searching upstream headers.
 
 The upstream generator uses [sailify](https://github.com/t-head/sailify) and
 declared transformations to produce HGGC build inputs. Upstream source
-filenames are retained for traceability; CMake assigns device sources to the HG
-language. Edit upstream inputs or transformations, then regenerate. Never
+filenames are retained except that compiled `.cu` sources become `.hg`, so
+CMake's HG language compiles every translation unit directly. Edit upstream
+inputs or transformations, then regenerate. Never
 hand-edit the generated upstream corpus or `excluded_ops.toml`; its manifest
 is the editable file inside `csrc/upstream/`.
 
@@ -72,8 +73,8 @@ only after regeneration, compilation and device correctness checks pass.
 An empty plugin architecture setting uses `PYTORCH_SAIL_ARCH` or the default
 list. An empty standard uses `20`, and empty flags add no options.
 
-Native extensions are enabled by default. The build gate checks for SAIL
-PyTorch's compatibility header, `hgcc` and CMake, and fails with the first
+Native extensions are enabled by default. The build gate checks that PyTorch
+is importable and that `hgcc` and CMake are available, and fails with the first
 missing prerequisite. Only `VLLM_SAIL_SKIP_EXT=1` produces a Python-only
 package. Run the preflight in the installation guide before building a package
 for inference.
