@@ -8,7 +8,7 @@ from vllm.triton_utils import tl, triton
 
 from vllm_sail.patch.utils import PATCH_MARKER, patch
 
-_AFFECTED = ">=0.30.0,<0.31.0"
+_AFFECTED = ">=0.31.0,<0.32.0"
 _FACTORY = "vllm.models.deepseek_v41.nvidia.engram"
 
 

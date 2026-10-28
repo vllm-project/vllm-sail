@@ -42,6 +42,7 @@ def test_adaptive_indexer_gate_and_flattening(
     platform = types.SimpleNamespace(
         is_ppu=lambda: ppu,
         is_cuda=lambda: True,
+        is_rocm=lambda: False,
         is_device_capability_family=lambda value: capability == value,
     )
     modules("vllm.platforms", current_platform=platform)
@@ -70,6 +71,7 @@ def test_adaptive_indexer_gate_and_flattening(
     for name in (
         "_supports_varlen_paged_mqa_logits",
         "_supports_flattened_device_query_lens",
+        "_rocm_supports_flattened_device_query_lens",
         "_supports_native_decode",
         "_use_flattening",
     ):
@@ -84,6 +86,7 @@ def test_adaptive_indexer_gate_and_flattening(
     # Even next_n=2, normally native, must flatten with adaptive trimming.
     config = types.SimpleNamespace(
         num_speculative_tokens=1,
+        model_config=None,
         speculative_config=types.SimpleNamespace(enable_adaptive_verification=True),
     )
     assert target._use_flattening(config) is expected

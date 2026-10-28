@@ -27,6 +27,7 @@ def test_indexer_cache_pages(
         dtype: object
         tokens_per_state: int
         alignment: int
+        block_stride_alignment: int | None = None
         page_size_padded: int | None = None
 
         def __post_init__(self):
@@ -66,6 +67,7 @@ def test_indexer_cache_pages(
     cache = cache_cls()
     cache.cache_config = SimpleNamespace(block_size=manager_block)
     cache.compress_ratio, cache.head_dim, cache.dtype = ratio, 132, "uint8"
+    cache.sparse_logits = False
     config = SimpleNamespace(cache_config=SimpleNamespace(cache_dtype="fp8_ds_mla"))
     before = cache.get_kv_cache_spec(config)
     harness.load_patch("vllm_sail/patch/enhancement/models/deepseek_v41_indexer.py")
@@ -76,6 +78,9 @@ def test_indexer_cache_pages(
         {"MultipleOf": type("MultipleOf", (), {})},
     )
     selected = select(spec.block_size, [backend])
+    assert backend.get_supported_kernel_block_sizes(kv_cache_spec=spec) == (
+        [64, 128] if ppu else [64 if capability == 90 else 128]
+    )
     if ppu:
         assert spec.block_size == selected == 64 * ratio
         assert spec.block_size // spec.tokens_per_state == 64

@@ -11,7 +11,7 @@ from vllm_sail.patch.utils import patch
 
 _cache_spec = attention.DeepseekV4IndexerCache.get_kv_cache_spec
 _kernel_sizes = DeepseekV41IndexerBackend.get_supported_kernel_block_sizes
-_AFFECTED = ">=0.30.0,<0.31.0"
+_AFFECTED = ">=0.31.0,<0.32.0"
 
 
 @patch(
@@ -48,7 +48,7 @@ def get_kv_cache_spec(self, vllm_config):
     affected_versions=_AFFECTED,
     remove_when="The indexer backend obtains supported page sizes from the PPU kernel contract.",
 )
-def get_supported_kernel_block_sizes() -> list[int]:
+def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[int]:
     if current_platform.is_ppu():
         return [64, 128]
-    return _kernel_sizes()
+    return _kernel_sizes(kv_cache_spec=kv_cache_spec)

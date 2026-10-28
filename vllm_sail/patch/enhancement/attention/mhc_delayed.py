@@ -12,7 +12,7 @@ from vllm.platforms import current_platform
 from vllm_sail.patch.utils import PATCH_MARKER, patch
 
 _MODULE = "vllm.model_executor.kernels.mhc.tilelang"
-_AFFECTED = ">=0.30.0,<0.31.0"
+_AFFECTED = ">=0.31.0,<0.32.0"
 _REASON = "Delayed mHC bypasses the PPU prenorm helper and its zeroed single-split SAIL accumulators."
 _REMOVE_WHEN = "Upstream delayed mHC launchers call a platform-dispatched prenorm helper."
 
@@ -60,6 +60,7 @@ def mhc_pre_delayed_tilelang(
         Post and residual coefficients, optionally normalized BF16 layer input,
         and the next FP32 pre-mix, with shapes (tokens, hc_mult, 1),
         (tokens, hc_mult, hc_mult), (tokens, hidden_size), and (tokens, hc_mult).
+
     """
     from vllm.model_executor.kernels.mhc.tilelang_kernels import (
         _HC_PRENORM_GEMM_TILELANG_KERNEL,
@@ -259,6 +260,7 @@ def mhc_fused_post_pre_delayed_tilelang(
         (tokens, hc_mult, hidden_size), (tokens, hc_mult, 1),
         (tokens, hc_mult, hc_mult), (tokens, hidden_size), (tokens, hc_mult),
         and (tokens, hidden_size).
+
     """
     from vllm.model_executor.kernels.mhc.tilelang_kernels import (
         _HC_PRENORM_GEMM_TILELANG_KERNEL,
