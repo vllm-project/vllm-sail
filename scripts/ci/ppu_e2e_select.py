@@ -52,8 +52,16 @@ def _select(catalog: list[dict], models: str, category: str) -> list[dict]:
 
 
 def build_matrix(catalog: list[dict], models: str) -> dict:
-    """Return the smoke matrix; legacy entries without category stay smoke."""
-    return {"include": _select(catalog, models, "smoke")}
+    """Return smoke entries plus a legacy checkpoint alias for old callers."""
+    include = []
+    for entry in _select(catalog, models, "smoke"):
+        selected = dict(entry)
+        # Default-branch workflow_dispatch callers may still read `checkpoint`.
+        # Its value is a model ID, never a runner-specific filesystem path.
+        if "model_id" in selected:
+            selected.setdefault("checkpoint", selected["model_id"])
+        include.append(selected)
+    return {"include": include}
 
 
 def build_accuracy_matrix(catalog: list[dict], models: str) -> dict:

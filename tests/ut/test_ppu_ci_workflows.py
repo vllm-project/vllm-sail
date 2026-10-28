@@ -1154,7 +1154,8 @@ def test_runtime_workflows_use_the_checked_in_docker_wrapper():
     assert (
         model_step["env"]["PPU_CI_SOURCE_DIR"] == "${{ steps.runtime.outputs.source }}"
     )
-    assert model_step["env"]["MODEL_PATH"] == "${{ matrix.model.checkpoint }}"
+    assert model_step["env"]["MODEL_ID"] == "${{ matrix.model.model_id }}"
+    assert "MODEL_PATH" not in model_step["env"]
     assert "ppu-scheduler-action" not in (WORKFLOWS / "_ppu-pin-ut.yaml").read_text()
     assert (
         "ppu-scheduler-action" not in (WORKFLOWS / "_ppu-model-tests.yaml").read_text()

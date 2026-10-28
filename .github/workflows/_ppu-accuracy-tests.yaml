@@ -1,6 +1,7 @@
 name: PPU accuracy tests
 
-# Called only by ppu-debug.yaml; accuracy is intentionally outside the per-PR gate.
+# Called by ppu-debug.yaml (manual single target) and ppu-accuracy-nightly.yaml
+# (scheduled). Accuracy is intentionally outside the per-PR gate.
 
 on:
   workflow_call:
@@ -26,7 +27,7 @@ on:
       hf_home:
         description: Host Hugging Face cache root
         type: string
-        default: /ppuswhome/jingxi.zzy/hf_cache
+        default: ""
       gsm8k_dataset_path:
         description: Host GSM8K dataset directory
         type: string
@@ -38,7 +39,11 @@ permissions:
 cache-mode: none
 
 concurrency:
-  group: accuracy-ppu-${{ github.ref }}-${{ inputs.pr_mode && github.run_id || inputs.build_run_id }}
+  # Keyed by (build, requested models): one nightly dispatches several models
+  # of the same build, and those lanes must not cancel each other. Lanes that
+  # ask for the same set still queue, which keeps a runner's exclusive lock
+  # from being taken by a duplicate dispatch.
+  group: accuracy-ppu-${{ github.ref }}-${{ inputs.pr_mode && github.run_id || inputs.build_run_id }}-${{ inputs.models }}
   cancel-in-progress: false
 
 jobs:
@@ -146,7 +151,7 @@ jobs:
           PPU_CI_DEVICE_COUNT: ${{ matrix.model.ppu_count }}
           PPU_CI_REQUIRE_PR_ARTIFACT: ${{ inputs.pr_mode }}
           PPU_CI_WHEEL_SOURCE_SHA: ${{ inputs.wheel_source_sha || inputs.pr_head_sha || github.sha }}
-          HF_HOME: ${{ inputs.hf_home }}
+          PPU_CI_HF_HOME: ${{ inputs.hf_home }}
           HF_HUB_OFFLINE: "1"
           GSM8K_DATASET_PATH: ${{ inputs.gsm8k_dataset_path }}
           MODEL_KEY: ${{ matrix.model.model_key }}

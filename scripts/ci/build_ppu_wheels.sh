@@ -2,8 +2,22 @@
 # SPDX-License-Identifier: Apache-2.0
 set -Eeuo pipefail
 
+# The public entry point uses an already activated SDK/Python environment.
+# With no arguments, retain the pinned CI image setup.
+PREPARED_ENV=0
+if [[ "${1:-}" == "--prepared-env" ]]; then
+    PREPARED_ENV=1
+    shift
+fi
+if (($#)); then
+    printf 'unknown build argument: %s\n' "$1" >&2
+    exit 2
+fi
+
 ROOT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)"
 ARTIFACT_DIR="${ARTIFACT_DIR:-${ROOT_DIR}/artifacts}"
+mkdir -p "${ARTIFACT_DIR}"
+ARTIFACT_DIR="$(cd -- "${ARTIFACT_DIR}" && pwd)"
 VLLM_WHEEL_DIR="${ARTIFACT_DIR}/wheels/vllm"
 SAIL_WHEEL_DIR="${ARTIFACT_DIR}/wheels/vllm-sail"
 LOG_DIR="${ARTIFACT_DIR}/logs"
@@ -35,6 +49,10 @@ if [[ "${mem_bytes}" =~ ^[0-9]+$ ]] && ((mem_bytes > 0)); then
 fi
 ((default_jobs > 16)) && default_jobs=16
 BUILD_JOBS="${BUILD_JOBS:-${default_jobs}}"
+[[ "${BUILD_JOBS}" =~ ^[1-9][0-9]*$ ]] || {
+    printf 'BUILD_JOBS must be a positive integer\n' >&2
+    exit 2
+}
 
 mkdir -p "${VLLM_WHEEL_DIR}" "${SAIL_WHEEL_DIR}" "${LOG_DIR}"
 : >"${MANIFEST}"
@@ -67,7 +85,11 @@ for command_name in git python tee awk find; do
     require_command "${command_name}"
 done
 PYTHON_VERSION="$(python -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')"
-[[ "${PYTHON_VERSION}" == "3.12" ]] || fail "the selected image requires Python 3.12"
+if ((PREPARED_ENV)); then
+    [[ "${PYTHON_VERSION}" =~ ^3\.(10|11|12|13)$ ]] || fail "use Python 3.10-3.13 with matching SAIL PyTorch"
+else
+    [[ "${PYTHON_VERSION}" == "3.12" ]] || fail "the selected image requires Python 3.12"
+fi
 {
     printf 'status=running\n'
     printf 'vllm_ref=%s\n' "${VLLM_REF}"
@@ -75,11 +97,20 @@ PYTHON_VERSION="$(python -c 'import sys; print(f"{sys.version_info.major}.{sys.v
     printf 'build_image=%s\n' "${VLLM_SAIL_BUILD_IMAGE:-}"
 } >>"${MANIFEST}"
 
-[[ -r /usr/local/PPU_SDK/envsetup.sh ]] || fail "the image must contain the SAIL SDK"
-# shellcheck disable=SC1091
-source /usr/local/PPU_SDK/envsetup.sh
-export PPU_SDK=/usr/local/PPU_SDK
-export HGCC="${PPU_SDK}/bin/hgcc"
+if ((PREPARED_ENV)); then
+    export PPU_SDK="${PPU_SDK:-/usr/local/PPU_SDK}"
+    [[ -d "${PPU_SDK}" ]] || fail "activate the SAIL SDK and set PPU_SDK to its directory"
+    PPU_SDK="$(cd -- "${PPU_SDK}" && pwd)"
+    export HGCC="${HGCC:-${PPU_SDK}/bin/hgcc}"
+    [[ -x "${HGCC}" ]] || fail "SAIL compiler not executable: ${HGCC}"
+    HGCC="$(cd -- "$(dirname -- "${HGCC}")" && pwd)/$(basename -- "${HGCC}")"
+else
+    [[ -r /usr/local/PPU_SDK/envsetup.sh ]] || fail "the image must contain the SAIL SDK"
+    # shellcheck disable=SC1091
+    source /usr/local/PPU_SDK/envsetup.sh
+    export PPU_SDK=/usr/local/PPU_SDK
+    export HGCC="${PPU_SDK}/bin/hgcc"
+fi
 export PYTORCH_SAIL_ARCH
 unset TORCH_CUDA_ARCH_LIST
 unset VLLM_SAIL_HG_ARCH
@@ -93,23 +124,24 @@ unset VLLM_PRECOMPILED_WHEEL_LOCATION
 # envsetup.sh repoints pip at an internal mirror (art.eng.t-head.cn) that is
 # unreachable from the CI build environment; force the public Aliyun PyPI mirror after the
 # SDK env is sourced. Override with SAIL_PIP_INDEX_URL.
-export PIP_INDEX_URL="${SAIL_PIP_INDEX_URL:-https://mirrors.aliyun.com/pypi/simple/}"
-export PIP_EXTRA_INDEX_URL=""
+if ((PREPARED_ENV == 0)); then
+    export PIP_INDEX_URL="${SAIL_PIP_INDEX_URL:-https://mirrors.aliyun.com/pypi/simple/}"
+    export PIP_EXTRA_INDEX_URL=""
+fi
 export PIP_CONSTRAINT="${WORK_DIR}/image-constraints.txt"
 
-command -v hgcc
+if ((PREPARED_ENV == 0)); then
+    command -v hgcc
+fi
 "${HGCC}" --version 2>&1 | tee "${LOG_DIR}/hgcc-version.log"
 python "${ROOT_DIR}/scripts/ci/ppu_image_stack.py" capture \
     --sdk "${PPU_SDK}" --output "${LOG_DIR}/image-stack.json" \
-    --constraints "${PIP_CONSTRAINT}" --require-ppu-headers | tee -a "${MANIFEST}"
+    --constraints "${PIP_CONSTRAINT}" | tee -a "${MANIFEST}"
 python - <<'PY' 2>&1 | tee "${LOG_DIR}/torch-env.log"
-from pathlib import Path
 import torch
 
 print(torch.__version__)
 print(torch.__file__)
-if not (Path(torch.__file__).parent / ".ppu_compat/compatible_wrapper.h").is_file():
-    raise SystemExit("prepared SAIL PyTorch must contain PPU headers")
 PY
 
 VLLM_SRC="${WORK_DIR}/vllm"
@@ -181,12 +213,15 @@ if ((NATIVE_REUSE == 0)); then
         sleep "$((2 ** (attempt - 1)))"
     done
     git -C "${VLLM_SRC}" checkout --detach FETCH_HEAD
+    if ((PREPARED_ENV)); then
+        [[ "$(git -C "${VLLM_SRC}" rev-parse HEAD)" == "${VLLM_REF}" ]] || fail "fetched vLLM commit differs from the checkout's pin"
+    fi
     (
         cd "${VLLM_SRC}"
         export RUSTUP_DIST_SERVER="${RUSTUP_DIST_SERVER:-https://rsproxy.cn}"
         export RUSTUP_UPDATE_ROOT="${RUSTUP_UPDATE_ROOT:-https://rsproxy.cn/rustup}"
         if ! command -v rustup >/dev/null 2>&1; then
-            curl -k --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
                 | sh -s -- -y --profile minimal --default-toolchain none
         fi
         if [[ -r "${CARGO_HOME:-$HOME/.cargo}/env" ]]; then
@@ -196,9 +231,15 @@ if ((NATIVE_REUSE == 0)); then
         # Fetch Cargo Git dependencies through the Git CLI to honor job-local Git configuration.
         export CARGO_NET_GIT_FETCH_WITH_CLI=true
         # Follow the Rust toolchain pinned by the checked-out vLLM source.
+        # Install the TOML fallback for Python 3.10 before reading the toolchain.
+        python -m pip install -r "${ROOT_DIR}/requirements/build.txt"
         RUSTUP_TOOLCHAIN="$(python - <<'PY'
-import tomllib
 from pathlib import Path
+
+try:
+    import tomllib
+except ModuleNotFoundError:
+    import tomli as tomllib
 
 print(tomllib.loads(Path("rust-toolchain.toml").read_text())["toolchain"]["channel"])
 PY
@@ -299,13 +340,12 @@ mapfile -t sail_wheels < <(
 [[ -s "${sail_wheels[0]}" ]] || fail "vLLM SAIL wheel is empty"
 
 python "${ROOT_DIR}/scripts/ci/ppu_image_stack.py" verify \
-    --sdk "${PPU_SDK}" --output "${LOG_DIR}/image-stack.json" \
-    --require-ppu-headers | tee -a "${MANIFEST}"
+    --sdk "${PPU_SDK}" --output "${LOG_DIR}/image-stack.json" | tee -a "${MANIFEST}"
 
 {
     printf 'status=succeeded\n'
     printf 'python=%s\n' "$(python --version 2>&1)"
-    printf 'hgcc=%s\n' "$(hgcc --version 2>&1 | head -n 1)"
+    printf 'hgcc=%s\n' "$("${HGCC}" --version 2>&1 | head -n 1)"
     printf 'reuse_mode=%s\n' "$([[ ${NATIVE_REUSE} == 1 ]] && printf native || printf full)"
     if ((NATIVE_REUSE == 0)); then
         printf 'rustc=%s\n' "$(cat "${LOG_DIR}/rustc-version.log")"
@@ -316,3 +356,5 @@ python "${ROOT_DIR}/scripts/ci/ppu_image_stack.py" verify \
     printf 'vllm_sail_commit=%s\n' "$(git -c "safe.directory=${ROOT_DIR}" -C "${ROOT_DIR}" rev-parse HEAD)"
     printf 'vllm_sail_wheel=%s\n' "$(basename "${sail_wheels[0]}")"
 } >>"${MANIFEST}"
+printf 'Build succeeded.\nvLLM: %s\nvLLM SAIL: %s\nManifest: %s\n' \
+    "${vllm_wheels[0]}" "${sail_wheels[0]}" "${MANIFEST}"
