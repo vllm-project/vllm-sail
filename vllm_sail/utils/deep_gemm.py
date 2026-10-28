@@ -230,6 +230,11 @@ _set_compile_mode_impl: Callable[..., Any] | None = None
 _get_compile_mode_impl: Callable[..., Any] | None = None
 _moe_align_block_size_impl: Callable[..., Any] | None = None
 
+# fused activation (+ optional quant)
+_activation_quant_mode_impl: Any | None = None
+_silu_and_mul_impl: Callable[..., Any] | None = None
+_situ_and_mul_impl: Callable[..., Any] | None = None
+
 
 def _lazy_init() -> None:
     """Import deep_gemm and resolve symbols on first use."""
@@ -255,6 +260,7 @@ def _lazy_init() -> None:
     global _get_mk_alignment_for_contiguous_layout_impl
     global _transform_sf_into_required_layout_impl
     global _moe_align_block_size_impl
+    global _activation_quant_mode_impl, _silu_and_mul_impl, _situ_and_mul_impl
 
     # fast path
     if (
@@ -286,6 +292,7 @@ def _lazy_init() -> None:
         or _get_mk_alignment_for_contiguous_layout_impl is not None
         or _transform_sf_into_required_layout_impl is not None
         or _moe_align_block_size_impl is not None
+        or _silu_and_mul_impl is not None
     ):
         return
 
@@ -350,6 +357,9 @@ def _lazy_init() -> None:
     _get_compile_mode_impl = getattr(_dg, "get_compile_mode", None)
     _set_compile_mode_impl = getattr(_dg, "set_compile_mode", None)
     _moe_align_block_size_impl = getattr(_dg, "moe_align_block_size", None)
+    _activation_quant_mode_impl = getattr(_dg, "ActivationQuantMode", None)
+    _silu_and_mul_impl = getattr(_dg, "silu_and_mul", None)
+    _situ_and_mul_impl = getattr(_dg, "situ_and_mul", None)
     DeepGemmQuantScaleFMT.init_oracle_cache()
 
 
@@ -514,6 +524,42 @@ def moe_align_block_size(*args, **kwargs):
     if _moe_align_block_size_impl is None:
         return _missing(*args, **kwargs)
     return _moe_align_block_size_impl(*args, **kwargs)
+
+
+def has_fused_act_quant() -> bool:
+    """Whether DeepGEMM exposes the fused activation(+quant) kernels.
+
+    Older DeepGEMM builds only ship the activation inside the GEMM epilogue and
+    therefore lack the standalone `silu_and_mul` / `situ_and_mul` entry points.
+    """
+    _lazy_init()
+    return (
+        _activation_quant_mode_impl is not None
+        and _silu_and_mul_impl is not None
+        and _situ_and_mul_impl is not None
+    )
+
+
+def get_activation_quant_mode() -> Any:
+    """Return DeepGEMM's `ActivationQuantMode` enum."""
+    _lazy_init()
+    if _activation_quant_mode_impl is None:
+        return _missing()
+    return _activation_quant_mode_impl
+
+
+def silu_and_mul(*args, **kwargs):
+    _lazy_init()
+    if _silu_and_mul_impl is None:
+        return _missing(*args, **kwargs)
+    return _silu_and_mul_impl(*args, **kwargs)
+
+
+def situ_and_mul(*args, **kwargs):
+    _lazy_init()
+    if _situ_and_mul_impl is None:
+        return _missing(*args, **kwargs)
+    return _situ_and_mul_impl(*args, **kwargs)
 
 
 def fp8_mqa_logits(
@@ -1161,4 +1207,8 @@ __all__ = [
     "get_col_major_tma_aligned_tensor",
     "get_mk_alignment_for_contiguous_layout",
     "moe_align_block_size",
+    "has_fused_act_quant",
+    "get_activation_quant_mode",
+    "silu_and_mul",
+    "situ_and_mul",
 ]

@@ -1,10 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from typing import Any
+
 import torch
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.logger import init_logger
-from vllm.model_executor.layers.fused_moe.activation import MoEActivation
+from vllm.model_executor.layers.fused_moe.activation import (
+    ApplyMoEActivationConfig,
+    MoEActivation,
+)
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEParallelConfig,
@@ -50,9 +55,12 @@ from vllm_sail.model_executor.layers.quantization.utils.mxfp4_utils import (
 )
 from vllm_sail.utils.deep_gemm import (
     DeepGemmQuantScaleFMT,
+    get_activation_quant_mode,
     get_deep_gemm_config,
     get_mk_alignment_for_contiguous_layout,
+    has_fused_act_quant,
     is_deep_gemm_supported,
+    is_ppu_15,
     m_grouped_bf16_gemm_nt_nopad,
     m_grouped_fp4_gemm_nt_fused,
     m_grouped_fp4_gemm_nt_nopad,
@@ -61,6 +69,8 @@ from vllm_sail.utils.deep_gemm import (
     m_grouped_w4a16_gemm_nt_fused,
     m_grouped_w4a16_gemm_nt_nopad,
     moe_align_block_size,
+    silu_and_mul,
+    situ_and_mul,
 )
 
 logger = init_logger(__name__)
@@ -152,6 +162,66 @@ def _valid_deep_gemm(
         return False
 
     return True
+
+
+def _deepgemm_act_mul(
+    input: torch.Tensor,
+    activation: MoEActivation,
+    mode: Any,
+    activation_config: ApplyMoEActivationConfig,
+) -> tuple[torch.Tensor, ...] | torch.Tensor | None:
+    """Run DeepGEMM's fused activation(+mul, +quant) kernel for `mode`.
+
+    `silu_and_mul` / `situ_and_mul` fold the activation, the gate*up multiply
+    and the quantization selected by `mode` into a single kernel. The quantizing
+    modes return `(values, scales)`; `ActivationQuantMode.BF16` returns the
+    activated values alone. Returns ``None`` when the activation (or its
+    parameterization) is not implemented by that kernel, so the caller can fall
+    back to `self.activation` followed by a separate quantize.
+    """
+    if activation == MoEActivation.SILU:
+        limit = activation_config.clamp_limit
+        if limit is not None and (
+            activation_config.alpha != 1.0 or activation_config.beta != 0.0
+        ):
+            # alpha/beta only feed the SWIGLUOAI epilogue of the fallback; the
+            # fused kernel implements the plain SwiGLU(-with-clamp) math.
+            return None
+        return silu_and_mul(
+            mode,
+            input,
+            swiglu_limit=None if limit is None else float(limit),
+        )
+    if activation == MoEActivation.SITU:
+        beta = activation_config.activation_situ_beta
+        if beta is None:
+            # Mirror the upstream fallback, which refuses to guess a beta.
+            return None
+        linear_beta = activation_config.activation_situ_linear_beta
+        if linear_beta is not None and linear_beta <= 0:
+            # <= 0 means "unset" to the vLLM kernel; DeepGEMM wants None.
+            linear_beta = None
+        return situ_and_mul(
+            mode,
+            input,
+            beta=float(beta),
+            linear_beta=None if linear_beta is None else float(linear_beta),
+        )
+    return None
+
+
+def _fused_act_quant_available() -> bool:
+    """Whether DeepGEMM's fused activation kernels may be used at all.
+
+    `silu_and_mul` / `situ_and_mul` assert `is_ppu1v5_device()` inside the C++
+    entry point, so the gate has to cover the device and not just the symbol
+    availability of the installed DeepGEMM build.
+    """
+    return (
+        ppu_envs.VLLM_SAIL_DEEPGEMM_MOE_FUSED_ACT_QUANT
+        and has_fused_act_quant()
+        and is_ppu_15()
+    )
 
 
 class PPUDeepGemmExperts(mk.FusedMoEExpertsModular):
@@ -270,6 +340,66 @@ class PPUDeepGemmExperts(mk.FusedMoEExpertsModular):
         output = (M, K)
         return (workspace1, workspace2, output)
 
+    def _deepgemm_act_quant(
+        self,
+        input: torch.Tensor,
+        output: torch.Tensor,
+        activation: MoEActivation,
+    ) -> tuple[torch.Tensor, torch.Tensor | None] | None:
+        """Run DeepGEMM's fused activation (+ A2 quant) when it fits `output`.
+
+        `silu_and_mul` / `situ_and_mul` write the activated (`[M, 2N] -> [M, N]`)
+        result straight into the layout consumed by the second GEMM, replacing
+        `self.activation` plus a separate quantize pass. FP8 destinations use
+        the channel/block quantizing epilogue; BF16 destinations (w4a16 or an
+        unquantized second GEMM) use the values-only epilogue and report no
+        scales. Int8 has no equivalent epilogue, and the UE8M0-packed scale
+        layout has no fused producer either.
+
+        Returns ``None`` when the switch is off, the build/device lacks the
+        kernels, or the activation/shape is not supported, so the caller keeps
+        the two-kernel fallback.
+        """
+        if not _fused_act_quant_available():
+            return None
+        if input.dtype != torch.bfloat16 or not input.is_contiguous():
+            return None
+        # Every epilogue derives one row from both gate halves, so the
+        # destination width pins the expected input width.
+        if output.size(-1) * 2 != input.size(-1):
+            return None
+
+        mode_enum = get_activation_quant_mode()
+        if output.dtype == torch.bfloat16:
+            # Values-only epilogue: the second GEMM stays BF16, which is the
+            # w4a16 and unquantized path.
+            mode = getattr(mode_enum, "BF16", None)
+        elif output.dtype == torch.float8_e4m3fn:
+            if DeepGemmQuantScaleFMT.from_oracle() == DeepGemmQuantScaleFMT.UE8M0:
+                # Scales are packed 4-per-int32 for the GEMM; the fused
+                # kernels can only emit float32 (or MX) scales.
+                return None
+            if self.block_shape is None:
+                # Channel-wise A2 quant: one float32 scale per row.
+                mode = getattr(mode_enum, "FP8_CHANNEL", None)
+            elif self.block_shape[1] != 128 or output.size(-1) % 128 != 0:
+                # Block-wise A2 quant only covers 128-element groups.
+                return None
+            else:
+                mode = getattr(mode_enum, "FP8_BLOCK", None)
+        else:
+            # Int8 has no equivalent epilogue.
+            return None
+
+        if mode is None:
+            return None
+        fused = _deepgemm_act_mul(input, activation, mode, self.activation_config)
+        if fused is None:
+            return None
+        # The epilogue decides: the quantizing modes append their scales, the
+        # BF16 mode returns the values alone.
+        return fused if isinstance(fused, tuple) else (fused, None)
+
     def _act_mul_quant(
         self, input: torch.Tensor, output: torch.Tensor, activation: MoEActivation
     ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -280,8 +410,11 @@ class PPUDeepGemmExperts(mk.FusedMoEExpertsModular):
 
         block_k = self.block_shape[1] if self.block_shape else activation_out_dim
 
-        # 1. DeepGemm UE8M0: use packed per-token-group quant
-        if scale_fmt == DeepGemmQuantScaleFMT.UE8M0:
+        # 1. DeepGemm UE8M0: use packed per-token-group quant. The packed
+        # scales only exist for an FP8 A2, so BF16 destinations skip this.
+        if scale_fmt == DeepGemmQuantScaleFMT.UE8M0 and (
+            output.dtype == torch.float8_e4m3fn
+        ):
             act_out = torch.empty(
                 (M_sum, activation_out_dim), dtype=input.dtype, device=input.device
             )
@@ -297,16 +430,12 @@ class PPUDeepGemmExperts(mk.FusedMoEExpertsModular):
             )
             return a2q, a2q_scale
 
-        # 2. Hopper / non‑E8M0: prefer the fused SiLU+mul+quant kernel
-        # if activation == MoEActivation.SILU:
-        #     use_ue8m0 = scale_fmt == DeepGemmQuantScaleFMT.FLOAT32_CEIL_UE8M0
-        #     return silu_mul_per_token_group_quant_fp8_colmajor(
-        #         input=input,
-        #         output=output,
-        #         use_ue8m0=use_ue8m0,
-        #     )
+        # 2. Hopper / non-E8M0: prefer the fused activation+mul+quant kernel
+        fused = self._deepgemm_act_quant(input, output, activation)
+        if fused is not None:
+            return fused
 
-        # 3. fallback path for non-SiLU activations in non‑UE8M0 cases.
+        # 3. fallback path for activations the fused kernel does not implement.
         act_out = torch.empty(
             (M_sum, activation_out_dim), dtype=input.dtype, device=input.device
         )
@@ -789,15 +918,48 @@ class PPUDeepGemmExpertsMXFP4(mk.FusedMoEExpertsModular):
         output = (M, K)
         return (workspace1, workspace2, output)
 
+    def _deepgemm_act_quant(
+        self,
+        input: torch.Tensor,
+        activation: MoEActivation,
+        activation_out_dim: int,
+    ) -> tuple[torch.Tensor, torch.Tensor] | None:
+        """Run DeepGEMM's fused activation + MXFP4 quant when applicable.
+
+        `silu_and_mul` / `situ_and_mul` fold the activation, the gate*up
+        multiply and the MXFP4 downcast into a single kernel, replacing
+        `self.activation` + `downcast_to_mxfp4`. They return a
+        `(uint8 (M, dim / 2), uint16 M-major scales)` pair, which is exactly
+        what the nopad MXFP4 GEMM consumes.
+
+        Returns ``None`` when the switch is off, the build/device lacks these
+        entry points, or the activation/shape is not supported, so the caller
+        falls back.
+        """
+        if not _fused_act_quant_available():
+            return None
+        if input.dtype != torch.bfloat16 or not input.is_contiguous():
+            return None
+        # The kernel packs two MXFP4 values per byte.
+        if activation_out_dim % 2 != 0:
+            return None
+
+        return _deepgemm_act_mul(
+            input,
+            activation,
+            get_activation_quant_mode().MXFP4,
+            self.activation_config,
+        )
+
     def _act_mul_quant(
         self, input: torch.Tensor, output: torch.Tensor, activation: MoEActivation
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        _scale_fmt = DeepGemmQuantScaleFMT.from_oracle()
-
         M_sum, N = input.size()
         activation_out_dim = self.adjust_N_for_activation(N, activation)
 
-        _block_k = self.block_shape[1] if self.block_shape else activation_out_dim
+        fused = self._deepgemm_act_quant(input, activation, activation_out_dim)
+        if fused is not None:
+            return fused
 
         act_out = torch.empty(
             (M_sum, activation_out_dim), dtype=input.dtype, device=input.device
