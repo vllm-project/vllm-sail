@@ -3,7 +3,8 @@ ninja
 packaging>=24.2
 setuptools>=77.0.3,<81.0.0
 setuptools-rust>=1.9.0
-setuptools-scm>=8
+# v9+ truncates SCM hashes even with --abbrev=40; exact vLLM pins need all 40.
+setuptools-scm>=8,<9
 wheel
 # setup.py reads csrc/upstream/manifest.toml; tomllib is stdlib from 3.11.
 tomli; python_version < "3.11"

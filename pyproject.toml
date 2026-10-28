@@ -5,7 +5,7 @@ requires = [
     "ninja",
     "packaging>=24.2",
     "setuptools>=77.0.3,<81.0.0",
-    "setuptools-scm>=8",
+    "setuptools-scm>=8,<9",
     "wheel",
     # setup.py reads csrc/upstream/manifest.toml to derive the compiled sources.
     "tomli; python_version < '3.11'",

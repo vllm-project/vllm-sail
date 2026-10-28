@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import importlib
 import logging
+import subprocess
 import sys
 import types
 from collections.abc import Iterator
@@ -227,6 +228,55 @@ def test_check_is_cached_without_force(compat, monkeypatch: pytest.MonkeyPatch) 
 
 
 PIN = "528772a4bf589fd52eec40bc8ca79c84d99206b5"
+
+
+@pytest.mark.parametrize("dirty", [False, True])
+def test_exact_pin_accepts_generated_scm_version(compat, monkeypatch, tmp_path, dirty):
+    """Exercise upstream's full-hash SCM command, including dirty build inputs."""
+    from setuptools_scm import get_version
+
+    def git(*args):
+        return subprocess.check_output(
+            ["git", "-C", str(tmp_path), *args], text=True
+        ).strip()
+
+    git("init", "-q")
+    git("config", "user.name", "SCM test")
+    git("config", "user.email", "scm@example.com")
+    source = tmp_path / "source.py"
+    source.write_text("initial\n")
+    git("add", ".")
+    git("-c", "commit.gpgsign=false", "commit", "-qm", "initial")
+    git("tag", "v0.32.0")
+    source.write_text("checkpoint\n")
+    git("add", ".")
+    git("-c", "commit.gpgsign=false", "commit", "-qm", "checkpoint")
+    pin = git("rev-parse", "HEAD")
+    if dirty:
+        source.write_text("prepared build inputs\n")
+    for name in (
+        "VLLM_VERSION",
+        "SETUPTOOLS_SCM_PRETEND_VERSION",
+        "SETUPTOOLS_SCM_PRETEND_VERSION_FOR_VLLM",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    version = get_version(
+        root=str(tmp_path),
+        git_describe_command=[
+            "git",
+            "describe",
+            "--dirty",
+            "--tags",
+            "--long",
+            "--abbrev=40",
+            "--match",
+            "v[0-9]*",
+        ],
+    )
+    monkeypatch.setattr(compat, "_verified_upstream_commit", lambda: pin)
+    monkeypatch.setattr(compat, "installed_vllm_version", lambda: version)
+    compat.check_vllm_compatibility(force=True)
+    assert compat._checked
 
 
 def test_exact_main_pin_reads_the_packaged_kernel_metadata(compat, monkeypatch):
