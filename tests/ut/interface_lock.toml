@@ -11,7 +11,7 @@
 schema = 1
 vllm_version_range = ">=0.32.0,<0.33.0"
 key_interface_count = 10
-target_count = 262
+target_count = 261
 
 [[key_interface]]
 symbol = "vllm.platforms.interface.PlatformEnum"
@@ -1896,14 +1896,6 @@ module = "vllm/v1/attention/backends/mla/flashmla.py"
 symbol = "FlashMLABackend.supports_compute_capability"
 present = true
 fingerprint = "sha256:1c2f2ae45efc60979b7a5c7eac8699ea410c88b0a27dffe31053bae6617c53c4"
-
-[[patch_target]]
-name = "vllm.v1.attention.backends.mla.flashmla.FlashMLAImpl.forward_mqa"
-kind = "class"
-module = "vllm/v1/attention/backends/mla/flashmla.py"
-symbol = "FlashMLAImpl.forward_mqa"
-present = true
-fingerprint = "sha256:aa174c6c15259bba787767b01db2cef3c45c7fe6496abff6c1287de139111e01"
 
 [[patch_target]]
 name = "vllm.v1.attention.backends.mla.flashmla.FlashMLAMetadataBuilder.__init__"

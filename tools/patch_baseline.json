@@ -227,7 +227,6 @@
   "vllm.v1.attention.backends.fa_utils.get_flash_attn_version": "c635bf394f63855a2816d7ae878402b4b34ebf85db5f50f7bd92dabb836704c5",
   "vllm.v1.attention.backends.flash_attn.FlashAttentionBackend.supports_combination": "22db8c5e91e5de8dbe9f00040d7d023ad828e9090265b4c8f79552f2cb8f45ed",
   "vllm.v1.attention.backends.mla.flashmla.FlashMLABackend.supports_compute_capability": "e81f5251f5cab5c1a77a4ff811ac25b02c5f457d80a0796d393fe64fc8a7f169",
-  "vllm.v1.attention.backends.mla.flashmla.FlashMLAImpl.forward_mqa": "f9cd16b050353c78758836f1b09d6dc8105fae40049477988daec8f062cf655c",
   "vllm.v1.attention.backends.mla.flashmla.FlashMLAMetadataBuilder.__init__": "f6f9f0192f1c0a658b7a0e6347186e1db0bcf96f7a830ed6c8318b9f8e2ee39c",
   "vllm.v1.attention.backends.mla.flashmla_sparse.FlashMLASparseBackend.supports_compute_capability": "e81f5251f5cab5c1a77a4ff811ac25b02c5f457d80a0796d393fe64fc8a7f169",
   "vllm.v1.attention.backends.mla.flashmla_sparse.FlashMLASparseMetadataBuilder.__init__": "644251dfbb4f3a2cb3e752c3275e191abf3ccbd84517bb8230a6de3a7e786ddf",
