@@ -2,6 +2,8 @@
   "vllm.config.compilation.CompilationConfig.set_splitting_ops_for_v1": "1f374c746517a1ee1e9fcf6f5cd7fc54b07541f6dea8e004794f6a964b53d21c",
   "vllm.config.kernel.MoEBackend": "additive",
   "vllm.distributed.device_communicators.all2all.DeepEPLLAll2AllManager._make_all2all_kwargs": "9f83c40762c6348719a08070d829598e69d8d929c73aa8448431b354ea3a7030",
+  "vllm.distributed.device_communicators.pynccl.PyNcclCommunicator.suspend": "f7944e3ceec8f84b61be630c4aed0a911f523b3c3e03c4a7995c933c60bee29c",
+  "vllm.distributed.device_communicators.pynccl_wrapper.NCCLLibrary.__init__": "ac07d57e09103ae793523a1a081f7ec5a7f1bf1eb17eae9e41495eebb8abb1cc",
   "vllm.envs.environment_variables": "additive",
   "vllm.lora.layers.utils.try_get_optimal_moe_config": "5ada28f58e2e43037b4215097831378f40e059cae49cccdc87374d70196c2107",
   "vllm.model_executor.custom_op.CustomOp.dispatch_forward": "191239144c3e20bd6c35c96deac828204f8e35875673255b24dcae94875a37cd",

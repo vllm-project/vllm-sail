@@ -14,6 +14,8 @@
 #   UPDATE_GOLDEN      "1" to pass --update-golden (default: "0")
 #   THRESHOLD          accuracy threshold (default: 0.9)
 #   VLLM_PORT          dynamically allocated vLLM API port (default: 9985)
+#   GOLDEN_SEED_DIR    reviewed goldens to seed from; the checkout is read-only
+#                      (default: /source/tests/e2e/models/_golden)
 set -Eeuo pipefail
 
 ROOT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -49,6 +51,7 @@ echo "RESULTS_DIR=${RESULTS_DIR}"
 echo "UPDATE_GOLDEN=${UPDATE_GOLDEN}"
 echo "THRESHOLD=${THRESHOLD}"
 echo "VLLM_PORT=${VLLM_PORT}"
+echo "GOLDEN_SEED_DIR=${GOLDEN_SEED_DIR:-/source/tests/e2e/models/_golden}"
 python -c 'import sys; print("python", sys.version)'
 
 # ------------------------------------------------------------------
@@ -111,7 +114,26 @@ log "run accuracy eval: ${MODEL_KEY}"
 # Keep the read-only checkout off cwd/PYTHONPATH so the installed wheels win.
 cd /tmp
 unset PYTHONPATH
-mkdir -p "${RESULTS_DIR}/golden"
+
+# Reviewed goldens ship inside the read-only checkout, so seed them into the
+# writable results tree. Without this seed every run starts with an empty
+# golden directory, reports "created", and only the score threshold is
+# enforced; the regression gates would never fire. Pending output also lands
+# here and is uploaded as an artifact for a human to promote.
+GOLDEN_SEED_DIR="${GOLDEN_SEED_DIR:-/source/tests/e2e/models/_golden}"
+golden_dir="${RESULTS_DIR}/golden"
+mkdir -p "${golden_dir}"
+if [[ -d "${GOLDEN_SEED_DIR}" ]]; then
+    seeded=0
+    for golden in "${GOLDEN_SEED_DIR}"/accuracy_*.json; do
+        [[ -f "${golden}" ]] || continue
+        cp -f "${golden}" "${golden_dir}/"
+        seeded=$((seeded + 1))
+    done
+    echo "seeded ${seeded} reviewed golden(s) from ${GOLDEN_SEED_DIR}"
+else
+    echo "no reviewed golden directory at ${GOLDEN_SEED_DIR}; threshold-only run"
+fi
 
 eval_args=(
     --model-key "${MODEL_KEY}"

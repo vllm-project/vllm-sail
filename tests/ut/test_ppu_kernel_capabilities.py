@@ -320,7 +320,10 @@ def test_warmup_excludes_cutedsl_only_on_ppu(
     import contextlib
 
     calls = []
-    modules("vllm.platforms", current_platform=ns(is_ppu=lambda: ppu))
+    modules(
+        "vllm.platforms",
+        current_platform=ns(is_ppu=lambda: ppu, has_device_capability=lambda _: True),
+    )
     modules("vllm.logger", init_logger=lambda _: ns(warning=lambda *a: None))
 
     class VllmCuTeDSLJitKernel:
@@ -424,6 +427,167 @@ def test_warmup_excludes_cutedsl_only_on_ppu(
     calls.clear()
     legacy_module.cutedsl_warmup()
     assert calls == ([] if ppu else ["legacy"])
+
+
+class _TritonLang:
+    """Nameable stand-in for ``triton.language`` inside never-executed fixtures."""
+
+    float8e4nv = "fp8e4nv"
+    bfloat16 = "bfloat16"
+
+
+tl = _TritonLang()
+
+
+def _fp8_direct(x):
+    return x.to(tl.float8e4nv)
+
+
+def _e4m3_helper(x):
+    return x.to(tl.float8e4nv)
+
+
+# ``@triton.jit`` helpers are inlined at trace time, so only their ``fn`` is read.
+_INLINE_E4M3 = types.SimpleNamespace(fn=_e4m3_helper)
+
+
+def _fp8_inlined(x):
+    return _INLINE_E4M3(x)
+
+
+def _bf16_only(x):
+    return x.to(tl.bfloat16)
+
+
+_FP8_COMPILE_ERROR = ValueError(
+    "type fp8e4nv not supported in this architecture. "
+    "The supported fp8 dtypes are ('fp8e4b15', 'fp8e5')"
+)
+
+
+def _fixture_kernel(name, jit_fn, compiled, *, error=None):
+    """Build a warmup registration shaped like a vLLM Triton kernel wrapper."""
+
+    def compile_many(self, keys):
+        compiled.append(name)
+        if error is not None:
+            raise error
+
+    attrs = {"kernel": staticmethod(jit_fn), "compile_many": compile_many}
+    return type(name, (), attrs)()
+
+
+@pytest.mark.parametrize(
+    "ppu,arch,fp8_skipped",
+    [
+        (True, (8, 0), True),
+        (True, (8, 9), False),
+        (False, (8, 0), False),
+    ],
+)
+def test_warmup_excludes_fp8_kernels_without_native_fp8(
+    modules, ppu, arch, fp8_skipped
+):
+    """Triton rejects tl.float8e4nv on sm80-class devices, so drop those warmups."""
+    compiled = []
+    direct = _fixture_kernel("FusedInvRopeFP8QuantKernel", _fp8_direct, compiled)
+    inlined = _fixture_kernel(
+        "FusedIndexerQRopeQuantTritonKernel", _fp8_inlined, compiled
+    )
+    clean = _fixture_kernel("PackSeqTritonKernel", _bf16_only, compiled)
+    registrations = {item: [((), {})] for item in (direct, inlined, clean)}
+
+    assert _run_ppu_warmup(modules, ppu, arch, registrations) == "result"
+
+    skipped = fp8_skipped and ppu
+    assert (direct in registrations) is not skipped
+    assert (inlined in registrations) is not skipped
+    assert clean in registrations
+    assert len(compiled) == 3 - 2 * skipped
+
+
+def test_warmup_tolerates_signature_level_fp8_on_sm80(modules):
+    """A compile key that passes an E4M3 tensor only fails at trace time."""
+    compiled = []
+    signature_only = _fixture_kernel(
+        "SignatureFp8Kernel", _bf16_only, compiled, error=_FP8_COMPILE_ERROR
+    )
+    clean = _fixture_kernel("PackSeqTritonKernel", _bf16_only, compiled)
+
+    registrations = {signature_only: [((), {})], clean: [((), {})]}
+    assert _run_ppu_warmup(modules, True, (8, 0), registrations) == "result"
+
+    # Source inspection cannot see the dtype, so the registration is kept and
+    # the guard turns the resulting compile error into a warning.
+    assert compiled == ["SignatureFp8Kernel", "PackSeqTritonKernel"]
+    assert signature_only in registrations
+
+
+def test_warmup_propagates_other_compile_errors(modules):
+    """Only the unsupported-fp8 rejection is tolerated."""
+    broken = _fixture_kernel(
+        "BrokenKernel", _bf16_only, [], error=RuntimeError("fused build failed")
+    )
+
+    with pytest.raises(RuntimeError, match="fused build failed"):
+        _run_ppu_warmup(modules, True, (8, 0), {broken: [((), {})]})
+
+
+def _run_ppu_warmup(modules, ppu, arch, registrations):
+    """Install the PPU patch and run the warmup over ``registrations`` in order."""
+    ns = types.SimpleNamespace
+    import contextlib
+
+    def has_device_capability(capability):
+        wanted = (
+            (capability // 10, capability % 10)
+            if isinstance(capability, int)
+            else capability
+        )
+        return arch >= wanted
+
+    modules(
+        "vllm.platforms",
+        current_platform=ns(
+            is_ppu=lambda: ppu, has_device_capability=has_device_capability
+        ),
+    )
+    modules("vllm.logger", init_logger=lambda _: ns(warning=lambda *a: None))
+    modules(
+        "vllm.model_executor.warmup.jit_warmup_cutedsl_helper",
+        VllmCuTeDSLJitKernel=type("VllmCuTeDSLJitKernel", (), {}),
+    )
+    modules(
+        "vllm.v1.sample.ops.topk_topp_sampler",
+        register_top_k_top_p_warmups=lambda: None,
+    )
+    worker = ns(
+        model_runner=ns(
+            jit_warmup_registry=ns(
+                _registrations=registrations, activate=lambda: contextlib.nullcontext()
+            ),
+            is_last_pp_rank=True,
+            is_pooling_model=False,
+        ),
+        vllm_config=ns(kernel_config=ns(enable_jit_warmup=True)),
+        get_model=lambda: "model",
+        scheduler_config=ns(max_num_batched_tokens=64),
+    )
+
+    def upstream(actual_worker, *, process_local_only=False):
+        for actual_kernel, keys in list(registrations.items()):
+            actual_kernel.compile_many(keys)
+        return "result"
+
+    provider = modules(
+        "vllm.model_executor.warmup.kernel_warmup",
+        kernel_warmup=upstream,
+        cutedsl_warmup=lambda: None,
+    )
+    modules("vllm.model_executor.warmup.cutedsl_warmup", cutedsl_warmup=lambda: None)
+    patched = load_patch("vllm_sail/patch/enhancement/kernel_warmup.py")
+    patched._ppu_deep_gemm_warmup_enabled = lambda: False
+    return provider.kernel_warmup(worker)
 
 
 @pytest.mark.parametrize(

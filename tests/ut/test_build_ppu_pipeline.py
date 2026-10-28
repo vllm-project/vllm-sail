@@ -33,7 +33,7 @@ def test_build_script_preserves_required_build_contract() -> None:
         ".github/vllm-main-verified.commit",
         "unset TORCH_CUDA_ARCH_LIST",
         "command -v hgcc",
-        "compatible_wrapper.h",
+        "decision = decide(probe())",
         "python tools/use_existing_torch.py",
         "VLLM_TARGET_DEVICE=empty",
         "VLLM_REQUIRE_RUST_FRONTEND=1",
@@ -208,7 +208,7 @@ def test_image_build_captures_the_pinned_image_stack_before_building():
         assert forbidden not in text
     capture = text.index('ppu_image_stack.py" capture')
     verify = text.index('ppu_image_stack.py" verify')
-    assert capture < text.index("compatible_wrapper.h")
+    assert capture < text.index("decision = decide(probe())")
     assert capture < text.index("python -m pip install") < verify
     assert verify < text.index("status=succeeded")
 
