@@ -22,7 +22,7 @@ _TARGET = f"{_MODULE}._select_dsv4_attn_cls"
         "PPU requires unpadded FlashMLA heads and an MXFP8 BF16 output projection "
         "while retaining V4.1 shared KV/index metadata and CUDA model logic."
     ),
-    affected_versions=">=0.30.0,<0.31.0",
+    affected_versions=">=0.31.0,<0.32.0",
     remove_when="vLLM exposes a V4.1 attention-class registry supporting PPU overrides.",
 )
 def _select_dsv4_attn_cls(vllm_config):
@@ -37,7 +37,7 @@ def _select_dsv4_attn_cls(vllm_config):
     _MODULE,
     "_linear_scale_param_name",
     reason="PPU channelwise FP8 dense layers register weight_scale for V4.1 target and draft loaders.",
-    affected_versions=">=0.30.0,<0.31.0",
+    affected_versions=">=0.31.0,<0.32.0",
     remove_when="The V4.1 scale-name helper queries the linear quantization method's parameter contract.",
 )
 def _linear_scale_param_name(vllm_config, expert_dtype):
@@ -65,7 +65,7 @@ def _rebind_scale_aliases():
             patch(
                 name, "_linear_scale_param_name",
                 reason="Preloaded V4.1 target and draft consumers must retain PPU channelwise scale names.",
-                affected_versions=">=0.30.0,<0.31.0",
+                affected_versions=">=0.31.0,<0.32.0",
                 remove_when="V4.1 loaders resolve the scale-name helper through its provider module.",
             )(_linear_scale_param_name)
 

@@ -28,6 +28,7 @@ def test_cache_gather_dispatch_after_preload(
         "vllm.models.deepseek_v41.common.ops.cache_utils",
         has_cutedsl=provider.has_cutedsl,
         V41_BYTES_PER_TOKEN=528,
+        V41_NVFP4_BYTES_PER_TOKEN=288,
         V41_QUANT_BLOCK=32,
         dequantize_and_gather_k_cache_triton=lambda *a, **kw: calls.append("triton"),
     )
