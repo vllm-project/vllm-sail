@@ -59,7 +59,7 @@ def test_all_categories_are_declared() -> None:
 
 
 def test_bugfix_category_imports_cleanly() -> None:
-    """bugfix currently holds no patches, so it must import without vLLM.
+    """bugfix defers target imports until install(), so bare CPU imports work.
 
     `performance` gained the Phase-4 FLA patches, whose patch modules import
     their vLLM targets at import time, so it moved into the vLLM-gated test

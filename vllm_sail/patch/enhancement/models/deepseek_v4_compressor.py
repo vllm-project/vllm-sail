@@ -326,7 +326,7 @@ patch(
         "shares CUDA identity but requires the Triton compressor. No "
         "compressor backend registration hook is available."
     ),
-    affected_versions=">=0.31.0,<0.32.0",
+    affected_versions=">=0.32.0,<0.33.0",
     remove_when="DeepseekCompressor selects compression through a backend capability hook.",
 )(bind_body(forward, _compressor))
 
@@ -339,6 +339,6 @@ patch(
         "identity, bypassing has_cutedsl and the PPU forward guard. PPU must "
         "register the common Triton warmup instead."
     ),
-    affected_versions=">=0.31.0,<0.32.0",
+    affected_versions=">=0.32.0,<0.33.0",
     remove_when="DeepseekCompressor gates warmup registration on backend capabilities.",
 )(bind_body(__init__, _compressor))

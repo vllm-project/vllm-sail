@@ -19,6 +19,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.ut.test_upstream_version_precheck import SUPPORTED_RANGE
+
 pytest.importorskip("torch", reason="requires torch")
 pytest.importorskip("vllm", reason="requires vLLM")
 
@@ -414,6 +416,27 @@ def test_mla_attention_spec_merge_forwards_indexer_geometry(installed) -> None:
     assert merged.indexer_q_head_dim == 128
 
 
+def test_mla_spec_dataclass_operations_preserve_indexer_geometry(installed):
+    from dataclasses import fields, replace
+
+    from vllm.v1.kv_cache_interface import MLAAttentionSpec
+
+    spec = _make_mla_spec(indexer_n_head=64, indexer_q_head_dim=128)
+    same = replace(spec)
+    resized = replace(spec, block_size=256)
+    other_geometry = replace(spec, indexer_n_head=32)
+    assert type(same) is type(resized) is MLAAttentionSpec
+    assert {"indexer_n_head", "indexer_q_head_dim"} <= {f.name for f in fields(spec)}
+    assert same == spec and hash(same) == hash(spec)
+    assert other_geometry != spec
+    assert len({same, spec, other_geometry}) == 2
+    assert resized.block_size == 256
+    assert (resized.indexer_n_head, resized.indexer_q_head_dim) == (64, 128)
+    merged = MLAAttentionSpec.merge([resized, resized])
+    assert type(merged) is MLAAttentionSpec
+    assert (merged.indexer_n_head, merged.indexer_q_head_dim) == (64, 128)
+
+
 # ---------------------------------------------------------------------------
 # MHC tilelang launchers and metadata shape.
 # ---------------------------------------------------------------------------
@@ -454,7 +477,7 @@ def test_phase4_metadata_shape(installed) -> None:
     ]
     assert len(records) >= 30, [r.target for r in records]
     for record in records:
-        assert record.affected_versions == ">=0.31.0,<0.32.0", record.target
+        assert record.affected_versions == SUPPORTED_RANGE, record.target
         assert record.reason.strip(), record.target
         assert record.remove_when.strip(), record.target
         assert record.remove_when.strip().lower() != "todo", record.target

@@ -30,7 +30,7 @@ from vllm.v1.attention.ops.triton_decode_attention import (
 
 from vllm_sail.patch.utils import patch
 
-_AFFECTED = ">=0.31.0,<0.32.0"
+_AFFECTED = ">=0.32.0,<0.33.0"
 _MODULE = "vllm.v1.attention.ops.triton_decode_attention"
 
 
@@ -38,8 +38,8 @@ _MODULE = "vllm.v1.attention.ops.triton_decode_attention"
     _MODULE,
     "_decode_grouped_att_m_fwd",
     reason=(
-        "PPU BTV 1.1 (capability 8.0) needs BLOCK=16 for Lk>=576 grouped "
-        "decode attention (fork's is_btv_1_1 branch), and the fork removes the "
+        "PPU 1.0 (capability 8.0) needs BLOCK=16 for Lk>=576 grouped "
+        "decode attention on that architecture, and the fork removes the "
         "'not is_hip_' guards from the MLA tile branches — the latter is an "
         "unconditional upstream behaviour change (also affects ROCm), kept "
         "as-in-fork. Module-level platform flags from the fork are resolved "
@@ -48,7 +48,7 @@ _MODULE = "vllm.v1.attention.ops.triton_decode_attention"
     affected_versions=_AFFECTED,
     remove_when=(
         "upstream adopts the PPU block-size workaround and the ROCm tile-layout "
-        "change, or the fork drops its is_btv_1_1/is_hip_ edits."
+        "change, or the fork drops its architecture-specific tile edits."
     ),
 )
 def _decode_grouped_att_m_fwd(

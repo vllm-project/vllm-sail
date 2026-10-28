@@ -36,7 +36,7 @@ if TYPE_CHECKING:
 
 _QMODULE = "vllm.model_executor.layers.quantization.mxfp4"
 _OMODULE = "vllm.model_executor.layers.fused_moe.oracle.mxfp4"
-AFFECTED_VERSIONS = ">=0.31.0,<0.32.0"
+AFFECTED_VERSIONS = ">=0.32.0,<0.33.0"
 
 _PPU_BACKEND_NAMES = (
     "PPU_DEEPGEMM_MXFP4",
@@ -431,6 +431,8 @@ def install() -> None:
         w2_bias: torch.Tensor | None = None,
         _cache_permute_indices: dict | None = None,
         activation=None,
+        use_separated_a4w4: bool = False,
+        activation_key=None,
     ):
         if mxfp4_backend in _ppu_backends("bf16"):
             import vllm.envs as envs
@@ -477,6 +479,8 @@ def install() -> None:
             w2_bias,
             _cache_permute_indices,
             activation=activation,
+            use_separated_a4w4=use_separated_a4w4,
+            activation_key=activation_key,
         )
 
     @patch(

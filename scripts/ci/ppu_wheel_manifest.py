@@ -91,9 +91,11 @@ def wheel_records(directory: Path) -> dict:
             if metadata["Name"].replace("_", "-") != name or not metadata["Version"]:
                 raise ValueError(f"unexpected package metadata: {wheel.name}")
             if name == "vllm":
-                if "vllm/vllm-rs" not in members or not any(
-                    p.startswith("vllm/_rust_tool_parser.") and p.endswith(".so")
-                    for p in members
+                # Current upstream builds the frontend executable without the
+                # removed PyO3 tool-parser bridge. Older wheels may retain it.
+                if (
+                    "vllm/vllm-rs" not in members
+                    or archive.getinfo("vllm/vllm-rs").file_size == 0
                 ):
                     raise ValueError("vLLM wheel is missing required Rust artifacts")
             else:

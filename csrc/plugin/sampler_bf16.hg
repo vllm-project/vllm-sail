@@ -1,7 +1,7 @@
 // HGGC host entry for the BF16 top-k prefill sampler.
 // Registered under _ppu_C by ppu_bindings.cpp.
 
-#include "libtorch_stable/torch_utils.h"
+#include "torch_utils.h"
 #include "sampler_bf16.h"
 
 #include <torch/headeronly/core/ScalarType.h>

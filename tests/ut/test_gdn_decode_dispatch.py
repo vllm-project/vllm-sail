@@ -74,12 +74,15 @@ def gdn_provider(modules, monkeypatch, upstream_source_root):
             self.gqa_interleaved_layout = False
             self.norm = NS(activation="silu")
             self.state_dtype = vllm_config.state_dtype
+            self.speculative_config = vllm_config.speculative_config
             self.gdn_decode_kernel = env_module.VLLM_GDN_DECODE_KERNEL
             if self.gdn_decode_kernel == "cuda":
                 reason = self._fused_gdn_decode_unsupported_reason(vllm_config)
                 if reason:
                     raise ValueError(reason)
-            self.enable_fused_gdn_decode = self.gdn_decode_kernel == "cuda"
+            self.enable_fused_gdn_spec_decode = (
+                self.gdn_decode_kernel == "cuda" and self.speculative_config is not None
+            )
 
         def get_state_dtype(self):
             return "bf16", self.state_dtype
@@ -112,7 +115,11 @@ def gdn_provider(modules, monkeypatch, upstream_source_root):
         platform=platform,
         calls=calls,
         path=path,
-        config=NS(state_dtype="fp32", model_config=NS(dtype="bf16")),
+        config=NS(
+            state_dtype="fp32",
+            model_config=NS(dtype="bf16"),
+            speculative_config=object(),
+        ),
         provider=provider,
         originals=originals,
         original_getters=original_getters,
@@ -162,7 +169,7 @@ def test_stub_cannot_select_native_mtp_even_with_registered_schema(
     monkeypatch.setenv("VLLM_SAIL_USE_PLA", "0")
     layer = f.layer(None, f.config)
     assert layer.gdn_decode_kernel == "triton"
-    assert not layer.enable_fused_gdn_decode
+    assert not layer.enable_fused_gdn_spec_decode
     layer.gdn_decode_kernel = "cuda"  # Also guard stale/prebuilt layer state.
     layer.kv_cache = (None, NS(dtype="fp32"))
     metadata = NS(
@@ -187,7 +194,7 @@ def test_extended_choices_reach_layer_initialization(
     assert f.env.VLLM_GDN_DECODE_KERNEL == requested
     assert f.env.environment_variables["VLLM_GDN_DECODE_KERNEL"]() == requested
     assert layer.gdn_decode_kernel == ("pla" if requested == "auto" else requested)
-    assert not layer.enable_fused_gdn_decode
+    assert not layer.enable_fused_gdn_spec_decode
     assert bool(f.calls) is (requested != "triton")
 
 
@@ -200,7 +207,7 @@ def test_explicit_cuda_requires_real_dispatch_kernel(gdn_provider, monkeypatch):
     f.torch._C._dispatch_has_kernel_for_dispatch_key = lambda *a: True
     layer = f.layer(None, f.config)
     assert layer.gdn_decode_kernel == "cuda"
-    assert layer.enable_fused_gdn_decode
+    assert layer.enable_fused_gdn_spec_decode
     assert not f.calls
 
 
@@ -272,3 +279,18 @@ def test_stub_falls_through_real_upstream_forward_to_normal_core(
     )
     assert forward(layer, Tensor()) == "norm + output"
     assert calls == ["normal core"]
+
+
+@pytest.mark.upstream_source
+@pytest.mark.parametrize("speculative", [False, True])
+def test_auto_native_selection_updates_the_spec_decode_flag(
+    gdn_provider, monkeypatch, speculative
+):
+    f = gdn_provider
+    monkeypatch.setenv("VLLM_SAIL_USE_PLA", "0")
+    monkeypatch.setenv("VLLM_GDN_DECODE_KERNEL", "auto")
+    f.torch._C._dispatch_has_kernel_for_dispatch_key = lambda *a: True
+    f.config.speculative_config = object() if speculative else None
+    layer = f.layer(None, f.config)
+    assert layer.gdn_decode_kernel == "cuda"
+    assert layer.enable_fused_gdn_spec_decode is speculative

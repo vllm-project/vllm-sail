@@ -18,7 +18,7 @@ schema = 1
 
 # The exact upstream vLLM tag the corpus is translated from. Bumping this means
 # re-running tools/port_upstream_kernels.py and reviewing the diff.
-upstream_ref = "v0.31.0"
+upstream_ref = "5df63a7203cdb9328d824a27b682e77c7b9928be"
 
 # Compiled tiers, in the order CMake receives them. `x` must never appear here.
 # Must stay above [tiers]: a bare key after a table header belongs to that table.
@@ -46,7 +46,7 @@ cutlass = "CUTLASS / CuTe in the include closure"
 # Transformations the port tool applies after sailify. Recorded here so the
 # overlay is reviewable as data rather than buried in the tool.
 [overlay]
-# libtorch_stable/torch_utils.h includes <cublas_v2.h> and is in the include
+# torch_utils.h includes <cublas_v2.h> and is in the include
 # closure of nearly every TU, even those that never call cuBLAS. Left alone,
 # sailify rewrites it to <acblas_v2.h> and the whole corpus would drag in
 # acblas. The tool drops the include instead.
@@ -55,8 +55,8 @@ drop_includes = ["cublas_v2.h", "acblas_v2.h"]
 # not link. The tool prunes them to the compiled tiers and records the removed
 # schemas in excluded_ops.toml for vllm_sail/native/stubs.py.
 prune_bindings = [
-    "csrc/libtorch_stable/torch_bindings.cpp",
-    "csrc/libtorch_stable/moe/torch_bindings.cpp",
+    "csrc/torch_bindings.cpp",
+    "csrc/moe/torch_bindings.cpp",
 ]
 
 # REGISTER_EXTENSION(NAME) (csrc/core/registration.h) defines PyInit_<NAME>, so a
@@ -70,47 +70,47 @@ _moe_C_stable_libtorch = "_upstream_moe_C"
 # float conversion already used by this helper's older-toolkit branch. FP16,
 # BF16 and FP32 values retain their finite/Inf/NaN classification in float.
 # Each replacement must match exactly once after sailify, or generation fails.
-[overlay.replace_text."csrc/libtorch_stable/moe/grouped_topk_kernels.cu"]
+[overlay.replace_text."csrc/moe/grouped_topk_kernels.cu"]
 "return hggc::std::isfinite(val);" = "return isfinite(cuda_cast<float, T>(val));"
 
 # PPU 1.0/1.5 do not use programmatic dependent launch. Reuse upstream's
 # ordinary launch branch while retaining the same kernel and arguments.
 # These exact anchors run after sailify; HG compilation defines __HGGCCC__.
-[overlay.replace_text."csrc/libtorch_stable/fused_minimax_m3_qknorm_rope_kv_insert_kernel.cu"]
+[overlay.replace_text."csrc/fused_minimax_m3_qknorm_rope_kv_insert_kernel.cu"]
 "#ifndef USE_ROCM\n  // PDL: enable programmatic stream serialization" = "#if !defined(USE_ROCM) && !defined(__HGGCCC__)\n  // PDL: enable programmatic stream serialization"
 
-[overlay.replace_text."csrc/libtorch_stable/fused_kimi_k3_mla_key_concat_kv_cache_kernel.cu"]
+[overlay.replace_text."csrc/fused_kimi_k3_mla_key_concat_kv_cache_kernel.cu"]
 "#ifndef USE_ROCM\n  static int const sm_version = getSMVersion();" = "#if !defined(USE_ROCM) && !defined(__HGGCCC__)\n  static int const sm_version = getSMVersion();"
 
-[overlay.replace_text."csrc/libtorch_stable/cache_kernels_fused.cu"]
+[overlay.replace_text."csrc/cache_kernels_fused.cu"]
 "  dim3 grid(num_tokens, 1, 1);" = "  if (num_tokens == 0) return;  // Empty graph slot mappings need no launch.\n  dim3 grid(num_tokens, 1, 1);"
 
 # Keep INT8 round-to-nearest-even and saturation without an inline PTX cast.
-[overlay.replace_text."csrc/libtorch_stable/quantization/fused_kernels/quant_conversions.cuh"]
+[overlay.replace_text."csrc/quantization/fused_kernels/quant_conversions.cuh"]
 "#else\n  // CUDA path\n  uint32_t dst;" = "#elif defined(__HGGCCC__)\n  float const rounded = nearbyintf(x);\n  if (isnan(rounded)) return 0;\n  return static_cast<int8_t>(fmaxf(-128.0f, fminf(127.0f, rounded)));\n#else\n  // CUDA path\n  uint32_t dst;"
 
 # Empty token batches must not issue a zero-sized device launch.
-[overlay.replace_text."csrc/libtorch_stable/layernorm_quant_kernels.cu"]
+[overlay.replace_text."csrc/layernorm_quant_kernels.cu"]
 "  // For large num_tokens, use smaller blocks to increase SM concurrency." = "  if (num_tokens == 0) return;\n\n  // For large num_tokens, use smaller blocks to increase SM concurrency."
 "  dim3 grid(num_tokens);\n  /* This kernel is memory-latency bound" = "  if (num_tokens == 0) return;\n  dim3 grid(num_tokens);\n  /* This kernel is memory-latency bound"
 
-[overlay.replace_text."csrc/libtorch_stable/quantization/fused_kernels/fused_layernorm_dynamic_per_token_quant.cu"]
+[overlay.replace_text."csrc/quantization/fused_kernels/fused_layernorm_dynamic_per_token_quant.cu"]
 "  dim3 grid(num_tokens);\n  dim3 block(std::min(hidden_size, 1024));" = "  if (num_tokens == 0) return;\n  dim3 grid(num_tokens);\n  dim3 block(std::min(hidden_size, 1024));"
 "  dim3 grid(num_tokens);\n  const bool batch_invariant_launch" = "  if (num_tokens == 0) return;\n  dim3 grid(num_tokens);\n  const bool batch_invariant_launch"
 
-[overlay.replace_text."csrc/libtorch_stable/quantization/fused_kernels/fused_silu_mul_block_quant.cu"]
+[overlay.replace_text."csrc/quantization/fused_kernels/fused_silu_mul_block_quant.cu"]
 "  dim3 grid(num_tokens, num_groups);" = "  if (num_tokens == 0) return;\n  dim3 grid(num_tokens, num_groups);"
 
 # Reuse upstream's ordinary shared-memory copy implementation on HGGC. A
 # warp fence replaces waiting for asynchronous copies: all loads are already
 # complete, but the cos/sin tile is subsequently read across warp lanes.
-[overlay.replace_text."csrc/libtorch_stable/async_util.cuh"]
+[overlay.replace_text."csrc/async_util.cuh"]
 "#if defined(USE_ROCM)\n  *reinterpret_cast<int4*>(smem_ptr)" = "#if defined(USE_ROCM) || defined(__HGGCCC__)\n  *reinterpret_cast<int4*>(smem_ptr)"
 "#if defined(USE_ROCM)\n  if (size_bytes == 4)" = "#if defined(USE_ROCM) || defined(__HGGCCC__)\n  if (size_bytes == 4)"
 "void cp_async_commit_group() {\n#if defined(COMPATIBLE_ARCH)" = "void cp_async_commit_group() {\n#if !defined(__HGGCCC__) && defined(COMPATIBLE_ARCH)"
 "void cp_async_wait_group() {\n#if defined(COMPATIBLE_ARCH)" = "void cp_async_wait_group() {\n#if defined(__HGGCCC__)\n  __syncwarp();\n#elif defined(COMPATIBLE_ARCH)"
 
-[overlay.replace_text."csrc/libtorch_stable/fused_qknorm_rope_kernel.cu"]
+[overlay.replace_text."csrc/fused_qknorm_rope_kernel.cu"]
 "#endif\n\nnamespace tensorrt_llm::common {" = "#endif\n\n// HGGC requires every named shuffle/barrier lane to participate. Partial\n// rotary dimensions leave only the low rotary_lanes lanes in the RoPE branch.\n#if defined(__HGGCCC__)\n  #define VLLM_SAIL_ROPE_MASK (FINAL_MASK >> (32 - rotary_lanes))\n  #define VLLM_SAIL_ROPE_SYNCWARP() __syncwarp(VLLM_SAIL_ROPE_MASK)\n#else\n  #define VLLM_SAIL_ROPE_MASK FINAL_MASK\n  #define VLLM_SAIL_ROPE_SYNCWARP() __syncwarp()\n#endif\n\nnamespace tensorrt_llm::common {"
 "// Before data exchange with in warp, we need to sync.\n        __syncwarp();" = "// Before data exchange with in warp, we need to sync.\n        VLLM_SAIL_ROPE_SYNCWARP();"
 "\n          elements2[i] = __shfl_xor_sync(FINAL_MASK, elements[i], pairOffset);" = "\n          elements2[i] = __shfl_xor_sync(VLLM_SAIL_ROPE_MASK, elements[i], pairOffset);"
@@ -123,7 +123,7 @@ _moe_C_stable_libtorch = "_upstream_moe_C"
 # Map GDN's PTX copies and group completion to the SAIL SDK pipeline on HGGC.
 # wait_all includes committing outstanding copies before waiting for all groups.
 # Keep upstream's double buffer, block barriers and CUDA PTX branch unchanged.
-[overlay.replace_text."csrc/libtorch_stable/gdn/fused_gdn_decode_kernel.cu"]
+[overlay.replace_text."csrc/gdn/fused_gdn_decode_kernel.cu"]
 "#include <hggc_runtime.h>" = "#include <hggc_runtime.h>\n#if defined(__HGGCCC__)\n#include <hggc_pipeline_primitives.h>\n#endif"
 "  const uint32_t smem_addr =" = "#if defined(__HGGCCC__)\n  __pipeline_memcpy_async(smem_ptr, gmem_ptr, 16);\n#else\n  const uint32_t smem_addr ="
 "               : \"r\"(smem_addr), \"l\"(gmem_ptr));" = "               : \"r\"(smem_addr), \"l\"(gmem_ptr));\n#endif"
@@ -135,20 +135,20 @@ _moe_C_stable_libtorch = "_upstream_moe_C"
 # ---------------------------------------------------------------------------
 
 [[entry]]
-path = "csrc/libtorch_stable/torch_bindings.cpp"
+path = "csrc/torch_bindings.cpp"
 tier = "a"
 hazards = []
 ops = ["weak_ref_tensor"]
-notes = "Op schema + impl registrations for the _C / _C_cache_ops / _C_cuda_utils namespaces. weak_ref_tensor is defined inline in upstream libtorch_stable/ops.h, so this TU owns it. Pruned by the port tool to the compiled tiers."
+notes = "Op schema + impl registrations for the _C / _C_cache_ops / _C_cuda_utils namespaces. weak_ref_tensor is defined inline in upstream ops.h, so this TU owns it. Pruned by the port tool to the compiled tiers."
 
 [[entry]]
-path = "csrc/libtorch_stable/cuda_view.cu"
+path = "csrc/cuda_view.cu"
 tier = "a"
 hazards = []
 ops = ["get_cuda_view_from_cpu_tensor"]
 
 [[entry]]
-path = "csrc/libtorch_stable/cuda_utils_kernels.cu"
+path = "csrc/cuda_utils_kernels.cu"
 tier = "a"
 hazards = []
 ops = [
@@ -157,7 +157,7 @@ ops = [
 ]
 
 [[entry]]
-path = "csrc/libtorch_stable/activation_kernels.cu"
+path = "csrc/activation_kernels.cu"
 tier = "a"
 hazards = ["ptx"]
 ops = [
@@ -167,8 +167,8 @@ ops = [
     "gelu_new",
     "gelu_quick",
     "gelu_tanh_and_mul",
-    "masked_situ_and_mul",
     "masked_moe_activation",
+    "masked_situ_and_mul",
     "situ_and_mul_quant",
     "mul_and_silu",
     "relu_squared",
@@ -180,54 +180,54 @@ ops = [
 notes = "PTX comes from libtorch_stable/cuda_vec_utils.cuh, not from this file."
 
 [[entry]]
-path = "csrc/libtorch_stable/layernorm_kernels.cu"
+path = "csrc/layernorm_kernels.cu"
 tier = "a"
 hazards = ["cub"]
 ops = ["fused_add_rms_norm", "rms_norm"]
 
 [[entry]]
-path = "csrc/libtorch_stable/gdn/fused_gdn_decode_kernel.cu"
+path = "csrc/gdn/fused_gdn_decode_kernel.cu"
 tier = "a"
 hazards = ["cp_async", "ptx"]
 ops = ["fused_gdn_decode_post_conv_mtp"]
 notes = "GDN MTP post-conv recurrence and gated RMSNorm, BF16/FP32 state. HGGC uses SAIL SDK pipeline primitives for 16-byte copies, commit and wait-all through the declared overlay; double buffering, warp shuffles and block barriers retain upstream semantics. Native compilation and PPU correctness validation pending."
 
 [[entry]]
-path = "csrc/libtorch_stable/layernorm_quant_kernels.cu"
+path = "csrc/layernorm_quant_kernels.cu"
 tier = "a"
 hazards = ["cub", "ptx"]
 ops = ["fused_add_rms_norm_static_fp8_quant", "rms_norm_static_fp8_quant"]
 notes = "Static FP8 RMSNorm, with optional residual update. Uses SDK CUB and FP8 conversion; preserves upstream intermediate rounding. PPU device validation pending."
 
 [[entry]]
-path = "csrc/libtorch_stable/quantization/fused_kernels/fused_layernorm_dynamic_per_token_quant.cu"
+path = "csrc/quantization/fused_kernels/fused_layernorm_dynamic_per_token_quant.cu"
 tier = "a"
 hazards = ["cub", "ptx"]
 ops = ["rms_norm_dynamic_per_token_quant", "rms_norm_per_block_quant"]
 notes = "Dynamic per-token and group64/128 FP8/INT8 RMSNorm, optional residual and scale upper bound, including column-major/TMA-aligned scales. HGGC INT8 conversion uses RNE and saturation. PPU device validation pending."
 
 [[entry]]
-path = "csrc/libtorch_stable/quantization/fused_kernels/fused_silu_mul_block_quant.cu"
+path = "csrc/quantization/fused_kernels/fused_silu_mul_block_quant.cu"
 tier = "a"
 hazards = ["ptx"]
 ops = ["silu_and_mul_per_block_quant"]
 notes = "SiLU(gate) * up plus group64/128 FP8/INT8 quantization, with optional scale upper bound and column-major scales. HGGC INT8 conversion uses RNE and saturation. PPU device validation pending."
 
 [[entry]]
-path = "csrc/libtorch_stable/fused_qknorm_rope_kernel.cu"
+path = "csrc/fused_qknorm_rope_kernel.cu"
 tier = "a"
 hazards = ["cp_async", "ptx"]
 ops = ["fused_qk_norm_rope"]
 notes = "Upstream packed-QKV RMSNorm/RoPE kernel, including partial NeoX/GPT-J rotation and forced 1/2/4/8-head schedules. HGGC uses ordinary copies plus warp fences in the async helper. PPU device validation pending."
 
 [[entry]]
-path = "csrc/libtorch_stable/pos_encoding_kernels.cu"
+path = "csrc/pos_encoding_kernels.cu"
 tier = "a"
 hazards = []
 ops = ["rotary_embedding"]
 
 [[entry]]
-path = "csrc/libtorch_stable/cache_kernels.cu"
+path = "csrc/cache_kernels.cu"
 tier = "a"
 hazards = ["ptx"]
 ops = [
@@ -248,7 +248,7 @@ ops = [
 notes = "One 1707-line CUTLASS-free TU carrying five of the ops the plugin already calls plus the KV-cache write path."
 
 [[entry]]
-path = "csrc/libtorch_stable/sampler.cu"
+path = "csrc/sampler.cu"
 tier = "a"
 hazards = ["cub"]
 ops = [
@@ -258,20 +258,20 @@ ops = [
 ]
 
 [[entry]]
-path = "csrc/libtorch_stable/topk.cu"
+path = "csrc/topk.cu"
 tier = "a"
 hazards = ["cub", "ptx"]
 ops = ["persistent_topk"]
 notes = "Hazards live in persistent_topk.cuh and topk_histogram_4096.cuh."
 
 [[entry]]
-path = "csrc/libtorch_stable/quantization/activation_kernels.cu"
+path = "csrc/quantization/activation_kernels.cu"
 tier = "a"
 hazards = ["cp_async", "ptx"]
 ops = ["persistent_masked_m_silu_mul_quant", "silu_and_mul_quant"]
 
 [[entry]]
-path = "csrc/libtorch_stable/quantization/w8a8/fp8/common.cu"
+path = "csrc/quantization/w8a8/fp8/common.cu"
 tier = "a"
 hazards = ["cub", "ptx"]
 ops = [
@@ -281,32 +281,26 @@ ops = [
 ]
 
 [[entry]]
-path = "csrc/libtorch_stable/quantization/w8a8/fp8/per_token_group_quant.cu"
+path = "csrc/quantization/w8a8/fp8/per_token_group_quant.cu"
 tier = "a"
 hazards = []
-ops = ["per_token_group_fp8_quant", "per_token_group_fp8_quant_packed"]
+ops = ["per_token_group_fp8_quant", "per_token_group_fp8_quant_packed", "per_token_group_quant_int8"]
 
 [[entry]]
-path = "csrc/libtorch_stable/quantization/w8a8/int8/per_token_group_quant.cu"
-tier = "a"
-hazards = []
-ops = ["per_token_group_quant_int8"]
-
-[[entry]]
-path = "csrc/libtorch_stable/quantization/w8a8/int8/scaled_quant.cu"
+path = "csrc/quantization/w8a8/int8/scaled_quant.cu"
 tier = "a"
 hazards = ["cub", "ptx"]
 ops = ["dynamic_scaled_int8_quant", "static_scaled_int8_quant"]
 
 [[entry]]
-path = "csrc/libtorch_stable/moe/torch_bindings.cpp"
+path = "csrc/moe/torch_bindings.cpp"
 tier = "a"
 hazards = []
 ops = []
 notes = "Op registrations for the _moe_C namespace. Pruned by the port tool."
 
 [[entry]]
-path = "csrc/libtorch_stable/moe/moe_align_sum_kernels.cu"
+path = "csrc/moe/moe_align_sum_kernels.cu"
 tier = "a"
 hazards = ["cub"]
 ops = [
@@ -317,27 +311,27 @@ ops = [
 ]
 
 [[entry]]
-path = "csrc/libtorch_stable/moe/topk_softmax_kernels.cu"
+path = "csrc/moe/topk_softmax_kernels.cu"
 tier = "a"
 hazards = ["cub"]
 ops = ["topk_sigmoid", "topk_softmax"]
 
 [[entry]]
-path = "csrc/libtorch_stable/moe/grouped_topk_kernels.cu"
+path = "csrc/moe/grouped_topk_kernels.cu"
 tier = "a"
 hazards = ["coop_groups", "cub", "ptx"]
 ops = ["grouped_topk"]
 notes = "Heaviest tier-a file: cooperative groups plus PTX in moeTopKFuncs.cuh. Required because PPU MoE models route through grouped_topk."
 
 [[entry]]
-path = "csrc/libtorch_stable/moe/topk_softplus_sqrt_kernels.cu"
+path = "csrc/moe/topk_softplus_sqrt_kernels.cu"
 tier = "a"
 hazards = ["cub"]
 ops = ["topk_softplus_sqrt"]
 notes = "Promoted from tier b for DeepSeek V4 biased and hash routing, including the FP32 top-6 fast path."
 
 [[entry]]
-path = "csrc/libtorch_stable/fused_deepseek_v4_qnorm_rope_kv_insert_kernel.cu"
+path = "csrc/fused_deepseek_v4_qnorm_rope_kv_insert_kernel.cu"
 tier = "a"
 hazards = []
 ops = [
@@ -348,28 +342,28 @@ ops = [
 notes = "Promoted from tier b for DeepSeek V4's first real attention forward: Q RMSNorm/RoPE and BF16, per-tensor FP8, or paged UE8M0 cache insertion."
 
 [[entry]]
-path = "csrc/libtorch_stable/fused_minimax_m3_qknorm_rope_kv_insert_kernel.cu"
+path = "csrc/fused_minimax_m3_qknorm_rope_kv_insert_kernel.cu"
 tier = "a"
 hazards = ["ptx"]
 ops = ["fused_minimax_m3_qknorm_rope_kv_insert"]
 notes = "MiniMax M3 dense/sparse forward dependency. HGGC uses ordinary launches; norm, NeoX RoPE, main/index cache layouts and SDK FP8 conversions are preserved. Device verification is required on PPU 1.0 and 1.5."
 
 [[entry]]
-path = "csrc/libtorch_stable/mamba/selective_scan_fwd.cu"
+path = "csrc/mamba/selective_scan_fwd.cu"
 tier = "a"
 hazards = ["cub"]
 ops = ["selective_scan_fwd"]
 notes = "Mamba1/Jamba prefill scan. Uses SDK CUB BlockLoad/BlockStore/BlockScan through the existing ppu_kernel_compat.h namespace bridge, preserving grouped variable B/C, initial states, null slots and APC chunk state writes."
 
 [[entry]]
-path = "csrc/libtorch_stable/cache_kernels_fused.cu"
+path = "csrc/cache_kernels_fused.cu"
 tier = "a"
 hazards = ["ptx"]
 ops = ["concat_and_cache_mla_rope_fused"]
 notes = "Supply the MLA RoPE/cache compiler-fusion target. Uses the same SDK FP8 conversion closure as tier-a cache_kernels.cu; supports NeoX/GPT-J and padded slot mappings."
 
 [[entry]]
-path = "csrc/libtorch_stable/fused_kimi_k3_mla_key_concat_kv_cache_kernel.cu"
+path = "csrc/fused_kimi_k3_mla_key_concat_kv_cache_kernel.cu"
 tier = "a"
 hazards = ["ptx"]
 ops = [
@@ -389,27 +383,27 @@ notes = "Kimi K3 prefill/decode dependency for BF16, E4M3FN and 656-byte block-s
 # ---------------------------------------------------------------------------
 
 [[entry]]
-path = "csrc/libtorch_stable/ngram_embedding_kernels.cu"
+path = "csrc/ngram_embedding_kernels.cu"
 tier = "b"
 hazards = []
 ops = ["ngram_compute_n_gram_ids"]
 
 [[entry]]
-path = "csrc/libtorch_stable/quantization/gptq/q_gemm.cu"
+path = "csrc/quantization/gptq/q_gemm.cu"
 tier = "b"
 hazards = ["cublas"]
 ops = ["gptq_gemm", "gptq_shuffle"]
 notes = "The only tier-a/b file that calls cuBLAS from its own body rather than inheriting the include from torch_utils.h."
 
 [[entry]]
-path = "csrc/libtorch_stable/attention/merge_attn_states.cu"
+path = "csrc/attention/merge_attn_states.cu"
 tier = "b"
 hazards = ["ptx"]
 ops = ["merge_attn_states"]
 notes = "The native TU stays uncompiled. native.triton_ops supplies the _C op with a Triton LSE merge and software E4M3FN output on PPU 1.0/1.5."
 
 [[entry]]
-path = "csrc/libtorch_stable/custom_all_reduce.cu"
+path = "csrc/custom_all_reduce.cu"
 tier = "b"
 hazards = []
 ops = [
@@ -427,26 +421,26 @@ ops = [
 notes = "Registers the _C_custom_ar namespace. PPU falls back to pccl collectives until this tier lands."
 
 [[entry]]
-path = "csrc/libtorch_stable/custom_all_gather_reduce_scatter.cu"
+path = "csrc/custom_all_gather_reduce_scatter.cu"
 tier = "b"
 hazards = []
 ops = []
 
 [[entry]]
-path = "csrc/libtorch_stable/custom_all_gather_reduce_scatter_ops.cpp"
+path = "csrc/custom_all_gather_reduce_scatter_ops.cpp"
 tier = "b"
 hazards = []
 ops = []
 
 [[entry]]
-path = "csrc/libtorch_stable/minimax_reduce_rms_kernel.cu"
+path = "csrc/minimax_reduce_rms_kernel.cu"
 tier = "b"
 hazards = ["coop_groups", "ptx"]
 ops = ["minimax_allreduce_rms_qk"]
 notes = "Sits inside upstream's CUTLASS-gated CMake block but has no CUTLASS in its include closure, so it is hoisted into a normal tier."
 
 [[entry]]
-path = "csrc/libtorch_stable/moe/moe_wna16.cu"
+path = "csrc/moe/moe_wna16.cu"
 tier = "b"
 hazards = ["ptx"]
 ops = ["moe_wna16_gemm"]
@@ -456,13 +450,7 @@ ops = ["moe_wna16_gemm"]
 # ---------------------------------------------------------------------------
 
 [[entry]]
-path = "csrc/libtorch_stable/cutlass_extensions/common.cpp"
-tier = "x"
-hazards = ["cutlass", "ptx"]
-ops = []
-
-[[entry]]
-path = "csrc/libtorch_stable/quantization/w8a8/cutlass/scaled_mm_entry.cu"
+path = "csrc/quantization/w8a8/cutlass/scaled_mm_entry.cu"
 tier = "x"
 hazards = ["cutlass"]
 ops = [
@@ -479,7 +467,7 @@ ops = [
 notes = "The two ops the plugin calls today -- cutlass_scaled_mm and cutlass_scaled_mm_azp -- are here. This is the known regression of phase 7."
 
 [[entry]]
-path = "csrc/libtorch_stable/quantization/fp4/nvfp4_quant_entry.cu"
+path = "csrc/quantization/fp4/nvfp4_quant_entry.cu"
 tier = "x"
 hazards = ["cutlass", "ptx"]
 ops = [
@@ -492,20 +480,20 @@ ops = [
 notes = "The kernel (fp4/nvfp4_quant_kernels.cu) is portable; only this 175-line entry needs CUTLASS. A CUTLASS-free rewrite would promote scaled_fp4_quant to tier b."
 
 [[entry]]
-path = "csrc/libtorch_stable/quantization/fp4/nvfp4_scaled_mm_entry.cu"
+path = "csrc/quantization/fp4/nvfp4_scaled_mm_entry.cu"
 tier = "x"
 hazards = ["cutlass"]
 ops = ["cutlass_scaled_fp4_mm", "cutlass_scaled_mm_supports_fp4"]
 
 [[entry]]
-path = "csrc/libtorch_stable/quantization/awq/gemm_kernels.cu"
+path = "csrc/quantization/awq/gemm_kernels.cu"
 tier = "x"
 hazards = ["mma", "ptx"]
 ops = ["awq_dequantize", "awq_gemm"]
 notes = "Hoisted out of upstream's CUTLASS-gated block -- it has no CUTLASS -- but it is hand-written mma.sync, which is a rewrite rather than a port."
 
 [[entry]]
-path = "csrc/libtorch_stable/moe/moe_permute_unpermute_op.cu"
+path = "csrc/moe/moe_permute_unpermute_op.cu"
 tier = "x"
 hazards = ["cutlass"]
 ops = [
@@ -515,7 +503,7 @@ ops = [
 ]
 
 [[entry]]
-path = "csrc/libtorch_stable/moe/permute_unpermute_kernels/moe_permute_unpermute_kernel.cu"
+path = "csrc/moe/permute_unpermute_kernels/moe_permute_unpermute_kernel.cu"
 tier = "x"
 hazards = ["cub"]
 ops = []
@@ -523,7 +511,7 @@ notes = "No CUTLASS of its own, but it exists only to serve moe_permute_unpermut
 
 
 [[entry]]
-path = "csrc/libtorch_stable/vocab_parallel_embedding_kernels.cu"
+path = "csrc/vocab_parallel_embedding_kernels.cu"
 tier = "a"
 hazards = []
 ops = ["vocab_parallel_embedding"]

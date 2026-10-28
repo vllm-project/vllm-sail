@@ -55,12 +55,16 @@ echo "GOLDEN_SEED_DIR=${GOLDEN_SEED_DIR:-/source/tests/e2e/models/_golden}"
 python -c 'import sys; print("python", sys.version)'
 
 # ------------------------------------------------------------------
-log "prepare SAIL PyTorch stack"
+# `capture` records the stack the image already ships. `prepare` would fetch a
+# torch tarball from the internal artifactory and swap it in, but that endpoint
+# answers 401 from the runners and the image torch is what the smoke lane
+# serves models with, so there is nothing to replace.
+log "capture SAIL PyTorch stack"
 WHEELS_DIR="$(cd -- "${WHEELS_DIR}" && pwd)"
 python "${ROOT_DIR}/scripts/ci/ppu_wheel_manifest.py" verify "${WHEELS_DIR}"
 
 export PIP_CONSTRAINT="${RESULTS_DIR}/image-constraints.txt"
-python "${ROOT_DIR}/scripts/ci/ppu_image_stack.py" prepare \
+python "${ROOT_DIR}/scripts/ci/ppu_image_stack.py" capture \
     --sdk /usr/local/PPU_SDK --output "${RESULTS_DIR}/image-stack.json" \
     --constraints "${PIP_CONSTRAINT}"
 

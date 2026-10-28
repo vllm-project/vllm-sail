@@ -21,7 +21,9 @@ manifest = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(manifest)
 
 
-def make_wheels(directory: Path, *, rust: bool = True) -> Path:
+def make_wheels(
+    directory: Path, *, rust: bool = True, parser_bridge: bool = True
+) -> Path:
     for name, version in (("vllm", "0.30.0+empty"), ("vllm_sail", "0.1.dev1")):
         target = directory / name
         target.mkdir(exist_ok=True)
@@ -33,7 +35,10 @@ def make_wheels(directory: Path, *, rust: bool = True) -> Path:
             )
             if name == "vllm" and rust:
                 archive.writestr("vllm/vllm-rs", b"test executable")
-                archive.writestr("vllm/_rust_tool_parser.abi3.so", b"test extension")
+                if parser_bridge:
+                    archive.writestr(
+                        "vllm/_rust_tool_parser.abi3.so", b"test extension"
+                    )
             elif name == "vllm_sail":
                 for module in ("_C", "_moe_C", "_upstream_C", "_upstream_moe_C"):
                     archive.writestr(f"vllm_sail/{module}.abi3.so", b"test extension")
@@ -55,6 +60,27 @@ def test_preserves_real_wheel_versions_and_verifies_hashes(tmp_path: Path) -> No
 
 def test_rejects_missing_rust_even_when_wheel_exists(tmp_path: Path) -> None:
     make_wheels(tmp_path, rust=False)
+    with pytest.raises(ValueError, match="required Rust artifacts"):
+        manifest.wheel_records(tmp_path)
+
+
+def test_accepts_upstream_frontend_without_removed_parser_bridge(
+    tmp_path: Path,
+) -> None:
+    make_wheels(tmp_path, parser_bridge=False)
+    data = record(tmp_path)
+    assert manifest.verify(tmp_path) == data
+
+
+@pytest.mark.parametrize("binary", [None, b""])
+def test_parser_bridge_does_not_replace_required_frontend(
+    tmp_path: Path, binary: bytes | None
+) -> None:
+    wheel = make_wheels(tmp_path, rust=False)
+    with zipfile.ZipFile(wheel, "a") as archive:
+        archive.writestr("vllm/_rust_tool_parser.abi3.so", b"test extension")
+        if binary is not None:
+            archive.writestr("vllm/vllm-rs", binary)
     with pytest.raises(ValueError, match="required Rust artifacts"):
         manifest.wheel_records(tmp_path)
 

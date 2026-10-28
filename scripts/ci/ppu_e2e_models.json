@@ -29,7 +29,7 @@
   {
     "key": "deepseek-v4-int8",
     "category": "accuracy",
-    "model_id": "T-HEAD/DeepSeek-V4-Flash-0731-Quant-W-INT8-PerChannel-A-INT8-PerToken",
+    "model_id": "T-HEAD/DeepSeek-V4-Flash-0731-W8A8-INT8",
     "served_name": "deepseek-v4-int8",
     "board": "OAM-810E",
     "tp": 8,

@@ -31,7 +31,9 @@ on:
       gsm8k_dataset_path:
         description: Host GSM8K dataset directory
         type: string
-        default: /ppusw/datasets/vision/EvalScope/data/gsm8k/v2/gsm8k
+        # /ppusw is the developer box mount; the CI runners mount the same NFS
+        # export at /nas_aisw/datasets, so the trees repeat one level deeper.
+        default: /nas_aisw/datasets/datasets/vision/EvalScope/data/gsm8k/v2/gsm8k
 
 permissions:
   contents: read

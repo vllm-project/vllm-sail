@@ -16,7 +16,7 @@ from vllm_sail.patch.utils import patch
 from vllm_sail.registry.moe_backends._extend import extend_enum
 
 _MODULE = "vllm.model_executor.layers.fused_moe.oracle.mxfp4"
-_AFFECTED = ">=0.31.0,<0.32.0"
+_AFFECTED = ">=0.32.0,<0.33.0"
 _REMOVE_WHEN = (
     "upstream gains a register_moe_backend() extension point mirroring "
     "register_linear_kernel(), which would delete this patch."
@@ -173,8 +173,9 @@ def select_mxfp4_moe_backend(
 
     Args:
         config: MoE configuration
-        activation_key: Optional activation quantization key. If provided,
-            overrides the default activation key for backend selection.
+        activation_key: Optional activation quantization key declared by
+            the checkpoint. Backends that match it are preferred, with BF16
+            activation backends as a fallback.
             Use kFp8StaticTensorSym for W4A8 scheme.
 
     Note: Shape-specific fallbacks may still occur at runtime.
@@ -227,7 +228,7 @@ def select_mxfp4_moe_backend(
                 else _backend_activation_key(requested_backend)
             )
             try:
-                return _return_or_raise(
+                selected = _return_or_raise(
                     requested_backend,
                     config,
                     kMxfp4Static,
@@ -236,6 +237,9 @@ def select_mxfp4_moe_backend(
                 )
             except ValueError as e:
                 last_error = e
+            else:
+                _warn_on_bf16_fallback(requested_backend, requested_activation_key)
+                return selected
         assert last_error is not None
         raise last_error
 
@@ -261,10 +265,10 @@ def select_mxfp4_moe_backend(
 
     unsupported_reasons = []
     for backend in AVAILABLE_BACKENDS:
-        # Use requested_activation_key if provided, otherwise use backend default
+        # EMULATION takes the requested key, other backends use their own
         act_key = (
             requested_activation_key
-            if requested_activation_key is not None
+            if backend == Mxfp4MoeBackend.EMULATION
             else _backend_activation_key(backend)
         )
         for k_cls in backend_to_kernel_cls(backend):
@@ -273,6 +277,7 @@ def select_mxfp4_moe_backend(
             )
             if supported:
                 logger.info_once(_make_log_backend(backend))
+                _warn_on_bf16_fallback(backend, requested_activation_key)
                 return backend, k_cls
             else:
                 logger.debug_once(_make_log_unsupported(backend, reason))

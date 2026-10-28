@@ -102,6 +102,7 @@ class _StubState:
         self.upstream_get_quant_method: list[Any] = []
         self.upstream_make_quant_config: list[dict[str, Any]] = []
         self.upstream_convert: list[Any] = []
+        self.upstream_convert_kwargs: list[dict[str, Any]] = []
         self.upstream_round_up: list[Any] = []
         self.ocp_kwargs: dict[str, Any] | None = None
         self.preprocessed: list[Any] = []
@@ -162,8 +163,17 @@ def _build_stub_vllm(
         state.upstream_make_quant_config.append(kwargs)
         return ("upstream-quant-config", kwargs)
 
-    def convert_weight(*args, activation=None):
+    def convert_weight(
+        *args, activation=None, use_separated_a4w4=False, activation_key=None
+    ):
         state.upstream_convert.append(args)
+        state.upstream_convert_kwargs.append(
+            {
+                "activation": activation,
+                "use_separated_a4w4": use_separated_a4w4,
+                "activation_key": activation_key,
+            }
+        )
         return ("upstream-convert",)
 
     def round_up_sizes(backend, hidden_size, intermediate_size, activation=None):
@@ -607,10 +617,18 @@ def test_oracle_convert_weights_preprocesses_scales(
     assert result[4].dtype == torch.float32
     assert state.upstream_convert == []
 
-    oracle.convert_weight_to_mxfp4_moe_kernel_format(
-        "DEEPGEMM_MXFP4", object(), "w1", "w2", w1s, w2s
-    )
-    assert len(state.upstream_convert) == 1
+    for activation_key in (None, object()):
+        oracle.convert_weight_to_mxfp4_moe_kernel_format(
+            "DEEPGEMM_MXFP4",
+            object(),
+            "w1",
+            "w2",
+            w1s,
+            w2s,
+            activation_key=activation_key,
+        )
+        assert state.upstream_convert_kwargs[-1]["activation_key"] is activation_key
+    assert len(state.upstream_convert) == 2
 
 
 def test_oracle_round_up_sizes_32_on_ppu_backends(
@@ -630,6 +648,34 @@ def test_oracle_round_up_sizes_32_on_ppu_backends(
         "DEEPGEMM_MXFP4", 2881, 2881
     ) == (2881, 2881)
     assert state.upstream_round_up == [("DEEPGEMM_MXFP4", 2881, 2881)]
+
+
+@pytest.mark.parametrize("separated", [False, True])
+def test_weight_conversion_preserves_upstream_layout_choice(separated):
+    """Non-PPU backends must receive the caller's AITER layout selection."""
+    calls = []
+    expected = object()
+
+    def upstream(*args, **kwargs):
+        calls.append((args, kwargs))
+        return expected
+
+    convert = function(
+        MODULE_PATH,
+        "install._convert_weight",
+        dict(_ppu_backends=lambda _: (), _upstream_convert_weight=upstream),
+    )
+    tensors = tuple(object() for _ in range(5))
+    activation = object()
+    assert (
+        convert("AITER", *tensors, activation=activation, use_separated_a4w4=separated)
+        is expected
+    )
+    assert calls[0][1] == {
+        "activation": activation,
+        "use_separated_a4w4": separated,
+        "activation_key": None,
+    }
 
 
 @pytest.mark.parametrize(

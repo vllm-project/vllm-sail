@@ -80,7 +80,7 @@ class DeepSeekV4MTP(NvidiaDeepSeekV4MTP):
 
         # Pre-compute expert mapping ONCE.
         first_layer = next(iter(self.model.layers.values()))
-        if first_layer.mtp_block.ffn.use_mega_moe:
+        if first_layer.mtp_block.ffn.use_native_mega_moe:
             expert_mapping = make_deepseek_v4_expert_params_mapping(
                 self.config.n_routed_experts
             )
@@ -177,13 +177,18 @@ class DeepSeekV4MTP(NvidiaDeepSeekV4MTP):
                     if name not in params_dict:
                         continue
                     param = params_dict[name]
-                    # Attention sink TP slicing
+                    # The release sink has padded local heads and no registered
+                    # loader. Copy only this rank's heads, preserving -inf padding.
                     if name.endswith(".attn_sink"):
-                        loaded_weight = loaded_weight[head_rank_start:head_rank_end]
+                        narrow = loaded_weight[head_rank_start:head_rank_end]
+                        param[: narrow.shape[0]].copy_(narrow)
+                        loaded_params.add(name)
+                        continue
                     weight_loader = getattr(
                         param, "weight_loader", default_weight_loader
                     )
                     weight_loader(param, loaded_weight)
                     loaded_params.add(name)
 
+        self.process_weights_after_loading()
         return loaded_params

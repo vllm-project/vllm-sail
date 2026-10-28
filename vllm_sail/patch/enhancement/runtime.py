@@ -17,11 +17,8 @@ from vllm_sail.patch.bodies import bind_body
 from vllm_sail.patch.utils import patch
 
 
-def may_reinitialize_input_batch(
-    self, kv_cache_config: KVCacheConfig, kernel_block_sizes: list[int]
-) -> None:
-    """
-    Re-initialize the input batch if the block sizes are different from
+def may_reinitialize_input_batch(self, kv_cache_config: KVCacheConfig) -> None:
+    """Re-initialize the input batch if the block sizes are different from
     what it was originally created with. This happens when the final
     block size (determined after model loading) differs from the
     placeholder used during __init__, or when there are multiple
@@ -29,7 +26,7 @@ def may_reinitialize_input_batch(
 
     Args:
         kv_cache_config: The KV cache configuration.
-        kernel_block_sizes: The kernel block sizes for each KV cache group.
+
     """
     block_sizes = []
     max_num_blocks = []
@@ -53,7 +50,6 @@ def may_reinitialize_input_batch(
 
     if (
         block_sizes != self._init_block_sizes
-        or kernel_block_sizes != self._init_kernel_block_sizes
         or max_num_blocks != self._init_max_num_blocks
         or slot_mapping_modes != self._init_slot_mapping_modes
         or self.cp_kv_cache_interleave_size
@@ -63,7 +59,6 @@ def may_reinitialize_input_batch(
         # PPU MODIFICATION: end
     ):
         self._init_block_sizes = block_sizes
-        self._init_kernel_block_sizes = kernel_block_sizes
         self._init_max_num_blocks = max_num_blocks
         self._init_slot_mapping_modes = slot_mapping_modes
         self.cp_kv_cache_interleave_size = (
@@ -78,7 +73,6 @@ def may_reinitialize_input_batch(
                 device=self.device,
                 vocab_size=self.model_config.get_vocab_size(),
                 block_sizes=block_sizes,
-                kernel_block_sizes=kernel_block_sizes,
                 max_num_blocks_per_req=max_num_blocks,
                 num_spec_tokens=self.num_spec_tokens,
                 logitsprocs=self.input_batch.logitsprocs,
@@ -93,10 +87,6 @@ def may_reinitialize_input_batch(
     assert self._init_block_sizes == block_sizes, (
         f"InputBatch block_sizes {self._init_block_sizes} != "
         f"kv_cache block_sizes {block_sizes}"
-    )
-    assert self._init_kernel_block_sizes == kernel_block_sizes, (
-        f"InputBatch kernel_block_sizes {self._init_kernel_block_sizes} "
-        f"!= kv_cache kernel_block_sizes {kernel_block_sizes}"
     )
 
 
@@ -128,6 +118,7 @@ def rejection_sample(
     use_block_verification: bool = False,
     contexts: torch.Tensor | None = None,
     watermarking: torch.Tensor | None = None,
+    watermarking_skip_mask: torch.Tensor | None = None,
     watermark_key: int | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     assert target_logits.ndim == 2 and target_logits.stride(-1) == 1
@@ -141,9 +132,13 @@ def rejection_sample(
     assert watermark == (watermarking is not None) == (watermark_key is not None), (
         "contexts, watermarking and watermark_key must be set together."
     )
+    assert watermarking_skip_mask is None or watermark, (
+        "watermarking_skip_mask requires watermarking."
+    )
     contexts_stride = 0
     context_width = 1
     watermarking_bytes: torch.Tensor | None = None
+    watermarking_skip_mask_bytes: torch.Tensor | None = None
     watermark_key_0 = 0
     watermark_key_1 = 0
     if contexts is not None:
@@ -158,6 +153,12 @@ def rejection_sample(
         contexts_stride = contexts.stride(0)
         context_width = contexts.shape[-1]
         watermarking_bytes = watermarking.view(torch.uint8)
+        if watermarking_skip_mask is not None:
+            assert watermarking_skip_mask.shape == (num_logits,)
+            assert watermarking_skip_mask.dtype == torch.bool
+            if not watermarking_skip_mask.is_contiguous():
+                watermarking_skip_mask = watermarking_skip_mask.contiguous()
+            watermarking_skip_mask_bytes = watermarking_skip_mask.view(torch.uint8)
         watermark_key_0 = watermark_key & 0xFFFFFFFF
         watermark_key_1 = watermark_key >> 32
     draft_logits_stride_0 = 0
@@ -374,6 +375,7 @@ def rejection_sample(
         contexts,
         contexts_stride,
         watermarking_bytes,
+        watermarking_skip_mask_bytes,
         watermark_key_0,
         watermark_key_1,
         vocab_size,
@@ -383,6 +385,7 @@ def rejection_sample(
         USE_BLOCK_VERIFICATION=use_block_verification,
         CONTEXT_WIDTH=context_width,
         WATERMARK=watermark,
+        DEDUPLICATE_CONTEXTS=watermarking_skip_mask is not None,
     )
 
     # Insert the resampled tokens into the output sampled.
@@ -423,7 +426,7 @@ def _install(module, owner, attribute, body):
     target = attribute if owner is module else owner.__name__ + "." + attribute
     metadata = dict(
         reason="PPU must reinitialize batches on context-length changes and insert speculative tokens within one warp.",
-        affected_versions=">=0.31.0,<0.32.0",
+        affected_versions=">=0.32.0,<0.33.0",
         remove_when="Upstream includes the context-length invalidation and one-warp insertion fixes.",
     )
     patch(module.__name__, target, **metadata)(dispatch)

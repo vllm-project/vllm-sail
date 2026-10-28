@@ -94,9 +94,7 @@ GOLDEN_DIR = _PROJECT_ROOT / "tests" / "e2e" / "models" / "_golden"
 # --- Model configurations --------------------------------------------------
 MODEL_CONFIGS: dict[str, dict[str, Any]] = {
     "deepseek_v4_int8": {
-        "model_id": (
-            "T-HEAD/DeepSeek-V4-Flash-0731-Quant-W-INT8-PerChannel-A-INT8-PerToken"
-        ),
+        "model_id": "T-HEAD/DeepSeek-V4-Flash-0731-W8A8-INT8",
         "served_name": "deepseek-v4-int8",
         "extra_flags": ["--trust-remote-code"],
         "chip": "810e",

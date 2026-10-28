@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Generic MXFP8 selection and upstream emulation lifecycle, without torch."""
 
+import runpy
 from types import SimpleNamespace
 
 import pytest
@@ -68,6 +69,9 @@ def test_upstream_selection_preserves_dense_bmm_and_cuda_paths(
         is_ppu=lambda: is_ppu,
         is_cuda=lambda: True,
         is_device_capability_family=lambda family: not is_ppu and family == 100,
+        get_device_capability=lambda: SimpleNamespace(
+            to_int=lambda: 89 if is_ppu else 100
+        ),
     )
 
     class Emulation:
@@ -129,6 +133,13 @@ def test_upstream_selection_preserves_dense_bmm_and_cuda_paths(
         "envs": SimpleNamespace(VLLM_DISABLED_KERNELS=[]),
         "logger": logger,
     }
+    priority = runpy.run_path(
+        str(
+            upstream_source_root
+            / "vllm/model_executor/layers/quantization/utils/humming/priority.py"
+        )
+    )
+    namespace["prioritize_humming"] = priority["prioritize_humming"]
     path = upstream_source_root / "vllm/model_executor/kernels/linear/__init__.py"
     for name in (
         "_filter_kernels_by_backend",
@@ -148,6 +159,26 @@ def test_upstream_selection_preserves_dense_bmm_and_cuda_paths(
     assert type(selected) is expected
     assert selected.config.bmm_batch_size == bmm_batch_size
     assert selected.config.weight_shape == (64, 576)
+
+
+@pytest.mark.upstream_source
+@pytest.mark.parametrize("capability", [80, 89, 90, 100])
+def test_upstream_humming_priority_keeps_ppu_registration_first(
+    upstream_source_root, capability
+):
+    priority = runpy.run_path(
+        str(
+            upstream_source_root
+            / "vllm/model_executor/layers/quantization/utils/humming/priority.py"
+        )
+    )
+    ppu, marlin, humming = (type(name, (), {}) for name in ("PPU", "Marlin", "Humming"))
+    candidates = [ppu, marlin, humming]
+    selected = priority["prioritize_humming"](candidates, capability)
+    assert selected == (
+        [ppu, humming, marlin] if capability == 90 else [ppu, marlin, humming]
+    )
+    assert candidates == [ppu, marlin, humming]
 
 
 class Tensor:

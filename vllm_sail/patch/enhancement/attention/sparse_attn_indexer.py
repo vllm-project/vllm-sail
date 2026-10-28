@@ -38,7 +38,7 @@ from vllm_sail.patch.bodies import bind_body
 from vllm_sail.patch.utils import patch
 from vllm_sail.utils.deep_gemm import is_deep_gemm_supported
 
-_AFFECTED = ">=0.31.0,<0.32.0"
+_AFFECTED = ">=0.32.0,<0.33.0"
 _MODULE = "vllm.model_executor.layers.sparse_attn_indexer"
 
 logger = init_logger(__name__)
@@ -110,6 +110,7 @@ def sparse_attn_indexer_init(
     self.dcp_world_size = parallel_config.decode_context_parallel_size
     self.dcp_rank = get_dcp_group().rank_in_group if self.dcp_world_size > 1 else 0
     self.use_pcp = parallel_config.prefill_context_parallel_size > 1
+    self.pcp_shard_decode_requests = parallel_config.pcp_shard_decode_requests
     self._cp_kv_cache_interleave_size: int | None = None
     # PPU MODIFICATION: begin
     from vllm_sail.utils.deep_gemm import is_deep_gemm_supported

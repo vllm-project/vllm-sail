@@ -11,8 +11,8 @@
 #include <hggc_bf16.h>
 #include <hggc_fp8.h>
 
-#include "libtorch_stable/dispatch_utils.h"
-#include "libtorch_stable/torch_utils.h"
+#include "dispatch_utils.h"
+#include "torch_utils.h"
 
 #ifndef USE_ROCM
 typedef __half torch_Half;

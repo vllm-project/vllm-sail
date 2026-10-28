@@ -17,7 +17,7 @@ from vllm_sail.patch.utils import PATCH_MARKER, patch
 _MODULE = "vllm.model_executor.layers.fused_moe.all2all_utils"
 _META = dict(
     reason="The all-to-all factory needs PPU DeepEP quantized dispatch and completion support.",
-    affected_versions=">=0.31.0,<0.32.0",
+    affected_versions=">=0.32.0,<0.33.0",
     remove_when="The prepare/finalize factory supports plugin backend registration.",
 )
 
@@ -35,6 +35,10 @@ def _maybe_make_prepare_finalize_body(
     all2all_manager: Any | None = None,
     input_dtype: torch.dtype | None = None,
 ) -> FusedMoEPrepareAndFinalize | None:
+    if moe.moe_parallel_config.use_passthrough_all2all:
+        # The experts dispatch and combine themselves, in every EP topology.
+        return PassThroughPrepareAndFinalize()
+
     if not moe.moe_parallel_config.use_all2all_kernels:
         if not allow_new_interface:
             return None
@@ -341,6 +345,7 @@ _CONSUMERS = {
         "vllm.model_executor.layers.fused_moe.oracle.mxfp4",
         "vllm.model_executor.layers.fused_moe.oracle.int8",
         "vllm.model_executor.layers.quantization.utils.humming.moe",
+        "vllm.model_executor.layers.quantization.modelopt_block_quant",
     ],
     "maybe_roundup_layer_hidden_size": [],
 }

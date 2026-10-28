@@ -35,8 +35,9 @@ the compiled set also requires device validation.
 
 ## Regenerate upstream kernels
 
-Use a vLLM checkout at the manifest's `upstream_ref` (currently `v0.31.0`) and
-make sailify available.
+Use a vLLM checkout at the manifest's exact `upstream_ref`, matching
+[the verified pin](../../.github/vllm-main-verified.commit), and make sailify
+available. The supported release baseline is `v0.32.0`.
 
 ```bash
 export PYTHONPATH=/path/to/sailify${PYTHONPATH:+:$PYTHONPATH}

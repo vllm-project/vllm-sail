@@ -106,7 +106,14 @@ def load_patch(relative):
     return mod
 
 
-def test_optional_gates_rebind_preloaded_and_future_consumers(modules):
+@pytest.mark.parametrize(
+    "cute_consumer",
+    [
+        "vllm.models.deepseek_v4.common.ops.cache_utils",
+        "vllm.models.glm5next.nvidia.sparse_indexer",
+    ],
+)
+def test_optional_gates_rebind_preloaded_and_future_consumers(modules, cute_consumer):
     platform = types.SimpleNamespace(ppu=True, is_ppu=lambda: platform.ppu)
     modules("vllm.platforms", current_platform=platform)
 
@@ -114,7 +121,7 @@ def test_optional_gates_rebind_preloaded_and_future_consumers(modules):
         return True
 
     provider = modules("vllm.utils.import_utils", has_cutedsl=probe, has_humming=probe)
-    cute = modules("vllm.models.deepseek_v4.common.ops.cache_utils", has_cutedsl=probe)
+    cute = modules(cute_consumer, has_cutedsl=probe)
     humming = modules(
         "vllm.model_executor.layers.quantization.utils.humming.moe", has_humming=probe
     )
@@ -166,7 +173,9 @@ def test_compressor_uses_supported_kernel(modules, ppu, head, two_stage, expecte
         num_decode_tokens=1,
     )
     context = types.SimpleNamespace(
-        attn_metadata={"state": meta, "kv": object()}, cudagraph_runtime_mode="none"
+        attn_metadata={"state": meta, "kv": object()},
+        cudagraph_runtime_mode="none",
+        capturing=False,
     )
     cache = types.SimpleNamespace(shape=(2, 64, 2048), dtype="u8")
     cls = type("DeepseekCompressor", (), {"forward": lambda *a: None})
@@ -179,7 +188,13 @@ def test_compressor_uses_supported_kernel(modules, ppu, head, two_stage, expecte
         CompressorMetadata=object,
         Any=object,
         CUDAGraphMode=types.SimpleNamespace(FULL="full"),
-        torch=types.SimpleNamespace(uint8="u8", float8_e4m3fn="fp8"),
+        torch=types.SimpleNamespace(
+            uint8="u8",
+            float8_e4m3fn="fp8",
+            cuda=types.SimpleNamespace(
+                is_current_stream_capturing=lambda: context.capturing
+            ),
+        ),
         _SAVE_PARTIAL_STATES_KERNEL=kernel("save"),
         compress_norm_rope_store_triton=kernel("triton"),
         compress_norm_rope_store_two_stage_triton=kernel("two_stage"),
@@ -224,6 +239,7 @@ def test_compressor_uses_supported_kernel(modules, ppu, head, two_stage, expecte
         obj.forward(scores, object(), types.SimpleNamespace(cos_sin_cache=object()))
         assert [name for name, _ in calls] == ["save"]
         context.cudagraph_runtime_mode = "full"
+        context.capturing = True
         calls.clear()
         obj.forward(scores, object(), types.SimpleNamespace(cos_sin_cache=object()))
         assert [name for name, _ in calls] == ["save", expected]
@@ -738,7 +754,6 @@ def test_input_batch_reinitializes_when_only_context_length_changes(modules):
         ),
         max_encoder_len=0,
         _init_block_sizes=[],
-        _init_kernel_block_sizes=[],
         _init_max_num_blocks=[],
         _init_slot_mapping_modes=[],
         input_batch=types.SimpleNamespace(
@@ -757,10 +772,10 @@ def test_input_batch_reinitializes_when_only_context_length_changes(modules):
         cache_config=types.SimpleNamespace(use_replayssm=False),
     )
     old = runner.input_batch
-    runner.may_reinitialize_input_batch(types.SimpleNamespace(kv_cache_groups=[]), [])
+    runner.may_reinitialize_input_batch(types.SimpleNamespace(kv_cache_groups=[]))
     assert runner.input_batch is not old and runner.input_batch.max_model_len == 8192
     new = runner.input_batch
-    runner.may_reinitialize_input_batch(types.SimpleNamespace(kv_cache_groups=[]), [])
+    runner.may_reinitialize_input_batch(types.SimpleNamespace(kv_cache_groups=[]))
     assert runner.input_batch is new
 
 
@@ -847,8 +862,15 @@ def test_deepseek_config_preserves_dense_channelwise_patterns_for_mtp(modules):
     ],
 )
 @pytest.mark.parametrize("explicit_manager", [False, True])
+@pytest.mark.parametrize(
+    "consumer_name",
+    [
+        "vllm.model_executor.layers.fused_moe.oracle.fp8",
+        "vllm.model_executor.layers.quantization.modelopt_block_quant",
+    ],
+)
 def test_deepep_factory_uses_bound_globals_and_quantized_protocol(
-    modules, quant_dtype, block, expected, explicit_manager
+    modules, quant_dtype, block, expected, explicit_manager, consumer_name
 ):
     """Execute the installed factory, including its ordinary non-EP branch."""
     ns = types.SimpleNamespace
@@ -879,7 +901,7 @@ def test_deepep_factory_uses_bound_globals_and_quantized_protocol(
         DEEPEP_QUANT_BLOCK_SHAPE=[128, 128],
     )
     consumer = modules(
-        "vllm.model_executor.layers.fused_moe.oracle.fp8",
+        consumer_name,
         maybe_make_prepare_finalize=original,
     )
     modules(
@@ -888,7 +910,11 @@ def test_deepep_factory_uses_bound_globals_and_quantized_protocol(
     )
     load_patch("vllm_sail/patch/enhancement/deepep.py")
     assert consumer.maybe_make_prepare_finalize is provider.maybe_make_prepare_finalize
-    moe = ns(moe_parallel_config=ns(use_all2all_kernels=False, dp_size=1))
+    moe = ns(
+        moe_parallel_config=ns(
+            use_all2all_kernels=False, use_passthrough_all2all=False, dp_size=1
+        )
+    )
     assert provider.maybe_make_prepare_finalize(moe, None) is None
     assert provider.maybe_make_prepare_finalize(
         moe, None, allow_new_interface=True

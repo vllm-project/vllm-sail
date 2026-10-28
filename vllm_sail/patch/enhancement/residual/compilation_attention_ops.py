@@ -32,7 +32,7 @@ REASON = (
     "traced into a piecewise graph segment instead of being an attention "
     "boundary."
 )
-AFFECTED_VERSIONS = ">=0.31.0,<0.32.0"
+AFFECTED_VERSIONS = ">=0.32.0,<0.33.0"
 REMOVE_WHEN = (
     "upstream includes vllm::ppu_sparse_attn_indexer in "
     "CompilationConfig._attention_ops itself, or the PPU indexer stops "

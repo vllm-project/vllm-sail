@@ -56,7 +56,7 @@ PATCH_ROOT = REPO_ROOT / "vllm_sail" / "patch"
 SKIP_DIRS = frozenset({"template", "__pycache__"})
 
 LOCK_SCHEMA = 1
-SUPPORTED_RANGE = ">=0.31.0,<0.32.0"
+SUPPORTED_RANGE = ">=0.32.0,<0.33.0"
 
 #: AST node-type groups. These are plain tuples of type objects (never PEP 604
 #: ``X | Y`` unions) so ``isinstance`` stays valid on Python 3.9, where a runtime

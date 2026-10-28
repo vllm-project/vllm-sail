@@ -5,6 +5,7 @@ ruff
 pre-commit
 # tests/ut/test_packaging.py builds real wheel/sdist artifacts without isolation.
 setuptools>=77.0.3,<81.0.0
-setuptools-scm>=8
+# Match build.txt so CPU tests exercise the full-hash vLLM version contract.
+setuptools-scm>=8,<9
 wheel
 tomli; python_version < "3.11"

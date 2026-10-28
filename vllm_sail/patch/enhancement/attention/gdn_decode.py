@@ -21,7 +21,7 @@ from vllm_sail.patch.utils import patch
 logger = init_logger(__name__)
 _META = dict(
     reason="PPU GDN decode selects PLA, native CUDA or Triton using real kernel capabilities, not stub schemas.",
-    affected_versions=">=0.31.0,<0.32.0",
+    affected_versions=">=0.32.0,<0.33.0",
     remove_when="GDN exposes a platform decode backend resolver and native implementation capability checks.",
 )
 
@@ -98,7 +98,9 @@ def __init__(self, *args, **kwargs):
         requested, use_pla=use_pla, pla_reason=pla_reason, cuda_reason=cuda_reason
     )
     self.gdn_decode_kernel = choice.active
-    self.enable_fused_gdn_decode = choice.active == "cuda"
+    self.enable_fused_gdn_spec_decode = (
+        choice.active == "cuda" and self.speculative_config is not None
+    )
     logger.info_once(
         "PPU GDN decode: requested=%s, active=%s, fallback_reason=%s",
         choice.requested,

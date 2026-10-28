@@ -199,7 +199,7 @@ def test_gdn_native_binding_guards_are_enabled_by_the_build(tmp_path):
     flags = [f"-D{item}" for definition in definitions for item in definition.split()]
     for filename in ("torch_bindings.cpp", "ops.h"):
         unit = tmp_path / filename
-        body = (ROOT / "csrc/upstream/libtorch_stable" / filename).read_text()
+        body = (ROOT / "csrc/upstream" / filename).read_text()
         unit.write_text(re.sub(r"^\s*#\s*include[^\n]*", "", body, flags=re.MULTILINE))
         result = subprocess.run(
             [compiler, "-E", "-P", "-x", "c++", *flags, str(unit)],
@@ -215,9 +215,7 @@ def test_gdn_native_binding_guards_are_enabled_by_the_build(tmp_path):
 def test_gdn_hg_helpers_commit_and_wait_for_pipeline_copies(tmp_path):
     """Exercise generated adapters against a deferred-copy SDK test double."""
     compiler = _tool("c++")
-    source = (
-        ROOT / "csrc/upstream/libtorch_stable/gdn/fused_gdn_decode_kernel.hg"
-    ).read_text()
+    source = (ROOT / "csrc/upstream/gdn/fused_gdn_decode_kernel.hg").read_text()
     # Retain the actual SDK pipeline include and its guard, without unrelated
     # device/torch headers. The host test does not establish SDK compatibility.
     includes = source[: source.index("namespace {")]
@@ -374,9 +372,9 @@ def test_cmake_selects_architectures_before_enabling_hg(
 
 def test_grouped_topk_finite_check_disambiguates_sdk_scalars(tmp_path: Path) -> None:
     compiler = _tool("c++")
-    source = (
-        ROOT / "csrc/upstream/libtorch_stable/moe/grouped_topk_kernels.hg"
-    ).read_text(encoding="utf-8")
+    source = (ROOT / "csrc/upstream/moe/grouped_topk_kernels.hg").read_text(
+        encoding="utf-8"
+    )
     start = source.index("template <typename T_OUT, typename T_IN>")
     end = source.index("// Scoring function enums", start)
     # SDK half types convert to both float and double; the math library has
@@ -424,9 +422,7 @@ int main() {
 def test_model_fused_kernels_use_ordinary_hg_launches(tmp_path, arch, model):
     """Preprocess actual generated sources for both PPU compatibility targets."""
     compiler = _tool("c++")
-    source = (
-        ROOT / f"csrc/upstream/libtorch_stable/fused_{model}_kernel.hg"
-    ).read_text()
+    source = (ROOT / f"csrc/upstream/fused_{model}_kernel.hg").read_text()
     # The preprocessor needs no SDK definitions to evaluate the launch guards.
     source = re.sub(r"^\s*#\s*include[^\n]*", "", source, flags=re.MULTILINE)
     unit = tmp_path / "launch.cpp"
@@ -455,7 +451,7 @@ def test_model_fused_kernels_use_ordinary_hg_launches(tmp_path, arch, model):
 def test_mamba_scan_composition_and_prefix_carry(tmp_path):
     """Compile the real scan functors against a worked recurrence example."""
     compiler = _tool("c++")
-    source = (ROOT / "csrc/upstream/libtorch_stable/mamba/selective_scan.h").read_text()
+    source = (ROOT / "csrc/upstream/mamba/selective_scan.h").read_text()
     start = source.index("template<typename scalar_t> struct SSMScanOp;")
     end = source.index("template<typename Ktraits>", start)
     unit = tmp_path / "scan.cpp"
@@ -487,7 +483,7 @@ static_assert(check_scan());
 def test_fused_quant_and_qk_helpers_compile_without_ptx(tmp_path, arch):
     """Type-check generated HG helper branches; numerical tests need a PPU."""
     compiler = _tool("c++")
-    root = ROOT / "csrc/upstream/libtorch_stable"
+    root = ROOT / "csrc/upstream"
     quant = (root / "quantization/fused_kernels/quant_conversions.cuh").read_text()
     start = quant.index("static __device__ __forceinline__ int8_t float_to_int8_rn")
     end = quant.index("template <typename fp8_type>", start)
@@ -761,7 +757,7 @@ def test_ppu_compat_supplies_the_sdk_types_cuda_utils_kernels_expands(
         "-include",
         "ppu_compat.h",
         "-fsyntax-only",
-        str(ROOT / "csrc/upstream/libtorch_stable/cuda_utils_kernels.hg"),
+        str(ROOT / "csrc/upstream/cuda_utils_kernels.hg"),
     ]
     _run(argv)
     # On the HG toolchain the umbrella is unconditional, like the torch

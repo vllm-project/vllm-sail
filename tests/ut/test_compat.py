@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import importlib
 import logging
+import subprocess
 import sys
 import types
 from collections.abc import Iterator
@@ -36,6 +37,13 @@ def compat(monkeypatch: pytest.MonkeyPatch) -> Iterator[types.ModuleType]:
 
     monkeypatch.delitem(sys.modules, "vllm_sail.compat", raising=False)
     module = importlib.import_module("vllm_sail.compat")
+    # The range-policy tests below exercise release-tag manifests. Exact main
+    # pins have a separate commit-identity contract.
+    from vllm_sail.native import manifest
+
+    monkeypatch.setattr(
+        manifest, "load", lambda: types.SimpleNamespace(upstream_ref="v0.32.0")
+    )
     yield module
     # Leave no cached copy behind: the next test may want a different stub.
     sys.modules.pop("vllm_sail.compat", None)
@@ -94,10 +102,10 @@ def test_check_rejects_unverifiable_shallow_clone_dev_build(
 def test_check_accepts_supported_dev_build_with_meaningful_version(
     compat, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """A v0.31-based source build remains usable without an override."""
+    """A v0.32-based source build remains usable without an override."""
     monkeypatch.delenv("VLLM_VERSION", raising=False)
     monkeypatch.setattr(
-        compat, "installed_vllm_version", lambda: "0.31.1.dev5+g1234567"
+        compat, "installed_vllm_version", lambda: "0.32.1.dev5+g1234567"
     )
     with caplog.at_level(logging.WARNING):
         compat.check_vllm_compatibility(force=True)
@@ -107,8 +115,8 @@ def test_check_accepts_supported_dev_build_with_meaningful_version(
 @pytest.mark.parametrize(
     "version",
     [
-        "0.32.0.dev5+gabcdef0",
-        "0.32.1.dev58+g40cf03ae64",
+        "0.31.1.dev5+gabcdef0",
+        "0.33.1.dev58+g40cf03ae64",
         "0.33.0.dev1+gabcdef0",
     ],
 )
@@ -165,7 +173,7 @@ def test_vllm_version_at_least_unparseable_is_false(
     assert not compat.vllm_version_at_least("0.31.0")
 
 
-@pytest.mark.parametrize("version", ["0.31.0", "0.31.9", "0.31.1+cu128"])
+@pytest.mark.parametrize("version", ["0.32.0", "0.32.9", "0.32.1+cu128"])
 def test_check_accepts_supported_range(
     compat, monkeypatch: pytest.MonkeyPatch, version: str
 ) -> None:
@@ -173,7 +181,7 @@ def test_check_accepts_supported_range(
     compat.check_vllm_compatibility(force=True)  # must not raise
 
 
-@pytest.mark.parametrize("version", ["0.27.0", "0.30.0", "0.32.0", "1.0.0"])
+@pytest.mark.parametrize("version", ["0.27.0", "0.30.0", "0.31.0", "0.33.0", "1.0.0"])
 def test_check_rejects_out_of_range(
     compat, monkeypatch: pytest.MonkeyPatch, version: str
 ) -> None:
@@ -191,18 +199,18 @@ def test_check_rejects_unparseable(compat, monkeypatch: pytest.MonkeyPatch) -> N
 
 def test_failed_check_is_not_cached(compat, monkeypatch: pytest.MonkeyPatch) -> None:
     """A caught failure must not make the next no-force check skip validation."""
-    monkeypatch.setenv("VLLM_VERSION", "0.32.0")
+    monkeypatch.setenv("VLLM_VERSION", "0.33.0")
     with pytest.raises(RuntimeError, match="requires vLLM"):
         compat.check_vllm_compatibility(force=True)
 
-    monkeypatch.setenv("VLLM_VERSION", "0.31.0")
+    monkeypatch.setenv("VLLM_VERSION", "0.32.0")
     compat.check_vllm_compatibility()
     assert compat._checked is True
 
 
 def test_check_is_cached_without_force(compat, monkeypatch: pytest.MonkeyPatch) -> None:
     """The check runs once per process; register_out_of_tree relies on that."""
-    monkeypatch.setenv("VLLM_VERSION", "0.31.0")
+    monkeypatch.setenv("VLLM_VERSION", "0.32.0")
     compat.check_vllm_compatibility(force=True)
 
     # Now an unsupported version would raise -- but the cached flag short-circuits.
@@ -214,6 +222,101 @@ def test_check_is_cached_without_force(compat, monkeypatch: pytest.MonkeyPatch) 
     assert compat._checked is False
 
     # A failed forced refresh must not leave the old successful result cached.
-    monkeypatch.setenv("VLLM_VERSION", "0.31.0")
+    monkeypatch.setenv("VLLM_VERSION", "0.32.0")
     compat.check_vllm_compatibility()
     assert compat._checked is True
+
+
+PIN = "528772a4bf589fd52eec40bc8ca79c84d99206b5"
+
+
+@pytest.mark.parametrize("dirty", [False, True])
+def test_exact_pin_accepts_generated_scm_version(compat, monkeypatch, tmp_path, dirty):
+    """Exercise upstream's full-hash SCM command, including dirty build inputs."""
+    from setuptools_scm import get_version
+
+    def git(*args):
+        return subprocess.check_output(
+            ["git", "-C", str(tmp_path), *args], text=True
+        ).strip()
+
+    git("init", "-q")
+    git("config", "user.name", "SCM test")
+    git("config", "user.email", "scm@example.com")
+    source = tmp_path / "source.py"
+    source.write_text("initial\n")
+    git("add", ".")
+    git("-c", "commit.gpgsign=false", "commit", "-qm", "initial")
+    git("tag", "v0.32.0")
+    source.write_text("checkpoint\n")
+    git("add", ".")
+    git("-c", "commit.gpgsign=false", "commit", "-qm", "checkpoint")
+    pin = git("rev-parse", "HEAD")
+    if dirty:
+        source.write_text("prepared build inputs\n")
+    for name in (
+        "VLLM_VERSION",
+        "SETUPTOOLS_SCM_PRETEND_VERSION",
+        "SETUPTOOLS_SCM_PRETEND_VERSION_FOR_VLLM",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    version = get_version(
+        root=str(tmp_path),
+        git_describe_command=[
+            "git",
+            "describe",
+            "--dirty",
+            "--tags",
+            "--long",
+            "--abbrev=40",
+            "--match",
+            "v[0-9]*",
+        ],
+    )
+    monkeypatch.setattr(compat, "_verified_upstream_commit", lambda: pin)
+    monkeypatch.setattr(compat, "installed_vllm_version", lambda: version)
+    compat.check_vllm_compatibility(force=True)
+    assert compat._checked
+
+
+def test_exact_main_pin_reads_the_packaged_kernel_metadata(compat, monkeypatch):
+    from vllm_sail.native import manifest
+
+    monkeypatch.setattr(
+        manifest, "load", lambda: types.SimpleNamespace(upstream_ref=PIN)
+    )
+    assert compat._verified_upstream_commit() == PIN
+
+
+def test_exact_main_pin_accepts_its_real_scm_version(compat, monkeypatch):
+    monkeypatch.delenv("VLLM_VERSION", raising=False)
+    monkeypatch.setattr(compat, "_verified_upstream_commit", lambda: PIN)
+    monkeypatch.setattr(
+        compat,
+        "installed_vllm_version",
+        lambda: f"0.30.1rc1.dev672+g{PIN}.d20261024.empty",
+    )
+    compat.check_vllm_compatibility(force=True)
+    assert compat._checked
+
+
+@pytest.mark.parametrize(
+    "version",
+    ["0.31.0", "0.31.1.dev1+g528772a", "0.31.1.dev1+g" + "a" * 40],
+)
+def test_exact_main_pin_rejects_missing_or_different_commit(
+    compat, monkeypatch, version
+):
+    monkeypatch.delenv("VLLM_VERSION", raising=False)
+    monkeypatch.setattr(compat, "_verified_upstream_commit", lambda: PIN)
+    monkeypatch.setattr(compat, "installed_vllm_version", lambda: version)
+    with pytest.raises(RuntimeError, match="requires verified vLLM commit"):
+        compat.check_vllm_compatibility(force=True)
+    assert not compat._checked
+
+
+def test_exact_main_pin_cannot_be_replaced_with_a_numeric_override(compat, monkeypatch):
+    monkeypatch.setattr(compat, "_verified_upstream_commit", lambda: PIN)
+    monkeypatch.setenv("VLLM_VERSION", "0.31.0")
+    with pytest.raises(RuntimeError, match="requires verified vLLM commit"):
+        compat.check_vllm_compatibility(force=True)

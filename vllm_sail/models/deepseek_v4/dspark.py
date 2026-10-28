@@ -44,8 +44,8 @@ def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
     are skipped here. ``embed_tokens``/``lm_head`` are aliased from the target.
     """
     first_layer = self.model.layers[0]
-    use_mega_moe = first_layer.ffn.use_mega_moe
-    if use_mega_moe:
+    use_native_mega_moe = first_layer.ffn.use_native_mega_moe
+    if use_native_mega_moe:
         expert_mapping = make_deepseek_v4_expert_params_mapping(
             self.config.n_routed_experts
         )
