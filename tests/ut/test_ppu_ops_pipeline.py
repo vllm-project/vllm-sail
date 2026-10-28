@@ -452,6 +452,7 @@ def test_manual_workflow_does_not_change_pr_gate():
         "build",
         "pin-unit-tests",
         "model-tests",
+        "kernel-perf",
     ]
     assert not any("ops-" in job_id for job_id in pipeline)
     assert pipeline["build"]["needs"] == "runtime-image"

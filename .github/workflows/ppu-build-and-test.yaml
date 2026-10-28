@@ -175,9 +175,33 @@ jobs:
       build_run_id: ${{ inputs.existing_build_run_id || github.run_id }}
       wheel_source_sha: ${{ inputs.wheel_source_sha || '' }}
 
+  kernel-perf:
+    name: PPU kernel perf
+    needs: [runtime-image, build]
+    if: >-
+      ${{ !cancelled() &&
+      needs.runtime-image.result == 'success' &&
+      (github.event_name != 'pull_request' ||
+      ((((github.event.action != 'labeled' && github.event.action != 'unlabeled') ||
+      github.event.label.name == 'ci-preview')) &&
+      !github.event.pull_request.draft &&
+      contains(github.event.pull_request.labels.*.name, 'ci-preview'))) &&
+      (needs.build.result == 'success' ||
+      (needs.build.result == 'skipped' &&
+      (inputs.existing_build_run_id || '') != '' &&
+      (inputs.wheel_source_sha || '') != '')) }}
+    permissions:
+      contents: read
+      actions: read
+    uses: ./.github/workflows/_ppu-kernel-perf.yaml
+    with:
+      pr_mode: true
+      pr_head_sha: ${{ inputs.pr_head_sha || github.sha }}
+      build_run_id: ${{ inputs.existing_build_run_id || github.run_id }}
+
   gate:
     name: PPU CI gate
-    needs: [runtime-image, build, pin-unit-tests, model-tests]
+    needs: [runtime-image, build, pin-unit-tests, model-tests, kernel-perf]
     if: >-
       ${{ always() &&
       (github.event_name != 'pull_request' ||
@@ -221,7 +245,7 @@ jobs:
           if build != "success" and not (build == "skipped" and reuse):
               raise SystemExit(f"build did not succeed or use validated wheels: {build}")
           skip_device_tests = os.environ["SKIP_DEVICE_TESTS"] == "true"
-          for job in ("pin-unit-tests", "model-tests"):
+          for job in ("pin-unit-tests", "model-tests", "kernel-perf"):
               result = results.get(job, {}).get("result")
               if skip_device_tests and result == "skipped":
                   continue
