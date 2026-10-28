@@ -15,6 +15,11 @@ import re
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
+try:
+    import tomllib
+except ModuleNotFoundError:  # Python 3.10, supplied by requirements/dev.txt
+    import tomli as tomllib
+
 
 class InvalidEvidence(ValueError):
     pass
@@ -50,6 +55,13 @@ def load(root, name):
     return json.loads(artifact(root, name).read_text())
 
 
+def require_identity(receipt, commits, wheels, label):
+    require(
+        receipt.get("commits") == commits and receipt.get("wheel_sha256") == wheels,
+        "Receipt commit/wheel identity mismatch: " + label,
+    )
+
+
 def xml_counts(root, reference):
     path = artifact(root, reference["file"])
     require(digest(path) == reference["sha256"], "XML hash mismatch")
@@ -73,7 +85,9 @@ def verify(root, policy):
         root.is_absolute() and root.is_dir() and not root.is_symlink(),
         "Use an absolute evidence root",
     )
-    require(policy["schema"] == 1, "Unsupported policy schema")
+    require(
+        policy.get("schema") == 2, "Policy schema 2 required; migrate reviewed receipts"
+    )
     commits = policy["commits"]
     require(
         set(commits) == {"vllm", "vllm-sail"}
@@ -229,6 +243,17 @@ def verify(root, policy):
         and post["wheels"]["commits"] == commits,
         "Final wheel pair mismatch",
     )
+    wheels = {
+        package: post["wheels"]["wheels"][package]["sha256"]
+        for package in ("vllm", "vllm-sail")
+    }
+    require(
+        all(
+            isinstance(value, str) and re.fullmatch("[a-f0-9]{64}", value)
+            for value in wheels.values()
+        ),
+        "Invalid final wheel SHA256",
+    )
     for container, expected in policy["stacks"].items():
         actual = post["stack_verification"][container]
         require(
@@ -297,6 +322,48 @@ def verify(root, policy):
                     == 1,
                     "Missing or duplicate native module: " + module,
                 )
+    schema_contract = policy.get("schema_parse")
+    require(isinstance(schema_contract, dict), "Schema parsing evidence required")
+    schema_proof = bound(schema_contract["receipt"])
+    require_identity(schema_proof, commits, wheels, "schema parsing")
+    for field in ("resource", "producer", "log"):
+        require(
+            schema_contract[field] in policy["artifacts"], "Unbound schema " + field
+        )
+    resource = artifact(root, schema_contract["resource"])
+    resource_hash = digest(resource)
+    require(
+        installed["vllm-sail"].get("vllm_sail/native/data/excluded_ops.toml")
+        == resource_hash,
+        "Schema resource differs from the installed final wheel",
+    )
+    operations = tomllib.loads(resource.read_text()).get("op", [])
+    schemas = [entry["namespace"] + "::" + entry["schema"] for entry in operations]
+    require(len(schemas) == len(set(schemas)), "Duplicate generated schemas")
+    environment = schema_contract["environment"]
+    require(environment in policy["stacks"], "Unknown schema parsing environment")
+    require(
+        schema_proof.get("status") == "all-excluded-op-schemas-parsed"
+        and schema_proof.get("parser") == "torch._C.parse_schema"
+        and schema_proof.get("exit_code") == 0
+        and schema_proof.get("failed") == []
+        and schema_proof.get("environment") == environment
+        and schema_proof.get("torch_sha256")
+        == policy["stacks"][environment]["torch_sha256"]
+        and schema_proof.get("resource_sha256") == resource_hash
+        and schema_proof.get("schema_count") == len(schemas)
+        and schema_proof.get("parsed_schemas") == schemas
+        and schema_proof.get("producer_sha256")
+        == digest(artifact(root, schema_contract["producer"]))
+        and schema_proof.get("log_sha256")
+        == digest(artifact(root, schema_contract["log"])),
+        "Incomplete or mismatched Torch schema parsing proof",
+    )
+    schema_receipt_hash = digest(artifact(root, schema_contract["receipt"]))
+    require(
+        post.get("schema_parse_receipt_sha256") == schema_receipt_hash,
+        "Schema parsing proof is not bound to the final postproof",
+    )
     for remote, local in policy["postproof_artifacts"].items():
         require(
             post["artifact_hashes"][remote] == digest(artifact(root, local)),
@@ -305,8 +372,21 @@ def verify(root, policy):
     causes = bound(policy["xfail_causes"]["file"])
     require(
         causes["status"] == "verified-known-failures"
+        and causes.get("commits") == commits
+        and causes.get("device_xml_sha256") == policy["xml"]["device"]["sha256"]
         and set(causes["causes"]) == set(policy["xfail_causes"]["cases"]),
         "Expected-failure causes incomplete",
+    )
+    exclusions = policy["xml"]["device"]["excluded_cases"]
+    hardware = policy["xml"]["device"].get("hardware_inapplicable_cases")
+    expected_failure_ids = set(policy["xfail_causes"]["cases"])
+    require(
+        isinstance(hardware, dict)
+        and expected_failure_ids <= set(exclusions)
+        and not expected_failure_ids.intersection(hardware)
+        and expected_failure_ids | set(hardware) == set(exclusions)
+        and all(exclusions.get(case) == reason for case, reason in hardware.items()),
+        "Device exclusions must partition into exact xfail and hardware case IDs",
     )
     for key, expected in policy["xfail_causes"]["cases"].items():
         actual = causes["causes"][key]
@@ -320,7 +400,16 @@ def verify(root, policy):
         )
     require(set(post["models"]) == set(policy["models"]), "Model set incomplete")
     for case, expected in policy["models"].items():
+        indices = expected.get("request_indices")
+        require(
+            isinstance(indices, list)
+            and bool(indices)
+            and all(type(index) is int and index >= 0 for index in indices)
+            and len(indices) == len(set(indices)),
+            "Explicit unique model request indices required",
+        )
         audit = bound(expected["audit"])
+        require_identity(audit, commits, wheels, "model audit: " + case)
         require(
             audit["status"] == "passed-model-receipt-and-configured-path-review"
             and audit["case"] == case,
@@ -331,8 +420,7 @@ def verify(root, policy):
             "Model budget changed",
         )
         require(
-            [answer["index"] for answer in audit["reviewed_final_answers"]]
-            == list(range(5))
+            [answer["index"] for answer in audit["reviewed_final_answers"]] == indices
             and all(
                 answer["finish_reason"] == "stop" and answer["final_answer"].strip()
                 for answer in audit["reviewed_final_answers"]
@@ -349,7 +437,7 @@ def verify(root, policy):
             "Model shutdown error",
         )
         require(
-            audit["finished_counts"]["stop"] == 6
+            audit["finished_counts"]["stop"] == len(indices) + 1
             and all(
                 value == 0
                 for key, value in audit["finished_counts"].items()
@@ -374,6 +462,8 @@ def verify(root, policy):
             )
         complete = audit["complete_answer_receipt"]
         model = post["models"][case]
+        require_identity(model, commits, wheels, "model postproof: " + case)
+        require_identity(complete, commits, wheels, "complete answers: " + case)
         require(model["result"]["state"] == "passed", "Model runner result is failed")
         require(
             model["complete_answer_receipt"] == complete
@@ -397,7 +487,7 @@ def verify(root, policy):
             "metrics.prom",
             "runner-process.txt",
             "owned-process-group.txt",
-            *(f"request-{index}.json" for index in range(5)),
+            *(f"request-{index}.json" for index in indices),
         )
         audit_raw, post_raw = {}, {}
         for inventory, selected in (
@@ -420,6 +510,8 @@ def verify(root, policy):
                 and model["files"][post_raw[basename]] == wanted,
                 "Unbound or mismatched model raw artifact: " + basename,
             )
+        invocation = load(root, audit_raw["invocation.json"])
+        require_identity(invocation, commits, wheels, "raw invocation: " + case)
         result_files = [
             name for name in audit["files"] if Path(name).name == "result.json"
         ]
@@ -431,6 +523,7 @@ def verify(root, policy):
             "Unique raw model result and metrics are required",
         )
         raw_result = load(root, result_files[0])
+        require_identity(raw_result, commits, wheels, "raw result: " + case)
         require(
             model["result"] == raw_result
             and raw_result["case"] == case
@@ -458,6 +551,7 @@ def verify(root, policy):
     require(
         accepted["runtime_postproof"]["sha256"]
         == digest(artifact(root, policy["postproof"]))
+        and accepted.get("schema_parse_receipt_sha256") == schema_receipt_hash
         and set(accepted["models"]) == set(policy["models"]),
         "Acceptance/runtime mismatch",
     )
@@ -505,8 +599,7 @@ def verify(root, policy):
     expected_failures = len(policy["xfail_causes"]["cases"])
     require(
         accepted["device_e2e"]["known_expected_failures"] == expected_failures
-        and accepted["device_e2e"]["hardware_inapplicable"]
-        == len(policy["xml"]["device"]["excluded_cases"]) - expected_failures
+        and accepted["device_e2e"]["hardware_inapplicable"] == len(hardware)
         and accepted["device_e2e"]["exclusions_are_not_passes"] is True,
         "Acceptance device exclusion classification mismatch",
     )

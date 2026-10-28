@@ -14,6 +14,7 @@ if not __debug__:
 def restore_reviewed_wip(root, expected, destination, *, contract, contract_sha256):
     """Preserve an exact owned WIP, then restore only its reviewed paths to HEAD."""
     root, destination, contract = Path(root), Path(destination), Path(contract)
+    assert expected.get("schema") == 2, "Recapture source modes with snapshot schema 2"
     assert hashlib.sha256(contract.read_bytes()).hexdigest() == contract_sha256
     api = runpy.run_path(str(contract))
     git, digest, checked = api["git"], api["sha"], api["checked_path"]
@@ -51,9 +52,16 @@ def restore_reviewed_wip(root, expected, destination, *, contract, contract_sha2
     # Recheck the full contract after the complete backup and before cleanup.
     assert api["snapshot"](root, expected["base_commit"]) == expected
     generated_tree_is_reviewed()
-    for name, wanted in expected["untracked_files"].items():
+    for name, wanted in expected["files"].items():
         assert digest(checked(root, name).read_bytes()) == wanted, name
-        assert digest((destination / "present" / name).read_bytes()) == wanted, name
+        backup = destination / "present" / name
+        assert digest(backup.read_bytes()) == wanted, name
+        assert api["file_mode"](checked(root, name)) == expected["file_modes"][name]
+        assert api["file_mode"](backup) == expected["file_modes"][name]
+    for name, wanted in expected["deleted_files"].items():
+        backup = destination / "deleted-from-head" / name
+        assert digest(backup.read_bytes()) == wanted, name
+        assert api["file_mode"](backup) == expected["deleted_file_modes"][name], name
     restore_paths = sorted(
         set(expected["tracked_files"]) | set(expected["deleted_files"])
     )
@@ -63,6 +71,11 @@ def restore_reviewed_wip(root, expected, destination, *, contract, contract_sha2
         path = checked(root, name)
         assert path.is_file() and digest(path.read_bytes()) == wanted, name
         assert digest((destination / "present" / name).read_bytes()) == wanted, name
+        assert api["file_mode"](path) == expected["file_modes"][name], name
+        assert (
+            api["file_mode"](destination / "present" / name)
+            == expected["file_modes"][name]
+        ), name
         path.unlink()
     assert git(root, "rev-parse", "HEAD").decode().strip() == expected["base_commit"]
     assert not git(root, "status", "--porcelain", "--untracked-files=all")

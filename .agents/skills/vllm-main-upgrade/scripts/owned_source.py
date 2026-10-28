@@ -3,6 +3,7 @@
 
 import hashlib
 import json
+import stat
 import subprocess
 from pathlib import Path
 
@@ -18,6 +19,10 @@ def git(root, *args):
 
 def sha(data):
     return hashlib.sha256(data).hexdigest()
+
+
+def file_mode(path):
+    return stat.S_IMODE(path.stat().st_mode)
 
 
 def checked_relative(name):
@@ -49,7 +54,7 @@ def snapshot(root, base):
     assert not git(root, "diff", "--cached", "--name-only")
     statuses = git(root, "diff", "--no-renames", "--name-status", "-z").split(b"\0")
     assert statuses.pop() == b"" and len(statuses) % 2 == 0
-    tracked, deleted = {}, {}
+    tracked, deleted, modes, deleted_modes = {}, {}, {}, {}
     for code, raw in zip(statuses[::2], statuses[1::2], strict=True):
         name = raw.decode()
         path = checked_path(root, name)
@@ -57,9 +62,13 @@ def snapshot(root, base):
         if code == b"D":
             assert not path.exists(), name
             deleted[name] = sha(git(root, "show", base + ":" + name))
+            mode = git(root, "ls-tree", "-z", base, "--", name).split(b" ", 1)[0]
+            assert mode in (b"100644", b"100755"), (name, mode)
+            deleted_modes[name] = int(mode, 8) & 0o777
         else:
             assert code == b"M" and path.is_file(), (code, name)
             tracked[name] = sha(path.read_bytes())
+            modes[name] = file_mode(path)
     untracked = {}
     for raw in git(root, "ls-files", "--others", "--exclude-standard", "-z").split(
         b"\0"
@@ -70,20 +79,25 @@ def snapshot(root, base):
         path = checked_path(root, name)
         assert path.is_file() and not path.is_symlink(), name
         untracked[name] = sha(path.read_bytes())
+        modes[name] = file_mode(path)
     assert not set(tracked) & set(untracked)
     return {
+        "schema": 2,
         "base_commit": base,
         "diff_sha256": sha(git(root, "diff", "--binary")),
         "tracked_files": tracked,
         "untracked_files": untracked,
         "files": {**tracked, **untracked},
         "deleted_files": deleted,
+        "file_modes": modes,
+        "deleted_file_modes": deleted_modes,
     }
 
 
 def preserve(root, expected, destination):
     """Write a new backup only after proving every current source input matches."""
     root, destination = Path(root), Path(destination)
+    assert expected.get("schema") == 2, "Recapture source modes with snapshot schema 2"
     assert snapshot(root, expected["base_commit"]) == expected
     assert not destination.exists() and not destination.is_symlink()
     destination.mkdir()
@@ -94,6 +108,8 @@ def preserve(root, expected, destination):
         target.parent.mkdir(parents=True, exist_ok=True)
         with target.open("xb") as stream:
             stream.write(data)
+        target.chmod(expected["file_modes"][name])
+        assert file_mode(target) == expected["file_modes"][name], name
     for name, wanted in expected["deleted_files"].items():
         data = git(root, "show", expected["base_commit"] + ":" + name)
         assert sha(data) == wanted
@@ -101,6 +117,8 @@ def preserve(root, expected, destination):
         target.parent.mkdir(parents=True, exist_ok=True)
         with target.open("xb") as stream:
             stream.write(data)
+        target.chmod(expected["deleted_file_modes"][name])
+        assert file_mode(target) == expected["deleted_file_modes"][name], name
     patch = git(root, "diff", "--binary")
     assert sha(patch) == expected["diff_sha256"]
     with (destination / "tracked.patch").open("xb") as stream:
