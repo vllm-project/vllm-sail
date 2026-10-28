@@ -331,12 +331,18 @@ def test_pr_pipeline_structure():
         "skip_ppu",
         "existing_build_run_id",
         "native_reuse_run_id",
+        "skip_device_tests",
         "wheel_source_sha",
     }
     assert inputs["pr_head_sha"]["type"] == "string"
     assert inputs["pr_head_sha"]["required"] is True
     assert inputs["skip_ppu"] == {
         "description": "Report success without allocating PPU runners for non-impacting changes",
+        "type": "boolean",
+        "default": False,
+    }
+    assert inputs["skip_device_tests"] == {
+        "description": "Build wheels only, without the pin-UT and model-smoke lanes",
         "type": "boolean",
         "default": False,
     }
@@ -388,6 +394,7 @@ def test_pr_pipeline_structure():
     assert gate["env"] == {
         "JOB_RESULTS": "${{ toJSON(needs) }}",
         "SKIP_PPU": "${{ inputs.skip_ppu }}",
+        "SKIP_DEVICE_TESTS": "${{ inputs.skip_device_tests }}",
         "EXISTING_BUILD_RUN_ID": "${{ inputs.existing_build_run_id || '' }}",
         "WHEEL_SOURCE_SHA": "${{ inputs.wheel_source_sha || '' }}",
     }
@@ -444,6 +451,7 @@ def test_docs_only_call_uses_hosted_gate_without_ppu_jobs():
                 }
             ),
             "SKIP_PPU": "true",
+            "SKIP_DEVICE_TESTS": "false",
             "EXISTING_BUILD_RUN_ID": "",
             "WHEEL_SOURCE_SHA": "",
         },
@@ -452,6 +460,54 @@ def test_docs_only_call_uses_hosted_gate_without_ppu_jobs():
     )
     assert result.returncode == 0, result.stderr
     assert "PPU CI skipped: no PPU-impacting changes" in result.stdout
+
+
+def test_skip_device_tests_guards_the_device_lanes():
+    jobs = workflow("ppu-build-and-test.yaml")["jobs"]
+    context = {
+        "github.event_name": "workflow_dispatch",
+        "inputs.skip_ppu": False,
+        "inputs.skip_device_tests": True,
+        "inputs.existing_build_run_id": "",
+        "inputs.wheel_source_sha": "",
+        "needs.runtime-image.result": "success",
+        "needs.build.result": "success",
+    }
+    # Building wheels for a lane that tests elsewhere must not also allocate
+    # the pin-UT and model-smoke hosts.
+    for job_id in ("pin-unit-tests", "model-tests"):
+        assert not expression(jobs[job_id]["if"], context)
+    assert expression(jobs["build"]["if"], context)
+    assert expression(jobs["gate"]["if"], context)
+
+
+@pytest.mark.parametrize("skip_device_tests,returncode", [("true", 0), ("false", 1)])
+def test_gate_honours_skip_device_tests(skip_device_tests, returncode):
+    step = workflow("ppu-build-and-test.yaml")["jobs"]["gate"]["steps"][0]
+    script = step["run"].replace(
+        "python - <<'PYTHON'", f"{sys.executable} - <<'PYTHON'"
+    )
+    env = {
+        **os.environ,
+        "JOB_RESULTS": json.dumps(
+            {
+                "runtime-image": {"result": "success"},
+                "build": {"result": "success"},
+                "pin-unit-tests": {"result": "skipped"},
+                "model-tests": {"result": "skipped"},
+            }
+        ),
+        "SKIP_PPU": "false",
+        "SKIP_DEVICE_TESTS": skip_device_tests,
+        "EXISTING_BUILD_RUN_ID": "",
+        "WHEEL_SOURCE_SHA": "",
+    }
+    result = subprocess.run(
+        ["bash", "-e", "-c", script], env=env, capture_output=True, text=True
+    )
+    # Only the explicit switch tolerates the skipped lanes; the default stays
+    # fail-closed so a broken device lane cannot hide behind it.
+    assert result.returncode == returncode, result.stderr
 
 
 def test_ops_manual_entry_structure():
@@ -1092,6 +1148,7 @@ def test_gate_executes_fail_closed_truth_table(
     step = build_jobs["gate"]["steps"][0]
     context = {
         "inputs.skip_ppu": False,
+        "inputs.skip_device_tests": False,
         "inputs.existing_build_run_id": run_id,
         "inputs.wheel_source_sha": source,
     }

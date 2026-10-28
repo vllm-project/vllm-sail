@@ -342,20 +342,26 @@ def test_accuracy_nightly_is_serial_and_wheel_sourced_from_the_build_commit() ->
     assert accuracy["strategy"]["max-parallel"] == 1
     assert accuracy["strategy"]["fail-fast"] is False
     assert accuracy["strategy"]["matrix"] == (
-        "${{ fromJson(needs.resolve.outputs.matrix) }}"
+        "${{ fromJson(needs.select.outputs.matrix) }}"
     )
+    # The nightly builds its own wheels, so github.sha is both the source
+    # checkout and the commit whose artifact names carry this run.
+    assert nightly["jobs"]["build"]["uses"] == (
+        "./.github/workflows/ppu-build-and-test.yaml"
+    )
+    assert nightly["jobs"]["build"]["with"] == {
+        "pr_head_sha": "${{ github.sha }}",
+        "skip_device_tests": True,
+    }
+    assert accuracy["needs"] == ["build", "select"]
     # Checkout and wheels must describe the same SAIL tree.
-    assert accuracy["with"]["pr_head_sha"] == (
-        "${{ needs.resolve.outputs.source_sha }}"
-    )
-    assert accuracy["with"]["wheel_source_sha"] == (
-        "${{ needs.resolve.outputs.source_sha }}"
-    )
+    assert accuracy["with"]["pr_head_sha"] == "${{ github.sha }}"
+    assert accuracy["with"]["wheel_source_sha"] == "${{ github.sha }}"
+    assert accuracy["with"]["build_run_id"] == "${{ github.run_id }}"
     assert accuracy["with"]["pr_mode"] is False
     # The accuracy work runs inside the reusable call, not on a hosted shell.
     assert "runs-on" not in accuracy
     text = NIGHTLY_WORKFLOW.read_text()
-    assert "ppu-wheels-" in text
     # Each model must reach the reusable workflow with one catalog key.
     matrix = _load_select().build_accuracy_matrix(_catalog(), "")
     assert len(matrix["include"]) == 4

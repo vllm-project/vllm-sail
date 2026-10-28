@@ -38,6 +38,10 @@ on:
         description: Trusted donor for vLLM and native SAIL extensions
         type: string
         default: ""
+      skip_device_tests:
+        description: Build wheels only, without the pin-UT and model-smoke lanes
+        type: boolean
+        default: false
   pull_request:
     branches: [main]
     types: [opened, synchronize, reopened, ready_for_review, labeled, unlabeled]
@@ -124,6 +128,7 @@ jobs:
     needs: [runtime-image, build]
     if: >-
       ${{ !cancelled() &&
+      !inputs.skip_device_tests &&
       needs.runtime-image.result == 'success' &&
       (github.event_name != 'pull_request' ||
       ((((github.event.action != 'labeled' && github.event.action != 'unlabeled') ||
@@ -149,6 +154,7 @@ jobs:
     needs: [runtime-image, build]
     if: >-
       ${{ !cancelled() &&
+      !inputs.skip_device_tests &&
       needs.runtime-image.result == 'success' &&
       (github.event_name != 'pull_request' ||
       ((((github.event.action != 'labeled' && github.event.action != 'unlabeled') ||
@@ -186,6 +192,7 @@ jobs:
         env:
           JOB_RESULTS: ${{ toJSON(needs) }}
           SKIP_PPU: ${{ inputs.skip_ppu }}
+          SKIP_DEVICE_TESTS: ${{ inputs.skip_device_tests }}
           EXISTING_BUILD_RUN_ID: ${{ inputs.existing_build_run_id || '' }}
           WHEEL_SOURCE_SHA: ${{ inputs.wheel_source_sha || '' }}
         run: |
@@ -213,8 +220,11 @@ jobs:
           reuse = os.environ["EXISTING_BUILD_RUN_ID"] and os.environ["WHEEL_SOURCE_SHA"]
           if build != "success" and not (build == "skipped" and reuse):
               raise SystemExit(f"build did not succeed or use validated wheels: {build}")
+          skip_device_tests = os.environ["SKIP_DEVICE_TESTS"] == "true"
           for job in ("pin-unit-tests", "model-tests"):
               result = results.get(job, {}).get("result")
+              if skip_device_tests and result == "skipped":
+                  continue
               if result != "success":
                   raise SystemExit(f"{job} did not succeed: {result}")
           PYTHON
