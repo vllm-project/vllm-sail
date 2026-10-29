@@ -57,10 +57,7 @@ from tests.e2e.models._accuracy_gate import (  # noqa: E402
 from tests.e2e.models._offline_runner import (  # noqa: E402
     CAPABILITY_TO_CHIP,
     DEFAULT_CHIP,
-    DEFAULT_DTYPE,
-    DEFAULT_ENFORCE_EAGER,
     DEFAULT_GPU_MEMORY_UTILIZATION,
-    DEFAULT_MAX_MODEL_LEN,
     DEFAULT_SEED,
     REPORTS_ROOT,
     _checkpoint_tail,
@@ -169,11 +166,6 @@ def start_vllm_server(
         str(tp),
         "--gpu-memory-utilization",
         str(DEFAULT_GPU_MEMORY_UTILIZATION),
-        "--max-model-len",
-        str(DEFAULT_MAX_MODEL_LEN),
-        "--enforce-eager",
-        "--dtype",
-        DEFAULT_DTYPE,
         "--trust-remote-code",
         "--seed",
         str(DEFAULT_SEED),
@@ -368,9 +360,9 @@ def run_evalscope(
         },
         generation_config={
             "temperature": 0,
-            "max_tokens": 1024,
+            "max_tokens": 65536,
         },
-        eval_batch_size=64,
+        eval_batch_size=128,
         limit=limit,
         seed=42,
         work_dir=str(work_dir) if work_dir else None,
@@ -515,10 +507,7 @@ def run_accuracy_eval(  # noqa: C901
         }
         srv_cfg: dict[str, Any] = {
             "tensor_parallel_size": tp,
-            "max_model_len": DEFAULT_MAX_MODEL_LEN,
-            "dtype": DEFAULT_DTYPE,
             "gpu_memory_utilization": (DEFAULT_GPU_MEMORY_UTILIZATION),
-            "enforce_eager": DEFAULT_ENFORCE_EAGER,
             "seed": DEFAULT_SEED,
         }
         tol = dict(DEFAULT_TOLERANCE)

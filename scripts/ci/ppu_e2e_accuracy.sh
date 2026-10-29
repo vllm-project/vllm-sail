@@ -26,6 +26,10 @@ ROOT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)"
 export HF_HOME="${HF_HOME:?HF_HOME must be set to the Hugging Face cache directory}"
 export HF_HUB_OFFLINE=1
 
+# ``datasets`` builds an Arrow cache under ``${HF_HOME}/datasets``, but HF_HOME is
+# a read-only view of the NAS cache here, so point it at writable scratch space.
+export HF_DATASETS_CACHE="${HF_DATASETS_CACHE:-/tmp/hf_datasets}"
+
 # Prevent image defaults from masking the installed version or changing frontend.
 unset VLLM_VERSION 2>/dev/null || true
 export VLLM_USE_RUST_FRONTEND=0 VLLM_USE_RUST_BENCH=0
