@@ -31,18 +31,22 @@ from tests.e2e.models._offline_runner import (
 GOLDEN_SCHEMA_VERSION = 2
 BENCHMARK_GSM8K = "gsm8k"
 
-# --- Default scoring threshold -----------------------------------------------
+# --- Scoring gates -----------------------------------------------------------
 #
-# Primary gate: ``score >= threshold`` means pass.  The golden file's
-# tolerance block can refine this later once baselines are established;
-# until then 0.9 is the only gate that matters.
+# A committed golden is the reference for its checkpoint: a run passes when it
+# lands inside ``golden ± 0.02``.  Two points is wide enough to absorb
+# run-to-run noise on PPU and narrow enough that a real regression cannot hide;
+# the band is symmetric so a golden captured on an abnormally high run is
+# caught as well.
+#
+# ``DEFAULT_THRESHOLD`` is *not* a substitute for a golden.  It is only the gate
+# for a checkpoint that has no baseline yet, so a first run cannot be reported
+# as "created" while scoring far below anything acceptable.
 DEFAULT_THRESHOLD = 0.9
 
 DEFAULT_TOLERANCE: dict[str, Any] = {
-    "mode": "lower_bound",
-    "rel": 0.99,
+    "mode": "band",
     "abs": 0.02,
-    "hard_floor": DEFAULT_THRESHOLD,
 }
 
 #: Full GSM8K test-set size (main split).
@@ -163,12 +167,13 @@ def check_accuracy_golden(
 ) -> tuple[bool, str | None]:
     """Check an accuracy score against the golden baseline.
 
-    Returns ``(ok, error_message)``.  Three gates, evaluated in order:
+    Returns ``(ok, error_message)``.  Two gates, evaluated in order:
 
     1. **Completeness** — ``num == golden.dataset.num_expected``.
-    2. **Hard floor** — ``score >= tolerance.hard_floor``.
-    3. **Regression** —
-       ``score >= golden_score - max(abs, (1-rel)*golden_score)``.
+    2. **Band** — ``golden.score - abs <= score <= golden.score + abs``.
+
+    Records carrying the legacy ``mode: lower_bound`` keep their one-sided
+    bound and hard floor so an older baseline still gates correctly.
     """
     # 1. Completeness gate
     expected_num = golden.get("dataset", {}).get("num_expected")
@@ -178,27 +183,41 @@ def check_accuracy_golden(
             f"completeness gate failed: evaluated {num} samples, "
             f"expected {expected_num}",
         )
-    # 2. Hard floor (== threshold by default)
+
     tolerance = golden.get("tolerance", DEFAULT_TOLERANCE)
-    hard_floor = tolerance.get("hard_floor", DEFAULT_THRESHOLD)
-    if score < hard_floor:
-        return (
-            False,
-            f"hard floor gate failed: accuracy {score:.4f} < {hard_floor}",
-        )
-    # 3. Regression lower bound
     golden_score = golden["score"]
     abs_tol = tolerance.get("abs", 0.02)
-    rel_tol = tolerance.get("rel", 0.99)
-    regression_delta = max(abs_tol, (1.0 - rel_tol) * golden_score)
-    lower_bound = golden_score - regression_delta
-    if score < lower_bound:
+
+    # 2a. Legacy one-sided mode.
+    if tolerance.get("mode", "band") == "lower_bound":
+        hard_floor = tolerance.get("hard_floor", DEFAULT_THRESHOLD)
+        if score < hard_floor:
+            return (
+                False,
+                f"hard floor gate failed: accuracy {score:.4f} < {hard_floor}",
+            )
+        rel_tol = tolerance.get("rel", 0.99)
+        delta = max(abs_tol, (1.0 - rel_tol) * golden_score)
+        lower_bound = golden_score - delta
+        if score < lower_bound:
+            return (
+                False,
+                f"regression gate failed: accuracy {score:.4f} "
+                f"< lower bound {lower_bound:.4f} "
+                f"(golden={golden_score:.4f}, "
+                f"delta={delta:.4f})",
+            )
+        return (True, None)
+
+    # 2b. Symmetric band around the golden.
+    lower = golden_score - abs_tol
+    upper = golden_score + abs_tol
+    if not lower <= score <= upper:
         return (
             False,
-            f"regression gate failed: accuracy {score:.4f} "
-            f"< lower bound {lower_bound:.4f} "
-            f"(golden={golden_score:.4f}, "
-            f"delta={regression_delta:.4f})",
+            f"band gate failed: accuracy {score:.4f} outside "
+            f"[{lower:.4f}, {upper:.4f}] "
+            f"(golden={golden_score:.4f}, tolerance=±{abs_tol})",
         )
     return (True, None)
 

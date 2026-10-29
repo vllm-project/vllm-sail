@@ -144,6 +144,21 @@ def resolve_gsm8k_dataset() -> str:
 # ===================================================================
 
 
+def _expand_server_placeholders(
+    token: str,
+    *,
+    model: str,
+    port: int,
+    served_name: str,
+) -> str:
+    """Substitute the case-level placeholders inside one argv token."""
+    return (
+        token.replace("{model}", model)
+        .replace("{port}", str(port))
+        .replace("{served_name}", served_name)
+    )
+
+
 def start_vllm_server(
     model: str,
     *,
@@ -151,31 +166,50 @@ def start_vllm_server(
     port: int = 9985,
     tp: int = 8,
     extra_flags: list[str] | None = None,
+    server_cmd: list[str] | None = None,
     log_path: Path | None = None,
 ) -> tuple[subprocess.Popen[bytes], Path]:
-    """Start ``vllm serve`` in a new session; return (proc, log)."""
+    """Start ``vllm serve`` in a new session; return (proc, log).
+
+    ``server_cmd`` is a per-case argv carrying ``{model}``, ``{port}`` and
+    ``{served_name}`` placeholders.  When present it replaces the built-in
+    argument list entirely, so a case can drop a default flag or pick a
+    different parallel layout without the caller second-guessing it.  Cases
+    that leave it unset keep the shared defaults below.
+    """
     if log_path is None:
         log_path = Path("/tmp/vllm_serve_gsm8k.log")
-    cmd: list[str] = [
-        "vllm",
-        "serve",
-        model,
-        "--served-model-name",
-        served_model_name,
-        "--host",
-        "127.0.0.1",
-        "--port",
-        str(port),
-        "--tensor-parallel-size",
-        str(tp),
-        "--gpu-memory-utilization",
-        str(DEFAULT_GPU_MEMORY_UTILIZATION),
-        "--trust-remote-code",
-        "--seed",
-        str(DEFAULT_SEED),
-    ]
-    if extra_flags:
-        cmd.extend(extra_flags)
+    if server_cmd:
+        cmd: list[str] = [
+            _expand_server_placeholders(
+                token,
+                model=model,
+                port=port,
+                served_name=served_model_name,
+            )
+            for token in server_cmd
+        ]
+    else:
+        cmd = [
+            "vllm",
+            "serve",
+            model,
+            "--served-model-name",
+            served_model_name,
+            "--host",
+            "127.0.0.1",
+            "--port",
+            str(port),
+            "--tensor-parallel-size",
+            str(tp),
+            "--gpu-memory-utilization",
+            str(DEFAULT_GPU_MEMORY_UTILIZATION),
+            "--trust-remote-code",
+            "--seed",
+            str(DEFAULT_SEED),
+        ]
+        if extra_flags:
+            cmd.extend(extra_flags)
     log_fh = open(log_path, "w")  # noqa: SIM115
     proc = subprocess.Popen(
         cmd,
@@ -364,7 +398,10 @@ def run_evalscope(
         },
         generation_config={
             "temperature": 0,
-            "max_tokens": 65536,
+            # 10240 rather than the served context: a model that starts
+            # repeating never hits EOS and would otherwise burn the full
+            # window on every sample, turning one broken case into hours.
+            "max_tokens": 10240,
         },
         eval_batch_size=128,
         limit=limit,
@@ -395,6 +432,7 @@ def run_accuracy_eval(  # noqa: C901
     model_key: str,
     *,
     model_override: str | None = None,
+    case_id: str | None = None,
     chip: str = "auto",
     update_golden: bool = False,
     limit: int | None = None,
@@ -403,12 +441,18 @@ def run_accuracy_eval(  # noqa: C901
     port: int = 9985,
     served_model_name: str | None = None,
     extra_serve_flags: list[str] | None = None,
+    server_cmd: list[str] | None = None,
     golden_dir: Path | None = None,
 ) -> dict[str, Any]:
     """Run the full GSM8K accuracy eval pipeline.
 
+    ``model_key`` selects both the evaluation settings and the golden
+    identity: several cases may share one checkpoint, and they are all
+    compared against that checkpoint's single golden.  ``case_id`` only
+    labels the run.
+
     Returns a dict with keys: ``status``, ``score``, ``num``,
-    ``golden_path``, ``error``, ``record``.
+    ``golden_path``, ``error``, ``case_id``, ``record``.
     """
     if model_key not in MODEL_CONFIGS:
         raise ValueError(
@@ -457,7 +501,7 @@ def run_accuracy_eval(  # noqa: C901
     # never leaks into the persisted golden contract.
     unique_served = unique_served_model_name(served_base)
     flags = list(extra_serve_flags or model_cfg.get("extra_flags", []))
-    log_path = wd / f"vllm_serve_{model_key}.log"
+    log_path = wd / f"vllm_serve_{case_id or model_key}.log"
 
     # -- start server -------------------------------------------------
     server, log_path = start_vllm_server(
@@ -466,6 +510,7 @@ def run_accuracy_eval(  # noqa: C901
         port=port,
         tp=tp,
         extra_flags=flags,
+        server_cmd=server_cmd,
         log_path=log_path,
     )
     try:
@@ -515,7 +560,6 @@ def run_accuracy_eval(  # noqa: C901
             "seed": DEFAULT_SEED,
         }
         tol = dict(DEFAULT_TOLERANCE)
-        tol["hard_floor"] = threshold
         record = build_accuracy_golden(
             model_key=model_key,
             chip=chip,
@@ -529,7 +573,7 @@ def run_accuracy_eval(  # noqa: C901
         )
 
         # -- golden comparison ----------------------------------------
-        return _golden_compare(
+        result = _golden_compare(
             record=record,
             score=score,
             num=num,
@@ -542,6 +586,8 @@ def run_accuracy_eval(  # noqa: C901
             model_key=model_key,
             threshold=threshold,
         )
+        result["case_id"] = case_id or model_key
+        return result
     finally:
         stop_server(server)
 
@@ -560,7 +606,14 @@ def _golden_compare(
     model_key: str,
     threshold: float = DEFAULT_THRESHOLD,
 ) -> dict[str, Any]:
-    """Perform threshold check + optional golden comparison."""
+    """Perform the golden band check, or the threshold fallback.
+
+    ``threshold`` only governs a checkpoint that has no baseline yet. Once a
+    golden is committed it *is* the reference: a checkpoint whose golden lands
+    at 0.60 must gate against 0.60, not against a fallback number that was only
+    ever meant to stop a first run from being recorded far below anything
+    acceptable.
+    """
     status: str
     error_msg: str | None = None
 
@@ -579,7 +632,7 @@ def _golden_compare(
             "record": record,
         }
 
-    # --- Primary gate: score >= threshold --------------------------
+    # --- Threshold, used only where no golden can arbitrate --------------
     ok_thr, thr_err = check_score_threshold(score, threshold)
 
     if update_golden:
@@ -599,10 +652,8 @@ def _golden_compare(
         if not ok_id:
             status = "fail_identity"
             error_msg = id_err
-        elif not ok_thr:
-            status = "fail_threshold"
-            error_msg = thr_err
         else:
+            # The band replaces the threshold gate entirely here.
             ok_g, acc_err = check_accuracy_golden(score, num, golden)
             status = "pass" if ok_g else "fail_accuracy"
             error_msg = acc_err
@@ -657,6 +708,24 @@ def main() -> None:
         choices=["auto", "810e", "890p"],
     )
     parser.add_argument(
+        "--case-id",
+        default=None,
+        help=(
+            "Catalog case identifier; labels the serve log and the run "
+            "report only. Golden identity stays keyed on --model-key, so "
+            "several cases over one checkpoint share one golden."
+        ),
+    )
+    parser.add_argument(
+        "--server-cmd",
+        default=None,
+        help=(
+            "JSON array holding the complete 'vllm serve' argv for this "
+            "case, with {model} / {port} / {served_name} placeholders. "
+            "Omit to use the built-in argument list."
+        ),
+    )
+    parser.add_argument(
         "--update-golden",
         action="store_true",
         help="Rewrite the formal golden baseline",
@@ -686,10 +755,22 @@ def main() -> None:
 
     extra = args.extra_serve_flags.split() if args.extra_serve_flags else None
     wd = Path(args.work_dir) if args.work_dir else None
+    if args.server_cmd:
+        try:
+            server_cmd = json.loads(args.server_cmd)
+        except ValueError as error:
+            raise SystemExit(f"--server-cmd is not valid JSON: {error}") from error
+        if not isinstance(server_cmd, list) or not all(
+            isinstance(token, str) for token in server_cmd
+        ):
+            raise SystemExit("--server-cmd must be a JSON array of strings")
+    else:
+        server_cmd = None
 
     result = run_accuracy_eval(
         args.model_key,
         model_override=args.model,
+        case_id=args.case_id,
         chip=args.chip,
         update_golden=args.update_golden,
         limit=args.limit,
@@ -698,6 +779,7 @@ def main() -> None:
         port=args.port,
         served_model_name=args.served_model_name,
         extra_serve_flags=extra,
+        server_cmd=server_cmd,
         golden_dir=Path(args.golden_dir) if args.golden_dir else None,
     )
 

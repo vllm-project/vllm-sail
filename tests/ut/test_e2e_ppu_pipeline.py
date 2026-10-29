@@ -128,6 +128,7 @@ def test_accuracy_matrix_uses_only_accuracy_and_eval_keys() -> None:
     assert matrix == {
         "include": [
             {
+                "case_id": "deepseek-v4-mxfp4",
                 "model_key": "deepseek_v4_mxfp4",
                 "model_id": (
                     "T-HEAD/DeepSeek-V4-Flash-0731-MoE-Quant-W-MXFP4-A-MXFP4-"
@@ -135,12 +136,15 @@ def test_accuracy_matrix_uses_only_accuracy_and_eval_keys() -> None:
                 ),
                 "board": "ZW-M890P",
                 "ppu_count": 8,
+                "server_cmd": [],
             },
             {
+                "case_id": "minimax-m3-fp8",
                 "model_key": "minimax-m3-fp8",
                 "model_id": ("T-HEAD/MiniMax-M3-Quant-W-FP8-PerChannel-A-FP8-PerToken"),
                 "board": "ZW-M890P",
                 "ppu_count": 8,
+                "server_cmd": [],
             },
         ]
     }
@@ -154,6 +158,72 @@ def test_accuracy_matrix_default_contains_every_accuracy_model() -> None:
         "deepseek_v4_mxfp4",
         "minimax-m3-fp8",
     }
+
+
+def test_accuracy_catalog_entries_declare_model_key_and_server_cmd() -> None:
+    accuracy = [
+        entry for entry in _catalog() if entry["category"] == "accuracy"
+    ]
+    for entry in accuracy:
+        # model_key picks the evaluator config and keys the golden file; it
+        # must be present even though the catalog key is what labels a job.
+        assert entry.get("model_key"), entry["key"]
+        # server_cmd is opt-in: null means "use the evaluator's built-in argv".
+        assert "server_cmd" in entry, entry["key"]
+
+
+def test_accuracy_matrix_keeps_multiple_cases_over_one_checkpoint() -> None:
+    """Two cases over one checkpoint stay distinct and keep their own argv."""
+    select = _load_select()
+    catalog = [
+        {
+            "key": "deepseek-v4-mxfp4",
+            "category": "accuracy",
+            "model_key": "deepseek_v4_mxfp4",
+            "model_id": "T-HEAD/ckpt",
+            "board": "ZW-M890P",
+            "tp": 8,
+            "server_cmd": None,
+        },
+        {
+            "key": "deepseek-v4-mxfp4-eager",
+            "category": "accuracy",
+            "model_key": "deepseek_v4_mxfp4",
+            "model_id": "T-HEAD/ckpt",
+            "board": "ZW-M890P",
+            "tp": 8,
+            "server_cmd": ["vllm", "serve", "{model}", "--enforce-eager"],
+        },
+    ]
+    include = select.build_accuracy_matrix(catalog, "")["include"]
+    assert [entry["case_id"] for entry in include] == [
+        "deepseek-v4-mxfp4",
+        "deepseek-v4-mxfp4-eager",
+    ]
+    # Both cases compare against the same golden, so the identity must agree.
+    assert {entry["model_key"] for entry in include} == {"deepseek_v4_mxfp4"}
+    assert include[0]["server_cmd"] == []
+    assert include[1]["server_cmd"] == [
+        "vllm",
+        "serve",
+        "{model}",
+        "--enforce-eager",
+    ]
+
+
+def test_accuracy_matrix_rejects_entry_without_model_key() -> None:
+    select = _load_select()
+    catalog = [
+        {
+            "key": "no-model-key",
+            "category": "accuracy",
+            "model_id": "T-HEAD/ckpt",
+            "board": "ZW-M890P",
+            "tp": 8,
+        }
+    ]
+    with pytest.raises(ValueError, match="missing 'model_key'"):
+        select.build_accuracy_matrix(catalog, "")
 
 
 def test_selector_rejects_unknown_key() -> None:
