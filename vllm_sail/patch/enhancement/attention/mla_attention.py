@@ -75,6 +75,7 @@ def _forward_impl_body(
                 dtype=k_c_normed.dtype,
             )
         # PPU MODIFICATION: end
+        self.impl.reserve_workspace()
 
         # The zero fill is required when used with DP + EP
         # to ensure all ranks within a DP group compute the
@@ -326,8 +327,13 @@ def _forward_impl_body(
             )
         elif quant_key == kFp8StaticTensorSym:
             # Static FP8 quantization
-            fp8_data, _ = self._quant_fp8_op(actual, output_scale)
-            quant_output[:quant_idx].copy_(fp8_data)
+            if self._aiter_output_quant:
+                torch.ops.vllm.rocm_aiter_per_tensor_quant(
+                    quant_output[:quant_idx], actual, output_scale, False
+                )
+            else:
+                fp8_data, _ = self._quant_fp8_op(actual, output_scale)
+                quant_output[:quant_idx].copy_(fp8_data)
         else:
             raise ValueError(f"Unsupported quant_key: {quant_key}")
         return quant_output

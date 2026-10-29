@@ -60,6 +60,7 @@ def resolve(monkeypatch):
         head_v=128,
         dtype="bfloat16",
         available=True,
+        xpu_available=True,
         pla=True,
         capability=89,
         mi3xx=False,
@@ -73,6 +74,7 @@ def resolve(monkeypatch):
             is_ppu=lambda: device == "ppu",
             is_cuda=lambda: device in ("ppu", "cuda"),
             is_rocm=lambda: device == "rocm",
+            is_xpu=lambda: device == "xpu",
             is_device_capability=lambda value: capability == value,
             is_device_capability_family=lambda value: capability // 10 == value // 10,
             get_cuda_runtime_major=lambda: 13,
@@ -97,6 +99,7 @@ def resolve(monkeypatch):
             "torch": NS(bfloat16="bfloat16"),
             "logger": NS(warning_once=lambda *args: warnings.append(args)),
             "_pla_prefill_supported": lambda _: pla,
+            "xpu_gdn_kernel_available": lambda: xpu_available,
         }
 
         def reasons(candidate, key_dim, value_dim):
@@ -174,14 +177,14 @@ def test_existing_platform_routes_remain_available(
 @pytest.mark.parametrize(
     "mi3xx,available,reasons,active",
     [
-        (True, True, [], "triton"),
+        (True, True, [], "aiter_flydsl"),
         (True, False, [], "triton"),
         (True, True, ["unsupported dtype"], "triton"),
         (True, True, ["unsupported head shape"], "triton"),
         (False, True, [], "triton"),
     ],
 )
-def test_release_rocm_auto_remains_opt_in_for_flydsl(
+def test_rocm_auto_flydsl_requires_supported_hardware_model_and_kernel(
     resolve, mi3xx, available, reasons, active
 ):
     result, warnings = resolve(
@@ -196,7 +199,7 @@ def test_release_rocm_auto_remains_opt_in_for_flydsl(
 @pytest.mark.parametrize(
     "options,active",
     [
-        ({}, "triton"),
+        ({}, "aiter_flydsl"),
         ({"head_k": 64}, "triton"),
         ({"head_v": 64}, "triton"),
         ({"dtype": "float16"}, "triton"),
@@ -205,22 +208,19 @@ def test_release_rocm_auto_remains_opt_in_for_flydsl(
         ({"mi3xx": False}, "triton"),
     ],
 )
-def test_real_release_resolvers_preserve_explicit_only_flydsl(
+def test_real_flydsl_reasons_drive_upstream_and_copied_auto_routing(
     upstream_source_root, resolve, copied, options, active
 ):
     path = (
         upstream_source_root
         / "vllm/model_executor/layers/mamba/gdn/qwen_gdn_linear_attn.py"
     )
-    # The release predates the main-only helper and automatic MI3xx route.
-    # Execute its actual resolver; do not install a replacement helper.
-    assert not any(
-        isinstance(node, ast.FunctionDef)
-        and node.name == "_aiter_flydsl_unsupported_reasons"
-        for node in ast.parse(path.read_text()).body
+    helper = function(
+        path, "_aiter_flydsl_unsupported_reasons", {"torch": NS(bfloat16="bfloat16")}
     )
     result, warnings = resolve(
         "rocm",
+        helper=helper,
         body=PATCH if copied else path,
         **({"mi3xx": True} | options),
     )
@@ -299,3 +299,68 @@ def test_pla_prefill_accepts_selected_upstream_call_keywords(
         assert not call.args
         assert all(keyword.arg is not None for keyword in call.keywords)
         signature.bind(object(), **{keyword.arg: object() for keyword in call.keywords})
+
+
+@pytest.mark.parametrize(
+    "device,backend,available,expected,error",
+    [
+        ("xpu", "auto", True, "sycl", None),
+        ("xpu", "auto", False, "triton", None),
+        ("xpu", "sycl", True, "sycl", None),
+        ("xpu", "sycl", False, None, "not available"),
+        ("ppu", "sycl", True, None, "only supported on XPU"),
+        ("cuda", "sycl", True, None, "only supported on XPU"),
+        ("rocm", "sycl", True, None, "only supported on XPU"),
+        ("cpu", "sycl", True, None, "only supported on XPU"),
+    ],
+)
+def test_sycl_routes_or_rejects_before_ppu_fallback(
+    resolve, device, backend, available, expected, error
+):
+    if error:
+        with pytest.raises(ValueError, match=error):
+            resolve(device, backend, xpu_available=available)
+    else:
+        result, warnings = resolve(device, backend, xpu_available=available)
+        assert result == (backend, expected)
+        assert not warnings
+
+
+@pytest.mark.upstream_source
+@pytest.mark.parametrize("copied", [False, True])
+@pytest.mark.parametrize(
+    "device,backend,available,expected,error",
+    [
+        ("xpu", "auto", True, "sycl", None),
+        ("xpu", "auto", False, "triton", None),
+        ("xpu", "sycl", True, "sycl", None),
+        ("xpu", "sycl", False, None, "not available"),
+        ("ppu", "sycl", True, None, "only supported on XPU"),
+    ],
+)
+def test_actual_sycl_provider_contract(
+    upstream_source_root, resolve, copied, device, backend, available, expected, error
+):
+    path = (
+        upstream_source_root
+        / "vllm/model_executor/layers/mamba/gdn/qwen_gdn_linear_attn.py"
+    )
+    body = PATCH if copied else path
+    if error:
+        with pytest.raises(ValueError, match=error):
+            resolve(device, backend, xpu_available=available, body=body)
+    else:
+        result, warnings = resolve(device, backend, xpu_available=available, body=body)
+        assert result == (backend, expected)
+        assert not warnings
+
+
+def test_sycl_backend_has_a_log_name():
+    messages = []
+    config = NS(model_config=NS(hf_text_config=NS(linear_key_head_dim=128)))
+    namespace = {
+        "current_platform": NS(is_cpu=lambda: False, is_xpu=lambda: False),
+        "logger": NS(info_once=lambda *args: messages.append(args)),
+    }
+    function(PATCH, "_log_gdn_backend_decision", namespace)(config, "sycl", "sycl")
+    assert messages[0][1:] == ("SYCL", "sycl", 128)

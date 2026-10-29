@@ -122,6 +122,17 @@ def fused_recurrent_gated_delta_rule_packed_decode(
             f"Packed decode kernel only supports NK=1 (got K={K}, BK={BK})."
         )
     BV = min(triton.next_power_of_2(V), 32)
+    if (
+        K == V == 128
+        and current_platform.is_cuda()
+        and current_platform.is_device_capability_family(100, device_id=dev.index)
+    ):
+        # Tuned on GB300; validated on GB200 and with 148 SMs.
+        # MRv2 decode warmup/graph capture compiles the reachable BV variants.
+        if B * HV <= 64:
+            BV = 4
+        elif initial_state.dtype == torch.float32:
+            BV = 8
     num_stages = 3
     num_warps = 1
 
@@ -492,9 +503,16 @@ _pla_prefill_supported = patch(
 def _resolve_gdn_prefill_backend(
     vllm_config: VllmConfig,
     # PPU MODIFICATION: begin
-) -> tuple[str, Literal["triton", "flashinfer", "cutedsl", "aiter_flydsl", "pla"]]:
+) -> tuple[
+    str, Literal["triton", "flashinfer", "cutedsl", "aiter_flydsl", "sycl", "pla"]
+]:
     # PPU MODIFICATION: end
     """Resolve GDN prefill backend.
+
+    The SYCL kernel is chosen when ``requested in ["sycl", "auto"]``, the
+    platform is XPU and ``_xpu_C::gdn_attention`` is built. Unlike the other
+    backends it is a fused whole-layer op, so selecting it also replaces the
+    conv1d and decode kernels, not just prefill.
 
     FlashInfer's GDN prefill kernel is chosen when:
     * ``requested in ["flashinfer", "auto"]``;
@@ -509,7 +527,7 @@ def _resolve_gdn_prefill_backend(
     * Blackwell (SM10.x) with ``head_k_dim == 128``;
 
     AITER FlyDSL GDN prefill kernels are chosen when:
-    * "aiter_flydsl" is requested; (opt-in only)
+    * "aiter_flydsl" is requested, or "auto" is requested on gfx942/gfx950;
     * ROCm AITER exposes the optimized VK prefill API and FlyDSL kernels;
     * the model uses BF16 activations with ``head_k_dim == head_v_dim == 128``.
     # PPU MODIFICATION: begin
@@ -530,6 +548,20 @@ def _resolve_gdn_prefill_backend(
     )
     backend = str(backend_cfg).strip().lower()
 
+    if backend == "sycl" and not current_platform.is_xpu():
+        raise ValueError("GDN prefill backend 'sycl' is only supported on XPU.")
+
+    if current_platform.is_xpu():
+        if backend in ("auto", "sycl") and xpu_gdn_kernel_available():
+            return backend, "sycl"
+        if backend == "sycl":
+            raise ValueError(
+                "GDN prefill backend 'sycl' was requested but "
+                "torch.ops._xpu_C.gdn_attention is not available. Rebuild "
+                "vllm-xpu-kernels with VLLM_GDN_ENABLED."
+            )
+        return backend, "triton"
+
     head_k_dim = getattr(
         vllm_config.model_config.hf_text_config, "linear_key_head_dim", None
     )
@@ -546,24 +578,28 @@ def _resolve_gdn_prefill_backend(
                     "that VLLM_ROCM_USE_AITER=1, that this is a CDNA 3 or "
                     "newer GPU, and that the installed AITER exports them."
                 )
-            if head_k_dim != 128 or head_v_dim != 128:
+            reasons = _aiter_flydsl_unsupported_reasons(
+                vllm_config, head_k_dim, head_v_dim
+            )
+            if reasons:
                 logger.warning_once(
-                    "GDN prefill backend 'aiter_flydsl' was requested but "
-                    "linear head dims are K=%s V=%s; FlyDSL requires 128/128. "
+                    "GDN prefill backend 'aiter_flydsl' was requested but %s. "
                     "Falling back to Triton/FLA.",
-                    head_k_dim,
-                    head_v_dim,
-                )
-                return backend, "triton"
-            if vllm_config.model_config.dtype != torch.bfloat16:
-                logger.warning_once(
-                    "GDN prefill backend 'aiter_flydsl' was requested but "
-                    "model dtype is %s; FlyDSL requires bfloat16. "
-                    "Falling back to Triton/FLA.",
-                    vllm_config.model_config.dtype,
+                    "; ".join(reasons),
                 )
                 return backend, "triton"
             return backend, "aiter_flydsl"
+        if backend == "auto":
+            from vllm.platforms.rocm import on_mi3xx
+
+            if (
+                on_mi3xx()
+                and not _aiter_flydsl_unsupported_reasons(
+                    vllm_config, head_k_dim, head_v_dim
+                )
+                and rocm_aiter_ops.is_gdn_flydsl_prefill_available()
+            ):
+                return backend, "aiter_flydsl"
         return backend, "triton"
 
     if backend == "aiter_flydsl":
@@ -650,6 +686,7 @@ def _log_gdn_backend_decision(
         "pla": "PLA FlashQLA",
         # PPU MODIFICATION: end
         "triton": "Triton/FLA",
+        "sycl": "SYCL",
     }[active_backend]
     logger.info_once(
         "Using %s GDN prefill kernel (requested=%s, head_k_dim=%s).",

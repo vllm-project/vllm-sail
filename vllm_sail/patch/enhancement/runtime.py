@@ -120,6 +120,9 @@ def rejection_sample(
     watermarking: torch.Tensor | None = None,
     watermarking_skip_mask: torch.Tensor | None = None,
     watermark_key: int | None = None,
+    fly_window_size: int = 0,
+    fly_entropy_threshold: float = 0.3,
+    fly_entropy_top_k: int = 3,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     assert target_logits.ndim == 2 and target_logits.stride(-1) == 1
     assert draft_logits is None or (
@@ -170,6 +173,13 @@ def rejection_sample(
         # vocab size is larger than the draft's due to padding.
         vocab_size = min(vocab_size, draft_logits.size(-1))
 
+    fly_entropy = None
+    if fly_window_size > 0:
+        assert synthetic_conditional_rates is None and not use_block_verification
+        fly_entropy = compute_fly_entropy(
+            target_logits[:, :vocab_size], fly_entropy_top_k, from_logits=True
+        )
+
     # Compute the per-vocab-block logits stats, such as target argmax
     # (for greedy requests), and target max + softmax exponential
     # (for non-greedy requests).
@@ -211,7 +221,7 @@ def rejection_sample(
         expanded_local_pos,
         temperature,
         vocab_size,
-        num_speculative_steps,
+        num_logits,
         BLOCK_SIZE=VOCAB_BLOCK_SIZE,
         HAS_DRAFT_LOGITS=has_draft_logits,
     )
@@ -282,7 +292,7 @@ def rejection_sample(
                 expanded_local_pos,
                 temperature,
                 vocab_size,
-                num_speculative_steps,
+                num_logits,
                 vocab_num_blocks,
                 BLOCK_SIZE=VOCAB_BLOCK_SIZE,
                 PADDED_VOCAB_NUM_BLOCKS=padded_vocab_num_blocks,
@@ -332,11 +342,14 @@ def rejection_sample(
         cumulative_log_p,
         local_residual_mass,
         local_residual_mass.stride(0) if local_residual_mass is not None else 0,
+        fly_entropy,
+        fly_entropy_threshold,
         vocab_num_blocks,
         PADDED_VOCAB_NUM_BLOCKS=padded_vocab_num_blocks,
         HAS_DRAFT_LOGITS=has_draft_logits,
         SYNTHETIC_MODE=synthetic_conditional_rates is not None,
         USE_BLOCK_VERIFICATION=use_block_verification,
+        FLY_WINDOW_SIZE=fly_window_size,
         num_warps=1,
     )
 
@@ -437,7 +450,10 @@ def _install(module, owner, attribute, body):
                 patch(name, attribute, **metadata)(dispatch)
 
 
-_CONSUMERS = ["vllm.v1.worker.gpu.spec_decode.rejection_sampler"]
+_CONSUMERS = [
+    "vllm.v1.worker.gpu.spec_decode.rejection_sampler",
+    "vllm.v1.watermarking.spec_decode",
+]
 _install(
     _runner,
     _runner.GPUModelRunner,

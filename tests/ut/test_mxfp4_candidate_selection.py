@@ -82,7 +82,6 @@ def selection(
         "_get_priority_backends_for_gpt_oss": lambda: list(candidates),
         "_filter_by_activation": lambda backends, _: backends,
         "_backend_activation_key": native_keys.__getitem__,
-        "_requires_qwen38_tep8_emulation": lambda *_: False,
         "backend_to_kernel_cls": lambda backend: [kernel(backend)],
         "_return_or_raise": explicit_return,
         "_warn_on_bf16_fallback": warn,
@@ -129,11 +128,7 @@ def selection(
             "_requested_kernel_cls",
             "_return_or_raise",
         ):
-            if helper != "_requested_kernel_cls" or any(
-                isinstance(node, ast.FunctionDef) and node.name == helper
-                for node in ast.parse(upstream.read_text()).body
-            ):
-                function(upstream, helper, namespace)
+            function(upstream, helper, namespace)
     config = NS(
         moe_backend="explicit" if explicit else "auto",
         moe_parallel_config=NS(use_batched_activation_format=batched),
@@ -170,9 +165,7 @@ def test_emulation_uses_checkpoint_activation_without_bf16_warning():
 
 @pytest.mark.upstream_source
 @pytest.mark.parametrize("lora", [False, True])
-def test_explicit_selection_retains_the_ppu_candidate_with_lora(
-    real_oracle_source, lora
-):
+def test_requested_kernel_helper_retains_the_ppu_candidate(real_oracle_source, lora):
     (backend, _), calls, warnings, format = selection(
         [Backend.PPU_DEEPGEMM_MXFP4_BF16],
         explicit=True,

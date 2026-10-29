@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Check the release provider's FULL-mode DeepSeek V4 capture policy."""
+"""Use the actual capture state for DeepSeek V4 compression decisions."""
 
 from __future__ import annotations
 
@@ -15,10 +15,10 @@ modules = _modules
 PATCH = "vllm_sail/patch/enhancement/models/deepseek_v4_compressor.py"
 UPSTREAM = "vllm/models/deepseek_v4/compressor.py"
 CASES = [
-    (False, False, "FULL", True),
+    (False, False, "FULL", False),
     (False, False, "NONE", False),
     (True, False, "FULL", True),
-    (True, False, "NONE", False),
+    (True, False, "NONE", True),
     (False, True, "FULL", True),
     (True, True, "FULL", True),
     (False, None, "FULL", True),
@@ -113,7 +113,7 @@ def run_forward(path, name, modules, capturing, boundary, mode, expected):
 
 
 @pytest.mark.parametrize("capturing,boundary,mode,expected", CASES)
-def test_ppu_compressor_preserves_release_full_mode_policy(
+def test_ppu_compressor_uses_capture_state(
     modules, capturing, boundary, mode, expected
 ):
     run_forward(PATCH, "forward", modules, capturing, boundary, mode, expected)
@@ -121,7 +121,7 @@ def test_ppu_compressor_preserves_release_full_mode_policy(
 
 @pytest.mark.upstream_source
 @pytest.mark.parametrize("capturing,boundary,mode,expected", CASES)
-def test_upstream_compressor_uses_the_same_full_mode_policy(
+def test_upstream_compressor_uses_the_same_capture_policy(
     modules, upstream_source_root, capturing, boundary, mode, expected
 ):
     run_forward(
