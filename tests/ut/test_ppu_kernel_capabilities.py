@@ -106,7 +106,8 @@ def load_patch(relative):
     return mod
 
 
-def test_optional_gates_rebind_preloaded_and_future_consumers(modules):
+@pytest.mark.parametrize("model", ["deepseek_v4", "deepseek_v41"])
+def test_optional_gates_rebind_preloaded_and_future_consumers(modules, model):
     platform = types.SimpleNamespace(ppu=True, is_ppu=lambda: platform.ppu)
     modules("vllm.platforms", current_platform=platform)
 
@@ -114,7 +115,7 @@ def test_optional_gates_rebind_preloaded_and_future_consumers(modules):
         return True
 
     provider = modules("vllm.utils.import_utils", has_cutedsl=probe, has_humming=probe)
-    cute = modules("vllm.models.deepseek_v4.common.ops.cache_utils", has_cutedsl=probe)
+    cute = modules(f"vllm.models.{model}.common.ops.cache_utils", has_cutedsl=probe)
     humming = modules(
         "vllm.model_executor.layers.quantization.utils.humming.moe", has_humming=probe
     )
@@ -773,10 +774,33 @@ def test_deepseek_config_preserves_dense_channelwise_patterns_for_mtp(modules):
         def apply_vllm_mapper(self, mapper):
             pass
 
+        def get_quant_method(self, layer, prefix):
+            return "upstream-linear"
+
+        @classmethod
+        def override_quantization_method(cls, *args):
+            return None
+
+        @classmethod
+        def from_config(cls, config):
+            return cls(
+                is_checkpoint_fp8_serialized=config["quant_method"] == "fp8",
+                ignored_layers=config.get("ignored_layers", []),
+            )
+
+    modules("vllm.models.deepseek_v4.quant_config", DeepseekV4FP8Config=Fp8Config)
+
     class LinearBase:
         pass
 
-    modules("vllm.config", get_current_vllm_config=lambda: None)
+    modules(
+        "vllm.config",
+        get_current_vllm_config=lambda: types.SimpleNamespace(
+            model_config=types.SimpleNamespace(
+                hf_config=types.SimpleNamespace(model_type="deepseek_v4")
+            )
+        ),
+    )
     modules(
         "vllm.platforms", current_platform=types.SimpleNamespace(is_ppu=lambda: True)
     )
@@ -785,7 +809,11 @@ def test_deepseek_config_preserves_dense_channelwise_patterns_for_mtp(modules):
         RoutedExperts=type("RoutedExperts", (), {}),
         UnquantizedFusedMoEMethod=object,
     )
-    modules("vllm.model_executor.layers.linear", LinearBase=LinearBase)
+    modules(
+        "vllm.model_executor.layers.linear",
+        LinearBase=LinearBase,
+        UnquantizedLinearMethod=object,
+    )
     modules("vllm.model_executor.layers.quantization", QuantizationMethods=str)
     modules("vllm.model_executor.layers.quantization.fp8", Fp8Config=Fp8Config)
     modules("vllm.model_executor.layers.quantization.mxfp4", Mxfp4MoEMethod=object)
@@ -805,6 +833,14 @@ def test_deepseek_config_preserves_dense_channelwise_patterns_for_mtp(modules):
         model_type="deepseek_mtp", architectures=["DeepSeekV4MTPModel"]
     )
     assert cls.override_quantization_method(checkpoint, None, mtp) == "deepseek_v4_fp8"
+    for hf in (
+        types.SimpleNamespace(model_type="deepseek_v41"),
+        types.SimpleNamespace(model_type="deepseek_v41_text"),
+        types.SimpleNamespace(
+            model_type="deepseek_mtp", architectures=["DeepseekV41ForCausalLM"]
+        ),
+    ):
+        assert cls.override_quantization_method(checkpoint, None, hf) is None
     config = cls.from_config(checkpoint)
     assert config.is_checkpoint_fp8_serialized
     config.apply_vllm_mapper(
@@ -832,6 +868,9 @@ def test_deepseek_config_preserves_dense_channelwise_patterns_for_mtp(modules):
     )
     assert layer.scheme["weight_quant"]["strategy"] == "channel"
     assert not layer.scheme["is_static_input_scheme"]
+    assert config.get_quant_method(LinearBase(), "model.layers.0.attn.wq_b") == (
+        "upstream-linear"
+    )
 
 
 @pytest.mark.parametrize(
