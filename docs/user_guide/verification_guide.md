@@ -48,6 +48,13 @@ environment with their dependencies installed. Investigate failures and report
 skip reasons; do not compare test counts from different environments as if they
 cover the same paths.
 
+Compatibility UT may intentionally import the plugin checkout beside installed
+vLLM and torch. Record those import paths and set `VLLM_SOURCE_ROOT` to the same
+exact upstream revision even when source-marked cases are deselected. This UT
+mode does not verify the installed plugin wheel: separately compare its full
+package contents with the wheel and run native imports, device tests and models
+from that verified installation.
+
 ### Check upstream source compatibility
 
 Tests live with the feature they cover, independently of the vLLM release that
@@ -74,15 +81,15 @@ pushes to `main` or `master`, and manual dispatch. Its jobs run independently:
 | Job | Environment and checks | Failure handling |
 | --- | --- | --- |
 | CPU UT | Python 3.10–3.13; only `requirements/dev.txt`; UT and branch coverage | Test failure fails the workflow; coverage-upload failure does not |
-| vLLM source | Python 3.12; checks out each configured upstream ref; runs `upstream_source` tests with a required source path | Checkout or test failure fails the workflow |
-| vLLM pin | Python 3.12; installs each configured vLLM version and runs the remaining UT | Advisory (`continue-on-error`), because installation may fail on a public CPU runner |
+| vLLM source (main-verified) | Python 3.12; checks out the exact verified main commit; runs `upstream_source` tests with a required source path | Checkout or test failure fails the workflow |
 
-The source and installed-vLLM jobs use the same two inputs:
-[release tag](../../.github/vllm-release-tag.commit) and
-[verified main commit](../../.github/vllm-main-verified.commit). Update these
-inputs when qualifying a new upstream version; keep feature tests named after
-their behavior. The source job logs the resolved commit. Repository branch
-protection determines which job results are required for merging.
+The source job reads the full SHA in
+[verified main commit](../../.github/vllm-main-verified.commit) and logs the
+resolved commit. Update this pin only after qualifying that exact revision.
+Keep feature tests named after their behavior. The workflow does not install
+vLLM or run PPU workloads; installed compatibility and device checks require
+the prepared environment below. Repository branch protection determines which
+job results are required for merging.
 
 The separate [upstream canary](../../.github/workflows/upstream-canary.yaml) runs
 weekly on Tuesday at 03:17 UTC and on manual dispatch. It installs upstream
