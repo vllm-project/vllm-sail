@@ -90,7 +90,7 @@ PIP_INDEX_URL=https://mirrors.aliyun.com/pypi/simple/ \
 
 # Install accuracy evaluation dependencies (not in dev.txt, needs a real device)
 PIP_INDEX_URL=https://mirrors.aliyun.com/pypi/simple/ \
-    python -m pip install "evalscope>=0.6,<1.0"
+    python -m pip install "evalscope==1.14.1"
 
 # Verify evalscope is importable
 python -c "from evalscope import TaskConfig, run_task; print('evalscope OK')"
