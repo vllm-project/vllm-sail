@@ -22,7 +22,7 @@ on:
       accuracy_models:
         description: Comma-separated accuracy model catalog keys
         required: false
-        default: qwen3.8-flash-next
+        default: deepseek-v4-mxfp4
         type: string
 
 permissions:

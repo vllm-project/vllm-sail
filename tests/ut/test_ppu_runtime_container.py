@@ -32,8 +32,11 @@ def test_runtime_wrapper_mounts_inputs_read_only_and_artifacts_writable():
     assert "target=/source,readonly" in text
     assert "target=/wheels,readonly" in text
     assert "source=${hf_home},target=${hf_home},readonly" in text
-    assert "source=${model_snapshot},target=${model_snapshot},readonly" in text
-    assert r"models--${MODEL_ID//\//--}" in text
+    # The view tree usually points outside HF_HOME, so both device lanes have to
+    # mount the resolved snapshot explicitly.
+    assert "mount_snapshot_if_external" in text
+    assert "source=$1,target=$1,readonly" in text
+    assert r"models--${model_id//\//--}" in text
     assert "--env HF_HUB_OFFLINE=1" in text
     assert "--env TRANSFORMERS_OFFLINE=1" in text
     assert 'target=/artifacts"' in text

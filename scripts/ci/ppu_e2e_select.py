@@ -30,7 +30,6 @@ ACCURACY_MODEL_KEYS = {
     "deepseek-v4-int8": "deepseek_v4_int8",
     "deepseek-v4-mxfp4": "deepseek_v4_mxfp4",
     "minimax-m3-fp8": "minimax-m3-fp8",
-    "qwen3.8-flash-next": "qwen3.8-flash-next",
 }
 
 
@@ -78,6 +77,10 @@ def build_accuracy_matrix(catalog: list[dict], models: str) -> dict:
         include.append(
             {
                 "model_key": model_key,
+                # The container wrapper resolves this id against the offline HF
+                # cache to mount the weights; the evaluator keys the rest of
+                # its configuration off model_key instead.
+                "model_id": entry["model_id"],
                 "board": entry["board"],
                 "ppu_count": int(entry["tp"]),
             }

@@ -105,6 +105,37 @@ create=(
 )
 create+=("${device_args[@]}")
 
+# Resolve a catalog model id to the concrete snapshot directory of the offline
+# HF cache and echo that absolute path. The cache is a view tree: snapshots/
+# <revision> usually symlinks into a read-only checkpoint export that lives
+# outside HF_HOME, so the caller has to mount the resolved target as well or
+# the link dangles inside the container.
+resolve_snapshot() {
+    local model_id=$1
+    local model_cache="${hf_home}/hub/models--${model_id//\//--}"
+    [[ -f "${model_cache}/refs/main" ]] || {
+        echo "Offline cache is missing ${model_id} refs/main" >&2
+        exit 2
+    }
+    local model_revision
+    model_revision=$(<"${model_cache}/refs/main")
+    local model_snapshot
+    model_snapshot=$(realpath "${model_cache}/snapshots/${model_revision}")
+    [[ -d "${model_snapshot}" ]] || {
+        echo "Offline cache snapshot is missing for ${model_id}" >&2
+        exit 2
+    }
+    printf '%s\n' "${model_snapshot}"
+}
+
+# Mount the resolved snapshot when the view tree points outside HF_HOME, which
+# is the normal layout on these runners.
+mount_snapshot_if_external() {
+    if [[ "$1" != "${hf_home}"/* ]]; then
+        create+=(--mount "type=bind,source=$1,target=$1,readonly")
+    fi
+}
+
 case "${mode}" in
     pin-ut)
         create+=(
@@ -128,17 +159,7 @@ case "${mode}" in
             echo "MODEL_ID must be an owner/name Hugging Face ID" >&2
             exit 2
         }
-        model_cache="${hf_home}/hub/models--${MODEL_ID//\//--}"
-        [[ -f "${model_cache}/refs/main" ]] || {
-            echo "Offline cache is missing ${MODEL_ID} refs/main" >&2
-            exit 2
-        }
-        model_revision=$(<"${model_cache}/refs/main")
-        model_snapshot=$(realpath "${model_cache}/snapshots/${model_revision}")
-        [[ -d "${model_snapshot}" ]] || {
-            echo "Offline cache snapshot is missing for ${MODEL_ID}" >&2
-            exit 2
-        }
+        model_snapshot=$(resolve_snapshot "${MODEL_ID}")
         create+=(
             --shm-size=32g
             --mount "type=bind,source=${hf_home},target=${hf_home},readonly"
@@ -152,9 +173,7 @@ case "${mode}" in
             --env VLLM_USE_RUST_FRONTEND=0
             --env VLLM_USE_RUST_BENCH=0
         )
-        if [[ "${model_snapshot}" != "${hf_home}"/* ]]; then
-            create+=(--mount "type=bind,source=${model_snapshot},target=${model_snapshot},readonly")
-        fi
+        mount_snapshot_if_external "${model_snapshot}"
         create+=(
             --entrypoint bash "${image_id}"
             /source/scripts/ci/ppu_e2e_smoke.sh
@@ -162,16 +181,20 @@ case "${mode}" in
         ;;
     model-accuracy)
         : "${GSM8K_DATASET_PATH:?GSM8K_DATASET_PATH is required for model-accuracy}"
-        hf_cache=${PPU_CI_HF_HOME:-${HF_HOME:-}}
-        : "${hf_cache:?HF_HOME or PPU_CI_HF_HOME is required for model-accuracy}"
+        : "${PPU_CI_HF_HOME:?PPU_CI_HF_HOME is required for model-accuracy}"
         : "${MODEL_KEY:?MODEL_KEY is required for model-accuracy}"
-        hf_home=$(realpath "${hf_cache}")
+        : "${MODEL_ID:?MODEL_ID is required for model-accuracy}"
+        hf_home=$(realpath "${PPU_CI_HF_HOME}")
         gsm8k_dataset=$(realpath "${GSM8K_DATASET_PATH}")
-        [[ -d "${hf_home}" ]] || { echo "HF_HOME is not a directory" >&2; exit 2; }
+        [[ -d "${hf_home}" ]] || {
+            echo "PPU_CI_HF_HOME is not a directory" >&2
+            exit 2
+        }
         [[ -d "${gsm8k_dataset}" ]] || {
             echo "GSM8K_DATASET_PATH is not a directory" >&2
             exit 2
         }
+        model_snapshot=$(resolve_snapshot "${MODEL_ID}")
         create+=(
             --shm-size=32g
             --mount "type=bind,source=${hf_home},target=${hf_home},readonly"
@@ -179,6 +202,7 @@ case "${mode}" in
             --env HF_HOME="${hf_home}"
             --env HF_HUB_OFFLINE=1
             --env TRANSFORMERS_OFFLINE=1
+            --env MODEL_ID="${MODEL_ID}"
             --env GSM8K_DATASET_PATH="${gsm8k_dataset}"
             --env MODEL_KEY="${MODEL_KEY}"
             --env RESULTS_DIR=/artifacts
@@ -187,6 +211,9 @@ case "${mode}" in
             --env VLLM_PORT="${VLLM_PORT:-9985}"
             --env VLLM_USE_RUST_FRONTEND=0
             --env VLLM_USE_RUST_BENCH=0
+        )
+        mount_snapshot_if_external "${model_snapshot}"
+        create+=(
             --entrypoint bash "${image_id}"
             /source/scripts/ci/ppu_e2e_accuracy.sh
         )

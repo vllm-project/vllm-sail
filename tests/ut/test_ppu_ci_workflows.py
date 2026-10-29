@@ -592,7 +592,7 @@ def test_debug_structure():
     assert inputs["models"]["type"] == "string"
     assert inputs["models"]["default"] == "qwen3.8-27b-m890p"
     assert inputs["accuracy_models"]["type"] == "string"
-    assert inputs["accuracy_models"]["default"] == "qwen3.8-flash-next"
+    assert inputs["accuracy_models"]["default"] == "deepseek-v4-mxfp4"
     assert "concurrency" not in config
     jobs = config["jobs"]
     expected_jobs = {

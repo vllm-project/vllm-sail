@@ -23,11 +23,15 @@ on:
       models:
         description: Comma-separated accuracy model catalog keys
         type: string
-        default: qwen3.8-flash-next
+        default: deepseek-v4-mxfp4
       hf_home:
         description: Host Hugging Face cache root
         type: string
-        default: ""
+        # Runners mount the shared NFS export at /nas_aisw/datasets and keep
+        # the offline cache root there. Declaring it here stops the container
+        # wrapper from falling back to whatever HF_HOME the host happens to
+        # export, which is invisible from the repository.
+        default: /nas_aisw/datasets/hf_cache
       gsm8k_dataset_path:
         description: Host GSM8K dataset directory
         type: string
@@ -157,6 +161,7 @@ jobs:
           HF_HUB_OFFLINE: "1"
           GSM8K_DATASET_PATH: ${{ inputs.gsm8k_dataset_path }}
           MODEL_KEY: ${{ matrix.model.model_key }}
+          MODEL_ID: ${{ matrix.model.model_id }}
         run: bash "${PPU_CI_SOURCE_DIR}/scripts/ci/ppu_runtime_container.sh" model-accuracy
 
       - name: Upload accuracy diagnostics

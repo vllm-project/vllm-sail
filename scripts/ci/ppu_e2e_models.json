@@ -18,15 +18,6 @@
     "model_id": "Qwen/Qwen3.8-27B"
   },
   {
-    "key": "qwen3.8-flash-next",
-    "category": "accuracy",
-    "model_id": "Qwen/Qwen3.8-Flash-Next",
-    "served_name": "Qwen3.8-Flash-Next",
-    "board": "ZW-M890P",
-    "tp": 8,
-    "extra_serve_flags": "--trust-remote-code"
-  },
-  {
     "key": "deepseek-v4-int8",
     "category": "accuracy",
     "model_id": "T-HEAD/DeepSeek-V4-Flash-0731-W8A8-INT8",

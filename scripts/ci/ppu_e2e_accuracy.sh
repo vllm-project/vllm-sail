@@ -9,6 +9,8 @@
 #
 # Environment contract (injected by ppu_runtime_container.sh):
 #   MODEL_KEY          model config key (e.g. deepseek_v4_int8)
+#   MODEL_ID           Hugging Face model id this key resolves to; checked
+#                      against the offline cache before the server starts
 #   WHEELS_DIR         directory holding the downloaded *.whl artifacts
 #   RESULTS_DIR        absolute output dir for xml/logs/golden
 #   UPDATE_GOLDEN      "1" to pass --update-golden (default: "0")
@@ -30,6 +32,7 @@ export VLLM_USE_RUST_FRONTEND=0 VLLM_USE_RUST_BENCH=0
 
 export GSM8K_DATASET_PATH="${GSM8K_DATASET_PATH:?GSM8K_DATASET_PATH must be set}"
 MODEL_KEY="${MODEL_KEY:?MODEL_KEY is required}"
+MODEL_ID="${MODEL_ID:?MODEL_ID is required}"
 WHEELS_DIR="${WHEELS_DIR:?WHEELS_DIR is required}"
 RESULTS_DIR="${RESULTS_DIR:?RESULTS_DIR is required}"
 UPDATE_GOLDEN="${UPDATE_GOLDEN:-0}"
@@ -112,6 +115,20 @@ print("Capability:", current_platform.get_device_capability())
 print("vLLM:", vllm.__version__)
 print("vLLM SAIL:", vllm_sail.__version__)
 PY
+
+# ------------------------------------------------------------------
+# The offline cache is a view tree over a separate checkpoint export. Verify
+# the repo is there before vLLM starts: a missing snapshot otherwise surfaces
+# as a bare LocalEntryNotFoundError twelve minutes into engine startup.
+log "resolve model path"
+MODEL_PATH=$(python - "${MODEL_ID}" <<'PY'
+import sys
+from huggingface_hub import snapshot_download
+
+print(snapshot_download(repo_id=sys.argv[1], local_files_only=True))
+PY
+) || { echo "ERROR: Cannot resolve model_id '${MODEL_ID}' from HF cache"; exit 1; }
+echo "Resolved model_id '${MODEL_ID}' -> '${MODEL_PATH}'"
 
 # ------------------------------------------------------------------
 log "run accuracy eval: ${MODEL_KEY}"

@@ -42,7 +42,7 @@ def _workflow(path: Path) -> dict:
 
 def test_models_catalog_is_partitioned_by_category_and_contract() -> None:
     catalog = _catalog()
-    assert isinstance(catalog, list) and len(catalog) == 6
+    assert isinstance(catalog, list) and len(catalog) == 5
     common = {"key", "served_name", "board", "tp"}
     for entry in catalog:
         assert common <= set(entry), entry
@@ -67,7 +67,6 @@ def test_catalog_keeps_smoke_and_accuracy_subsets_exact() -> None:
         "deepseek-v4-int8",
         "deepseek-v4-mxfp4",
         "minimax-m3-fp8",
-        "qwen3.8-flash-next",
     }
 
 
@@ -93,7 +92,9 @@ def test_accuracy_catalog_keeps_model_ids_and_per_model_tp() -> None:
     accuracy = {
         entry["key"]: entry for entry in _catalog() if entry["category"] == "accuracy"
     }
-    assert accuracy["qwen3.8-flash-next"]["model_id"] == ("Qwen/Qwen3.8-Flash-Next")
+    assert accuracy["deepseek-v4-int8"]["model_id"] == (
+        "T-HEAD/DeepSeek-V4-Flash-0731-W8A8-INT8"
+    )
     assert accuracy["deepseek-v4-int8"]["board"] == "OAM-810E"
     assert accuracy["deepseek-v4-mxfp4"]["board"] == "ZW-M890P"
     assert {int(entry["tp"]) for entry in accuracy.values()} == {8}
@@ -115,7 +116,7 @@ def test_selector_defaults_to_smoke_and_legacy_entries_are_smoke() -> None:
 
 def test_selector_filters_smoke_without_leaking_accuracy() -> None:
     select = _load_select()
-    matrix = select.build_matrix(_catalog(), "qwen3.8-flash-next,qwen3.8-27b-m890p")
+    matrix = select.build_matrix(_catalog(), "deepseek-v4-int8,qwen3.8-27b-m890p")
     assert [entry["key"] for entry in matrix["include"]] == ["qwen3.8-27b-m890p"]
 
 
@@ -128,11 +129,16 @@ def test_accuracy_matrix_uses_only_accuracy_and_eval_keys() -> None:
         "include": [
             {
                 "model_key": "deepseek_v4_mxfp4",
+                "model_id": (
+                    "T-HEAD/DeepSeek-V4-Flash-0731-MoE-Quant-W-MXFP4-A-MXFP4-"
+                    "Dense-Quant-W-FP8-PerChannel-A-FP8-PerToken"
+                ),
                 "board": "ZW-M890P",
                 "ppu_count": 8,
             },
             {
                 "model_key": "minimax-m3-fp8",
+                "model_id": ("T-HEAD/MiniMax-M3-Quant-W-FP8-PerChannel-A-FP8-PerToken"),
                 "board": "ZW-M890P",
                 "ppu_count": 8,
             },
@@ -140,14 +146,13 @@ def test_accuracy_matrix_uses_only_accuracy_and_eval_keys() -> None:
     }
 
 
-def test_accuracy_matrix_default_contains_all_four_accuracy_models() -> None:
+def test_accuracy_matrix_default_contains_every_accuracy_model() -> None:
     select = _load_select()
     matrix = select.build_accuracy_matrix(_catalog(), "")
     assert {entry["model_key"] for entry in matrix["include"]} == {
         "deepseek_v4_int8",
         "deepseek_v4_mxfp4",
         "minimax-m3-fp8",
-        "qwen3.8-flash-next",
     }
 
 
@@ -167,7 +172,7 @@ def test_selector_cli_emits_separate_smoke_and_accuracy_outputs() -> None:
     smoke = json.loads(outputs["matrix"])
     accuracy = json.loads(outputs["accuracy_matrix"])
     assert len(smoke["include"]) == 2
-    assert len(accuracy["include"]) == 4
+    assert len(accuracy["include"]) == 3
 
 
 # --- scripts -----------------------------------------------------------------
@@ -217,6 +222,14 @@ def test_accuracy_script_uses_writable_results_with_read_only_source() -> None:
     assert "unset PYTHONPATH" in text
     assert 'cp -fv "${wheel_so[@]}" "${ROOT_DIR}/vllm_sail/"' not in text
     assert 'python "${ROOT_DIR}/scripts/eval/ppu_gsm8k_eval.py"' in text
+    # A repo missing from the offline cache must fail before the server boots
+    # instead of twelve minutes into engine startup.
+    probe = "snapshot_download(repo_id=sys.argv[1]"
+    assert probe in text
+    assert "local_files_only=True" in text
+    assert text.index(probe) < text.index(
+        'python "${ROOT_DIR}/scripts/eval/ppu_gsm8k_eval.py"'
+    )
 
 
 def test_accuracy_script_seeds_reviewed_goldens_into_the_writable_tree() -> None:
@@ -364,7 +377,7 @@ def test_accuracy_nightly_is_serial_and_wheel_sourced_from_the_build_commit() ->
     text = NIGHTLY_WORKFLOW.read_text()
     # Each model must reach the reusable workflow with one catalog key.
     matrix = _load_select().build_accuracy_matrix(_catalog(), "")
-    assert len(matrix["include"]) == 4
+    assert len(matrix["include"]) == 3
     assert "models: ${{ matrix.model }}" in text
 
 
