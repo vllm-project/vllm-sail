@@ -72,8 +72,8 @@ def _make_golden(
         },
         "serving_cfg": {
             "tensor_parallel_size": 8,
-            "max_model_len": 4096,
-            "dtype": "bfloat16",
+            "gpu_memory_utilization": 0.9,
+            "seed": 0,
         },
         "score": score,
         "score_num": 1319,
@@ -258,7 +258,7 @@ def test_golden_comparison_fails_on_regression(
 
     ok, err = gate.check_accuracy_golden(0.92, 1319, loaded)
     assert ok is False
-    assert "regression" in err
+    assert "band gate failed" in err
 
 
 # ---------------------------------------------------------------------------
@@ -348,6 +348,63 @@ def test_update_golden_below_threshold_preserves_baselines(
     assert result["status"] == "fail_threshold"
     assert gate.read_golden(formal)["score"] == original["score"]
     assert pending.exists()
+
+
+def test_committed_golden_below_threshold_passes_inside_its_band(
+    tmp_path: Path,
+) -> None:
+    """A 0.60 golden must gate at 0.60, not at the 0.9 fallback.
+
+    Before the band gate, every checkpoint was held to ``score >= 0.9`` even
+    when its own baseline was lower, so a legitimately lower-accuracy model
+    could never pass.
+    """
+    evaluator = _load_evaluator()
+    formal = tmp_path / gate.golden_filename("demo_model", CHIP)
+    pending = tmp_path / gate.pending_golden_filename("demo_model", CHIP)
+    gate.write_golden(_make_golden(score=0.60), formal)
+
+    result = evaluator._golden_compare(
+        record=_make_golden(score=0.61),
+        score=0.61,
+        num=1319,
+        chip=CHIP,
+        ckpt_tail=_make_golden()["checkpoint_tail"],
+        gf=formal,
+        pending_gf=pending,
+        golden_root=tmp_path,
+        update_golden=False,
+        model_key="demo_model",
+    )
+
+    assert result["status"] == "pass"
+    assert result["error"] is None
+
+
+def test_committed_golden_below_threshold_fails_outside_its_band(
+    tmp_path: Path,
+) -> None:
+    """Below the fallback threshold, the band still decides the verdict."""
+    evaluator = _load_evaluator()
+    formal = tmp_path / gate.golden_filename("demo_model", CHIP)
+    pending = tmp_path / gate.pending_golden_filename("demo_model", CHIP)
+    gate.write_golden(_make_golden(score=0.60), formal)
+
+    result = evaluator._golden_compare(
+        record=_make_golden(score=0.55),
+        score=0.55,
+        num=1319,
+        chip=CHIP,
+        ckpt_tail=_make_golden()["checkpoint_tail"],
+        gf=formal,
+        pending_gf=pending,
+        golden_root=tmp_path,
+        update_golden=False,
+        model_key="demo_model",
+    )
+
+    assert result["status"] == "fail_accuracy"
+    assert "band gate failed" in result["error"]
 
 
 def test_update_golden_promotes_and_deletes_pending(

@@ -20,28 +20,34 @@
   {
     "key": "deepseek-v4-int8",
     "category": "accuracy",
+    "model_key": "deepseek_v4_int8",
     "model_id": "T-HEAD/DeepSeek-V4-Flash-0731-W8A8-INT8",
     "served_name": "deepseek-v4-int8",
     "board": "OAM-810E",
     "tp": 8,
-    "extra_serve_flags": "--trust-remote-code"
+    "extra_serve_flags": "--trust-remote-code",
+    "server_cmd": null
   },
   {
     "key": "deepseek-v4-mxfp4",
     "category": "accuracy",
+    "model_key": "deepseek_v4_mxfp4",
     "model_id": "T-HEAD/DeepSeek-V4-Flash-0731-MoE-Quant-W-MXFP4-A-MXFP4-Dense-Quant-W-FP8-PerChannel-A-FP8-PerToken",
     "served_name": "deepseek-v4-mxfp4",
     "board": "ZW-M890P",
     "tp": 8,
-    "extra_serve_flags": "--trust-remote-code"
+    "extra_serve_flags": "--trust-remote-code",
+    "server_cmd": null
   },
   {
     "key": "minimax-m3-fp8",
     "category": "accuracy",
+    "model_key": "minimax-m3-fp8",
     "model_id": "T-HEAD/MiniMax-M3-Quant-W-FP8-PerChannel-A-FP8-PerToken",
     "served_name": "MiniMax-M3-Quant-W-FP8-PerChannel-A-FP8-PerToken",
     "board": "ZW-M890P",
     "tp": 8,
-    "extra_serve_flags": "--trust-remote-code"
+    "extra_serve_flags": "--trust-remote-code",
+    "server_cmd": null
   }
 ]

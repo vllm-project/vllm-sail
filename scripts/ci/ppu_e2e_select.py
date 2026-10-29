@@ -23,15 +23,6 @@ from pathlib import Path
 
 CATALOG = Path(__file__).resolve().parent / "ppu_e2e_models.json"
 
-# Catalog keys are CLI-facing and use hyphens; the evaluator historically uses
-# underscores for the two DeepSeek variants. Keep the translation explicit so
-# workflow filtering cannot silently dispatch the wrong accuracy model.
-ACCURACY_MODEL_KEYS = {
-    "deepseek-v4-int8": "deepseek_v4_int8",
-    "deepseek-v4-mxfp4": "deepseek_v4_mxfp4",
-    "minimax-m3-fp8": "minimax-m3-fp8",
-}
-
 
 def _category(entry: dict) -> str:
     return entry.get("category", "smoke")
@@ -64,18 +55,28 @@ def build_matrix(catalog: list[dict], models: str) -> dict:
 
 
 def build_accuracy_matrix(catalog: list[dict], models: str) -> dict:
-    """Return the evaluator matrix for accuracy catalog entries only."""
+    """Return the evaluator matrix for accuracy catalog entries only.
+
+    Two identifiers travel with every entry:
+
+    * ``case_id`` — the catalog ``key``. Several cases may point at the same
+      checkpoint with different serve arguments; this is what the job name,
+      the artifact and the serve log are labelled with.
+    * ``model_key`` — the evaluator's model-config key, which also keys the
+      golden file. Cases sharing a checkpoint share this value and therefore
+      compare against one golden.
+    """
     include = []
     for entry in _select(catalog, models, "accuracy"):
-        catalog_key = entry["key"]
-        try:
-            model_key = ACCURACY_MODEL_KEYS[catalog_key]
-        except KeyError as error:
+        case_id = entry["key"]
+        model_key = entry.get("model_key")
+        if not model_key:
             raise ValueError(
-                f"missing accuracy model-key mapping for {catalog_key!r}"
-            ) from error
+                f"accuracy catalog entry {case_id!r} is missing 'model_key'"
+            )
         include.append(
             {
+                "case_id": case_id,
                 "model_key": model_key,
                 # The container wrapper resolves this id against the offline HF
                 # cache to mount the weights; the evaluator keys the rest of
@@ -83,6 +84,8 @@ def build_accuracy_matrix(catalog: list[dict], models: str) -> dict:
                 "model_id": entry["model_id"],
                 "board": entry["board"],
                 "ppu_count": int(entry["tp"]),
+                # Empty (or absent) means "use the evaluator's built-in argv".
+                "server_cmd": entry.get("server_cmd") or [],
             }
         )
     return {"include": include}

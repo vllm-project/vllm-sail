@@ -184,6 +184,8 @@ case "${mode}" in
         : "${PPU_CI_HF_HOME:?PPU_CI_HF_HOME is required for model-accuracy}"
         : "${MODEL_KEY:?MODEL_KEY is required for model-accuracy}"
         : "${MODEL_ID:?MODEL_ID is required for model-accuracy}"
+        # Several cases may share one checkpoint; only the label differs.
+        case_id="${CASE_ID:-${MODEL_KEY}}"
         hf_home=$(realpath "${PPU_CI_HF_HOME}")
         gsm8k_dataset=$(realpath "${GSM8K_DATASET_PATH}")
         [[ -d "${hf_home}" ]] || {
@@ -205,6 +207,8 @@ case "${mode}" in
             --env MODEL_ID="${MODEL_ID}"
             --env GSM8K_DATASET_PATH="${gsm8k_dataset}"
             --env MODEL_KEY="${MODEL_KEY}"
+            --env CASE_ID="${case_id}"
+            --env SERVER_CMD="${SERVER_CMD:-}"
             --env RESULTS_DIR=/artifacts
             --env UPDATE_GOLDEN="${UPDATE_GOLDEN:-0}"
             --env THRESHOLD="${THRESHOLD:-0.9}"

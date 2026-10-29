@@ -101,6 +101,171 @@ class _FakeProc:
 
 
 # ---------------------------------------------------------------------------
+# Per-case serve command
+# ---------------------------------------------------------------------------
+
+
+def _capture_argv(
+    evaluator: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    log_path: Path,
+    **kwargs: Any,
+) -> list[str]:
+    captured: dict[str, list[str]] = {}
+
+    class _FakePopen:
+        def __init__(self, cmd: list[str], **_kwargs: Any) -> None:
+            captured["cmd"] = cmd
+
+    monkeypatch.setattr(evaluator.subprocess, "Popen", _FakePopen)
+    evaluator.start_vllm_server(
+        "/ckpt/model",
+        served_model_name="demo-run-abc",
+        port=9999,
+        log_path=log_path,
+        **kwargs,
+    )
+    return captured["cmd"]
+
+
+def test_default_argv_used_when_case_has_no_server_cmd(
+    evaluator: Any, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    cmd = _capture_argv(evaluator, monkeypatch, tmp_path / "serve.log", tp=4)
+    assert cmd[:3] == ["vllm", "serve", "/ckpt/model"]
+    assert cmd[cmd.index("--tensor-parallel-size") + 1] == "4"
+    assert cmd[cmd.index("--port") + 1] == "9999"
+
+
+def test_case_server_cmd_replaces_the_default_argv(
+    evaluator: Any, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A case argv wins wholesale: flags it omits must not come back."""
+    cmd = _capture_argv(
+        evaluator,
+        monkeypatch,
+        tmp_path / "serve.log",
+        server_cmd=[
+            "vllm",
+            "serve",
+            "{model}",
+            "--served-model-name",
+            "{served_name}",
+            "--port",
+            "{port}",
+            "--enforce-eager",
+        ],
+    )
+    assert cmd == [
+        "vllm",
+        "serve",
+        "/ckpt/model",
+        "--served-model-name",
+        "demo-run-abc",
+        "--port",
+        "9999",
+        "--enforce-eager",
+    ]
+    assert "--tensor-parallel-size" not in cmd
+
+
+def test_placeholder_expansion_only_touches_known_names(evaluator: Any) -> None:
+    expanded = evaluator._expand_server_placeholders(
+        "{model}/sub-{port}", model="/ckpt/m", port=8080, served_name="s"
+    )
+    assert expanded == "/ckpt/m/sub-8080"
+    # An unrelated brace pair must survive verbatim rather than raising.
+    assert (
+        evaluator._expand_server_placeholders(
+            "{unknown}", model="m", port=1, served_name="s"
+        )
+        == "{unknown}"
+    )
+
+
+def _run_cli(
+    evaluator: Any, monkeypatch: pytest.MonkeyPatch, *argv: str
+) -> dict[str, Any]:
+    """Invoke ``main()`` with a stubbed evaluator and return its kwargs."""
+    captured: dict[str, Any] = {}
+
+    def _fake_run(model_key: str, **kwargs: Any) -> dict[str, Any]:
+        captured["model_key"] = model_key
+        captured.update(kwargs)
+        return {"status": "pass"}
+
+    monkeypatch.setattr(evaluator, "run_accuracy_eval", _fake_run)
+    monkeypatch.setattr(evaluator.sys, "argv", ["ppu_gsm8k_eval.py", *argv])
+    evaluator.main()
+    return captured
+
+
+def test_cli_parses_server_cmd_json_into_an_argv(
+    evaluator: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    captured = _run_cli(
+        evaluator,
+        monkeypatch,
+        "--model-key",
+        "deepseek_v4_mxfp4",
+        "--case-id",
+        "deepseek-v4-mxfp4-eager",
+        "--server-cmd",
+        json.dumps(["vllm", "serve", "{model}", "--enforce-eager"]),
+    )
+    assert captured["model_key"] == "deepseek_v4_mxfp4"
+    assert captured["case_id"] == "deepseek-v4-mxfp4-eager"
+    assert captured["server_cmd"] == [
+        "vllm",
+        "serve",
+        "{model}",
+        "--enforce-eager",
+    ]
+
+
+def test_cli_omits_server_cmd_when_the_case_leaves_it_free(
+    evaluator: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    captured = _run_cli(
+        evaluator, monkeypatch, "--model-key", "deepseek_v4_mxfp4"
+    )
+    # None, not [], so start_vllm_server takes its built-in branch.
+    assert captured["server_cmd"] is None
+    assert captured["case_id"] is None
+
+
+@pytest.mark.parametrize(
+    ("raw", "message"),
+    [
+        ("vllm serve {model}", "not valid JSON"),
+        ('"--enforce-eager"', "array of strings"),
+        ("[1, 2]", "array of strings"),
+    ],
+)
+def test_cli_rejects_malformed_server_cmd(
+    evaluator: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    raw: str,
+    message: str,
+) -> None:
+    """A typo in the catalog fails before any server is started."""
+    monkeypatch.setattr(evaluator, "run_accuracy_eval", pytest.fail)
+    monkeypatch.setattr(
+        evaluator.sys,
+        "argv",
+        [
+            "ppu_gsm8k_eval.py",
+            "--model-key",
+            "deepseek_v4_mxfp4",
+            "--server-cmd",
+            raw,
+        ],
+    )
+    with pytest.raises(SystemExit, match=message):
+        evaluator.main()
+
+
+# ---------------------------------------------------------------------------
 # Unique served name
 # ---------------------------------------------------------------------------
 
