@@ -161,7 +161,7 @@ def test_existing_different_asset_is_never_overwritten(assets, monkeypatch):
     def api(endpoint):
         if "/git/ref/" in endpoint:
             return {"object": {"type": "commit", "sha": COMMIT}}
-        return {"draft": False, "assets": [{"name": wheel.name}]}
+        return {"draft": False, "prerelease": True, "assets": [{"name": wheel.name}]}
 
     def run(args, **kwargs):
         calls.append(args)
@@ -186,7 +186,7 @@ def test_publish_marks_rc_prerelease_and_emits_download_only_command(
     def api(endpoint):
         if "/git/ref/" in endpoint:
             return {"object": {"type": "commit", "sha": COMMIT}}
-        return {"draft": False, "assets": []}
+        return {"draft": False, "prerelease": True, "assets": []}
 
     def run(args, **kwargs):
         nonlocal exists
@@ -206,6 +206,25 @@ def test_publish_marks_rc_prerelease_and_emits_download_only_command(
     output = (tmp_path / "outputs").read_text()
     assert "fetch-ptg" in output and "--manifest-sha256" in output
     assert "latest" not in output and "build_wheels" not in output
+
+
+def test_publish_rejects_existing_rc_marked_as_stable(assets, monkeypatch):
+    calls = []
+
+    def api(endpoint):
+        if "/git/ref/" in endpoint:
+            return {"object": {"type": "commit", "sha": COMMIT}}
+        return {"draft": False, "prerelease": False, "assets": []}
+
+    def run(args, **kwargs):
+        calls.append(args)
+        return subprocess.CompletedProcess(args, 0, stdout="{}", stderr="")
+
+    monkeypatch.setattr(release, "gh_json", api)
+    monkeypatch.setattr(release.subprocess, "run", run)
+    with pytest.raises(ValueError, match="prerelease classification"):
+        release.publish(assets)
+    assert not any(args[1:3] == ["release", "upload"] for args in calls)
 
 
 def test_plan_rejects_tag_pointing_to_other_source(monkeypatch):

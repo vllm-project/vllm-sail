@@ -217,6 +217,10 @@ def publish(directory: Path) -> None:
     release = gh_json(endpoint)
     if release["draft"]:
         raise ValueError("PTG requires a published, non-draft GitHub Release")
+    if release["prerelease"] != Version(tag).is_prerelease:
+        raise ValueError(
+            "existing Release prerelease classification differs from its tag"
+        )
     files.append(directory / MANIFEST)
     existing = {asset["name"] for asset in release["assets"]}
     # Check every existing name before uploading anything. Never clobber assets.
