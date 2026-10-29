@@ -5,14 +5,18 @@ import copy
 import importlib
 import io
 import json
+from pathlib import Path
 from urllib.error import HTTPError
 
 import pytest
+import yaml
 
 REPO = "t-head/vllm-sail"
 ROOT = f"/repos/{REPO}"
 SHA = "a" * 40
 OLD = "b" * 40
+BLOB = "1" * 40
+CHANGED = "2" * 40
 BOT = {"login": "github-actions[bot]", "type": "Bot"}
 USER = {"login": "author", "type": "User"}
 ENV = {
@@ -1402,6 +1406,55 @@ def test_validate_does_not_skip_ppu_for_executable_or_incomplete_changes(
     assert outputs["skip_ppu"] == "false"
 
 
+MALFORMED_PR_FILES = [
+    {"filename": "docs/../csrc/kernel.cu", "status": "modified"},
+    {"filename": "docs/\x00guide.md", "status": "modified"},
+    {
+        "filename": "docs/new.md",
+        "previous_filename": "docs/../csrc/kernel.cu",
+        "status": "renamed",
+    },
+]
+
+
+@pytest.mark.parametrize("file", MALFORMED_PR_FILES)
+def test_validate_does_not_skip_for_malformed_repository_paths(file, github_output):
+    control, gh, _ = executor_setup()
+    gh.add("GET", ROOT + "/pulls/7", {**PR, "changed_files": 1})
+    gh.page("/pulls/7/files", [file])
+    control.validate()
+    outputs = dict(
+        line.split("=", 1) for line in github_output.read_text().splitlines()
+    )
+    assert outputs["skip_ppu"] == "false"
+
+
+@pytest.mark.parametrize(
+    "previous",
+    ["csrc/kernel.cu", None, "", "docs/../csrc/kernel.cu", "docs/\x00old.md"],
+)
+def test_validate_does_not_skip_for_inconsistent_rename_metadata(
+    previous, github_output
+):
+    control, gh, _ = executor_setup()
+    gh.add("GET", ROOT + "/pulls/7", {**PR, "changed_files": 1})
+    gh.page(
+        "/pulls/7/files",
+        [
+            {
+                "filename": "docs/new.md",
+                "previous_filename": previous,
+                "status": "modified",
+            }
+        ],
+    )
+    control.validate()
+    outputs = dict(
+        line.split("=", 1) for line in github_output.read_text().splitlines()
+    )
+    assert outputs["skip_ppu"] == "false"
+
+
 @pytest.mark.parametrize(
     "changed,files",
     [
@@ -1435,35 +1488,225 @@ def test_skip_detection_api_failure_runs_ppu_instead(github_output, capsys):
     assert "503" in capsys.readouterr().err
 
 
+@pytest.mark.parametrize("status", ["renamed", "modified"])
+def test_changed_paths_are_complete_rename_aware_and_cached(status):
+    control, gh, _ = make_controller()
+    files = [
+        {
+            "filename": "docs/new.md",
+            "previous_filename": "docs/old.md",
+            "status": status,
+        }
+    ]
+    gh.add("GET", ROOT + "/pulls/7", PR)
+    gh.page("/pulls/7/files", files)
+    expected = ["docs/new.md", "docs/old.md"]
+    assert control.changed_paths(PR, SHA) == expected
+    assert control.changed_paths(PR, SHA) == expected
+    assert len([c for c in gh.calls if c[1].endswith("/pulls/7/files")]) == 1
+
+
+def test_changed_paths_cache_api_failure_and_log_once(capsys):
+    control, gh, _ = make_controller()
+    gh.page("/pulls/7/files", http_error(503))
+    assert control.changed_paths(PR, SHA) is None
+    assert control.changed_paths(PR, SHA) is None
+    assert len([c for c in gh.calls if c[1].endswith("/pulls/7/files")]) == 1
+    assert capsys.readouterr().err.count("503") == 1
+
+
+def test_changed_paths_reject_boolean_file_count_before_api_calls():
+    control, gh, _ = make_controller()
+    gh.add("GET", ROOT + "/pulls/7", PR)
+    gh.page("/pulls/7/files", [{"filename": "docs/guide.md", "status": "modified"}])
+    assert control.changed_paths({**PR, "changed_files": True}, SHA) is None
+    assert gh.calls == []
+
+
 # Reuse is a trusted executor optimization, never a command/dispatch decision.
 
 
-def reuse_setup(files=None, candidates=None, compare=None):
+def base_tree():
+    entries = {path: tree_entry(path) for path in module().CI_REUSE_FILES}
+    entries["csrc/kernel.cu"] = tree_entry("csrc/kernel.cu")
+    return entries
+
+
+def mutate_pair(donor, current, changes):
+    for path, value in changes.items():
+        if value is None:
+            donor.setdefault(path, tree_entry(path))
+            current.pop(path, None)
+        else:
+            current[path] = value
+
+
+def reuse_setup(
+    pr_files=None,
+    candidates=None,
+    source_changes=None,
+    main_changes=None,
+    trees=None,
+):
     control, gh, _ = executor_setup()
+    inventory = (
+        pr_files
+        if pr_files is not None
+        else [{"filename": "tests/ut/test.py", "status": "modified"}]
+    )
+    if isinstance(inventory, list):
+        gh.add("GET", ROOT + "/pulls/7", {**PR, "changed_files": len(inventory)})
+    gh.page("/pulls/7/files", inventory)
     candidates = (
         candidates if candidates is not None else [run(555, OLD, conclusion="success")]
     )
     gh.page(
         RUNS, candidates, "workflow_runs", event="workflow_dispatch", status="success"
     )
+    sources, revisions = set(), set()
     for candidate in candidates:
         gh.page(
             f"/actions/runs/{candidate['id']}/artifacts",
             [{"name": f"ppu-wheels-{candidate['id']}", "expired": False}],
             "artifacts",
         )
-    gh.add(
-        "GET",
-        ROOT + f"/compare/{OLD}...{SHA}",
-        compare
-        if compare is not None
-        else {
-            "status": "ahead",
-            "merge_base_commit": {"sha": OLD},
-            "files": files if files is not None else [{"filename": "docs/guide.rst"}],
-        },
-    )
+        title = module().TITLE.fullmatch(candidate.get("display_title", ""))
+        if title:
+            sources.add(title[2])
+        if isinstance(candidate.get("head_sha"), str):
+            revisions.add(candidate["head_sha"])
+
+    source_donor, source_current = base_tree(), base_tree()
+    changes = {
+        "tests/ut/test.py": tree_entry("tests/ut/test.py", oid=CHANGED),
+        **(source_changes or {}),
+    }
+    mutate_pair(source_donor, source_current, changes)
+    main_donor, main_current = base_tree(), base_tree()
+    mutate_pair(main_donor, main_current, main_changes or {})
+    for source in sources:
+        add_tree(gh, source, tree_payload(list(source_donor.values())))
+    for revision in revisions:
+        add_tree(gh, revision, tree_payload(list(main_donor.values())))
+    add_tree(gh, SHA, tree_payload(list(source_current.values())))
+    add_tree(gh, ENV["GITHUB_SHA"], tree_payload(list(main_current.values())))
+    for sha, payload in (trees or {}).items():
+        add_tree(gh, sha, payload)
     return control, gh
+
+
+def tree_entry(path, oid=BLOB, mode="100644", kind="blob"):
+    return {"path": path, "mode": mode, "type": kind, "sha": oid}
+
+
+def tree_payload(entries, truncated=False):
+    return {"truncated": truncated, "tree": copy.deepcopy(entries)}
+
+
+def add_tree(gh, sha, payload):
+    return gh.add("GET", ROOT + f"/git/trees/{sha}", payload, params={"recursive": 1})
+
+
+INVALID_TREE_ENTRIES = [
+    tree_entry("/absolute"),
+    tree_entry("../outside"),
+    tree_entry("dir/../outside"),
+    tree_entry("./file"),
+    tree_entry("dir/./file"),
+    tree_entry("dir//file"),
+    tree_entry("dir/"),
+    tree_entry("docs/\x00guide.md"),
+    tree_entry("file", mode=""),
+    tree_entry("file", mode="100600"),
+    tree_entry("file", mode=100644),
+    tree_entry("file", mode="040000"),
+    tree_entry("file", mode="160000"),
+    tree_entry("submodule", mode=160000, kind="commit"),
+    tree_entry("dir", mode="100644", kind="tree"),
+    tree_entry("submodule", mode="100644", kind="commit"),
+]
+
+
+def test_ci_reuse_files_cover_controller_and_reachable_reusable_workflows():
+    controller_path = Path(module().__file__).resolve()
+    repo_root = controller_path.parents[2]
+    pending = [f".github/workflows/{module().WORKFLOW}"]
+    seen = set()
+    while pending:
+        name = pending.pop()
+        if name in seen:
+            continue
+        seen.add(name)
+        assert name in module().CI_REUSE_FILES
+        config = yaml.safe_load((repo_root / name).read_text())
+        for job in config["jobs"].values():
+            uses = job.get("uses", "")
+            if uses.startswith("./.github/workflows/"):
+                pending.append(uses[2:])
+    assert controller_path.relative_to(repo_root).as_posix() in module().CI_REUSE_FILES
+
+
+def test_tree_entries_preserve_leaf_identity_skip_directories_and_cache():
+    control, gh, _ = make_controller()
+    entries = [
+        tree_entry("dir", mode="040000", kind="tree"),
+        tree_entry("dir/file.py"),
+        tree_entry("link", mode="120000"),
+        tree_entry("submodule", mode="160000", kind="commit"),
+    ]
+    add_tree(gh, SHA, tree_payload(entries))
+    expected = {
+        "dir/file.py": ("100644", "blob", BLOB),
+        "link": ("120000", "blob", BLOB),
+        "submodule": ("160000", "commit", BLOB),
+    }
+    assert control.tree_entries(SHA) == expected
+    assert control.tree_entries(SHA) == expected
+    assert len([c for c in gh.calls if c[1].endswith(f"/git/trees/{SHA}")]) == 1
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"tree": []},
+        tree_payload([], truncated=True),
+        {"truncated": False, "tree": {}},
+        tree_payload([{}]),
+        tree_payload([tree_entry("same"), tree_entry("same")]),
+        tree_payload([{"path": "missing-sha", "mode": "100644", "type": "blob"}]),
+        *(tree_payload([entry]) for entry in INVALID_TREE_ENTRIES),
+    ],
+)
+def test_tree_entries_reject_incomplete_or_malformed_payloads(payload):
+    control, gh, _ = make_controller()
+    add_tree(gh, SHA, payload)
+    with pytest.raises(ValueError):
+        control.tree_entries(SHA)
+
+
+def test_tree_entries_reject_non_immutable_commit_names():
+    control, gh, _ = make_controller()
+    with pytest.raises(ValueError):
+        control.tree_entries("main")
+    assert gh.calls == []
+
+
+@pytest.mark.parametrize(
+    "right",
+    [
+        [],
+        [tree_entry("file"), tree_entry("added")],
+        [tree_entry("file", oid=CHANGED)],
+        [tree_entry("file", mode="100755")],
+        [tree_entry("file", mode="120000")],
+        [tree_entry("file", mode="160000", kind="commit")],
+    ],
+)
+def test_trees_match_detects_add_delete_content_mode_symlink_and_submodule(right):
+    control, gh, _ = make_controller()
+    add_tree(gh, OLD, tree_payload([tree_entry("file")]))
+    add_tree(gh, SHA, tree_payload(right))
+    assert not control.trees_match(OLD, SHA, lambda path: True)
 
 
 def validate_pair(control, gh, github_output):
@@ -1518,29 +1761,24 @@ def reuse_result(mode, run_id="555", source=OLD):
 
 
 @pytest.mark.parametrize(
-    "files",
+    "path",
     [
-        [],
-        [{"filename": "docs/guide.rst"}],
-        [{"filename": "tests/ut/test.py"}],
-        [{"filename": ".github/workflows/build-ppu-wheels.yaml"}],
-        [{"filename": "scripts/ci/ppu_ci_command.py"}],
-        [
-            {
-                "filename": "docs/new",
-                "previous_filename": "tests/old",
-                "status": "renamed",
-            }
-        ],
+        "docs/guide.rst",
+        "tests/ut/new_test.py",
+        ".github/workflows/build-ppu-wheels.yaml",
+        "scripts/ci/ppu_ci_command.py",
+        "AGENTS.md",
+        "CONTRIBUTING.md",
     ],
 )
-def test_validate_reuses_complete_wheels_for_non_package_changes(
-    files, github_output, capsys
+def test_validate_reuses_complete_wheels_for_wheel_output_ignored_changes(
+    path, github_output, capsys
 ):
-    control, gh = reuse_setup(files=files)
+    control, gh = reuse_setup(source_changes={path: tree_entry(path, oid=CHANGED)})
     assert validate_pair(control, gh, github_output) == reuse_result("full")
     calls = [c[1] for c in gh.calls]
-    assert ROOT + f"/compare/{OLD}...{SHA}" in calls
+    assert ROOT + f"/git/trees/{OLD}" in calls
+    assert ROOT + f"/compare/{OLD}...{SHA}" not in calls
     assert calls.index(ROOT + "/collaborators/author/permission") < calls.index(
         ROOT + RUNS
     )
@@ -1549,14 +1787,32 @@ def test_validate_reuses_complete_wheels_for_non_package_changes(
 
 
 @pytest.mark.parametrize(
+    "path", ["README.md", "LICENSE", "MANIFEST.in", "requirements/dev.txt"]
+)
+def test_wheel_metadata_changes_block_full_but_allow_native(path, github_output):
+    control, gh = reuse_setup(
+        pr_files=[
+            {"filename": "tests/ut/test.py", "status": "modified"},
+            {"filename": path, "status": "modified"},
+        ],
+        source_changes={path: tree_entry(path, oid=CHANGED)},
+    )
+    assert validate_pair(control, gh, github_output) == reuse_result(
+        "native", source=SHA
+    )
+
+
+@pytest.mark.parametrize(
     "path,mode",
     [
-        ("README.md", "full"),
-        ("LICENSE", "full"),
-        ("MANIFEST.in", "full"),
+        ("README.md", "native"),
+        ("LICENSE", "native"),
+        ("MANIFEST.in", "native"),
         ("AGENTS.md", "full"),
         ("CONTRIBUTING.md", "full"),
-        ("requirements/dev.txt", "full"),
+        ("requirements/dev.txt", "native"),
+        ("requirements/ppu.txt", "native"),
+        ("requirements/profiling.txt", "native"),
         ("scripts/ci/build_ppu_wheels.sh", "none"),
         ("scripts/ci/ppu_image_stack.py", "none"),
         ("scripts/ci/ppu_wheel_manifest.py", "none"),
@@ -1574,60 +1830,194 @@ def test_validate_reuses_complete_wheels_for_non_package_changes(
     ],
 )
 @pytest.mark.parametrize("rename", [False, True])
-def test_package_changes_use_a_verified_native_donor(path, mode, rename, github_output):
-    file = {"filename": path}
+def test_source_equivalence_and_current_pr_safety_select_reuse_mode(
+    path, mode, rename, github_output
+):
+    inventory_file = {"filename": path, "status": "modified"}
+    changes = {path: tree_entry(path, oid=CHANGED)}
     if rename:
-        file = {"filename": "docs/new", "previous_filename": path, "status": "renamed"}
-    control, gh = reuse_setup(files=[file])
+        inventory_file = {
+            "filename": "docs/new",
+            "previous_filename": path,
+            "status": "renamed",
+        }
+        changes = {path: None, "docs/new": tree_entry("docs/new", oid=CHANGED)}
+    control, gh = reuse_setup(
+        pr_files=[
+            {"filename": "tests/ut/test.py", "status": "modified"},
+            inventory_file,
+        ],
+        source_changes=changes,
+    )
     assert validate_pair(control, gh, github_output) == reuse_result(
         mode, source=SHA if mode == "native" else OLD
     )
 
 
-@pytest.mark.parametrize(
-    "compare",
-    [
-        {},
-        {"status": "ahead", "files": []},
-        {"status": "diverged", "merge_base_commit": {"sha": OLD}, "files": []},
-        {"status": "behind", "merge_base_commit": {"sha": OLD}, "files": []},
-        {"status": "ahead", "merge_base_commit": {"sha": SHA}, "files": []},
-        {"status": "ahead", "merge_base_commit": {"sha": OLD}},
-        {"status": "ahead", "merge_base_commit": {"sha": OLD}, "files": None},
-        {"status": "ahead", "merge_base_commit": {"sha": OLD}, "files": "docs/a"},
-        {
-            "status": "ahead",
-            "merge_base_commit": {"sha": OLD},
-            "files": [{"filename": "docs/new", "status": "renamed"}],
-        },
-        {
-            "status": "ahead",
-            "merge_base_commit": {"sha": OLD},
-            "files": [{"filename": "docs/a"}] * 300,
-        },
-    ],
-)
-def test_unusable_truncated_or_nonancestor_compare_rejects_donor(
-    compare, github_output
-):
-    control, gh = reuse_setup(compare=compare)
-    assert validate_pair(control, gh, github_output) == reuse_result("none")
+def test_validate_accepts_older_run_with_identical_ci_files(github_output):
+    candidate = run(555, OLD, conclusion="success", head_sha="d" * 40)
+    control, gh = reuse_setup(candidates=[candidate])
+    assert validate_pair(control, gh, github_output) == reuse_result("full")
 
 
-def test_malformed_compare_falls_back_to_full_build(github_output):
+@pytest.mark.parametrize("path", sorted(module().CI_REUSE_FILES))
+def test_ci_reuse_file_changes_block_full(path, github_output):
+    candidate = run(555, OLD, conclusion="success", head_sha="d" * 40)
     control, gh = reuse_setup(
-        compare={
-            "status": "ahead",
-            "merge_base_commit": {"sha": OLD},
-            "files": [{}],
-        }
+        pr_files=[{"filename": "csrc/kernel.cu", "status": "modified"}],
+        candidates=[candidate],
+        main_changes={path: tree_entry(path, oid=CHANGED)},
     )
     assert validate_pair(control, gh, github_output) == reuse_result("none")
 
 
-def test_compare_api_failure_falls_back_to_full_build(github_output):
-    control, gh = reuse_setup(compare=http_error(500))
+def test_native_reuse_does_not_require_ci_file_equivalence(github_output):
+    candidate = run(555, OLD, conclusion="success", head_sha="d" * 40)
+    ci_entry = f".github/workflows/{module().WORKFLOW}"
+    control, gh = reuse_setup(
+        candidates=[candidate],
+        source_changes={
+            "vllm_sail/file.py": tree_entry("vllm_sail/file.py", oid=CHANGED)
+        },
+        main_changes={ci_entry: tree_entry(ci_entry, oid=CHANGED)},
+    )
+    assert validate_pair(control, gh, github_output) == reuse_result(
+        "native", source=SHA
+    )
+
+
+def test_pr_file_failure_is_cached_and_does_not_block_full(github_output, capsys):
+    control, gh = reuse_setup(pr_files=http_error(503))
+    assert validate_pair(control, gh, github_output) == reuse_result("full")
+    assert len([c for c in gh.calls if c[1].endswith("/pulls/7/files")]) == 1
+    assert "503" in capsys.readouterr().err
+
+
+def test_pr_file_failure_disables_native(github_output):
+    control, gh = reuse_setup(
+        pr_files=http_error(503),
+        source_changes={
+            "vllm_sail/file.py": tree_entry("vllm_sail/file.py", oid=CHANGED)
+        },
+    )
     assert validate_pair(control, gh, github_output) == reuse_result("none")
+
+
+@pytest.mark.parametrize("file", MALFORMED_PR_FILES)
+def test_malformed_pr_repository_paths_disable_native(file, github_output):
+    control, gh = reuse_setup(
+        pr_files=[{"filename": "vllm_sail/file.py", "status": "modified"}, file],
+        source_changes={
+            "vllm_sail/file.py": tree_entry("vllm_sail/file.py", oid=CHANGED)
+        },
+    )
+    assert validate_pair(control, gh, github_output) == reuse_result("none")
+
+
+@pytest.mark.parametrize(
+    "previous",
+    ["csrc/kernel.cu", None, "", "docs/../csrc/kernel.cu", "docs/\x00old.md"],
+)
+def test_inconsistent_rename_metadata_disables_native(previous, github_output):
+    control, gh = reuse_setup(
+        pr_files=[
+            {"filename": "vllm_sail/file.py", "status": "modified"},
+            {
+                "filename": "docs/new.md",
+                "previous_filename": previous,
+                "status": "modified",
+            },
+        ],
+        source_changes={
+            "vllm_sail/file.py": tree_entry("vllm_sail/file.py", oid=CHANGED)
+        },
+    )
+    assert validate_pair(control, gh, github_output) == reuse_result("none")
+
+
+def test_incomplete_pr_files_do_not_block_full(github_output):
+    control, gh = reuse_setup()
+    gh.add("GET", ROOT + "/pulls/7", {**PR, "changed_files": 2})
+    assert validate_pair(control, gh, github_output) == reuse_result("full")
+    assert len([c for c in gh.calls if c[1].endswith("/pulls/7/files")]) == 1
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        http_error(503),
+        tree_payload([], truncated=True),
+        {"truncated": False, "tree": {}},
+        tree_payload([tree_entry("duplicate"), tree_entry("duplicate")]),
+        tree_payload([{}]),
+    ],
+)
+def test_invalid_tree_or_tree_api_failure_falls_back_to_full_build(
+    payload, github_output, capsys
+):
+    control, gh = reuse_setup(trees={OLD: payload})
+    assert validate_pair(control, gh, github_output) == reuse_result("none")
+    assert "mode=none" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        tree_payload([], truncated=True),
+        *(tree_payload([entry]) for entry in INVALID_TREE_ENTRIES),
+    ],
+)
+def test_invalid_tree_aborts_selection_before_an_older_matching_donor(
+    payload, github_output
+):
+    candidates = [
+        run(555, OLD, conclusion="success"),
+        run(554, "d" * 40, conclusion="success"),
+    ]
+    control, gh = reuse_setup(candidates=candidates, trees={OLD: payload})
+    assert validate_pair(control, gh, github_output) == reuse_result("none")
+    assert not any(c[1].endswith("/actions/runs/554/artifacts") for c in gh.calls)
+
+
+def test_native_selection_continues_to_an_older_matching_donor(github_output):
+    latest = base_tree()
+    latest["csrc/kernel.cu"] = tree_entry("csrc/kernel.cu", oid=CHANGED)
+    candidates = [
+        run(555, OLD, conclusion="success"),
+        run(554, "d" * 40, conclusion="success"),
+    ]
+    control, gh = reuse_setup(
+        pr_files=[
+            {"filename": "tests/ut/test.py", "status": "modified"},
+            {"filename": "vllm_sail/file.py", "status": "modified"},
+        ],
+        candidates=candidates,
+        source_changes={
+            "vllm_sail/file.py": tree_entry("vllm_sail/file.py", oid=CHANGED)
+        },
+        trees={OLD: tree_payload(list(latest.values()))},
+    )
+    assert validate_pair(control, gh, github_output) == reuse_result(
+        "native", run_id="554", source=SHA
+    )
+
+
+def test_tree_cache_is_shared_across_donors_and_current_main(github_output):
+    ci_entry = f".github/workflows/{module().WORKFLOW}"
+    candidates = [
+        run(555, OLD, conclusion="success", head_sha="d" * 40),
+        run(554, OLD, conclusion="success", head_sha=ENV["GITHUB_SHA"]),
+    ]
+    control, gh = reuse_setup(
+        pr_files=[{"filename": "csrc/kernel.cu", "status": "modified"}],
+        candidates=candidates,
+        main_changes={ci_entry: tree_entry(ci_entry, oid=CHANGED)},
+    )
+    assert validate_pair(control, gh, github_output) == reuse_result(
+        "full", run_id="554"
+    )
+    for sha in (OLD, SHA, ENV["GITHUB_SHA"], "d" * 40):
+        assert len([c for c in gh.calls if c[1].endswith(f"/git/trees/{sha}")]) == 1
 
 
 @pytest.mark.parametrize(
@@ -1648,18 +2038,7 @@ def test_validate_only_reuses_successful_trusted_executors(extra, github_output)
         candidates=[run(555, OLD, **{"conclusion": "success", **extra})]
     )
     assert validate_pair(control, gh, github_output) == reuse_result("none")
-    assert not any("/compare/" in c[1] or "/artifacts" in c[1] for c in gh.calls)
-
-
-def test_validate_accepts_artifacts_from_an_older_trusted_workflow_revision(
-    github_output,
-):
-    control, gh = reuse_setup(
-        candidates=[run(555, OLD, conclusion="success", head_sha="d" * 40)]
-    )
-    assert validate_pair(control, gh, github_output) == reuse_result(
-        "native", source=SHA
-    )
+    assert not any("/git/trees/" in c[1] or "/artifacts" in c[1] for c in gh.calls)
 
 
 @pytest.mark.parametrize(
@@ -1674,14 +2053,21 @@ def test_other_pr_needs_actual_immutable_source_equivalence(
         conclusion="success",
         display_title=f"PPU PR #8 @ {source} by other (comment 43)",
     )
+    changed = {"csrc/new.cu": tree_entry("csrc/new.cu", oid=CHANGED)}
     control, gh = reuse_setup(
+        pr_files=[
+            {"filename": "tests/ut/test.py", "status": "modified"},
+            {"filename": "csrc/new.cu", "status": "modified"},
+        ]
+        if code_changed
+        else None,
         candidates=[candidate],
-        files=[{"filename": "csrc/new.cu" if code_changed else "tests/new.py"}],
+        source_changes=changed if code_changed else None,
     )
-    pair = validate_pair(control, gh, github_output)
     mode = "full" if same_source or not code_changed else "none"
-    expected_source = source
-    assert pair == reuse_result(mode, source=expected_source)
+    assert validate_pair(control, gh, github_output) == reuse_result(
+        mode, source=source
+    )
 
 
 @pytest.mark.parametrize(
@@ -1725,7 +2111,7 @@ def test_reuse_artifacts_are_paginated(github_output):
     assert any(c[1].endswith("/artifacts") and c[3]["page"] == 2 for c in gh.calls)
 
 
-@pytest.mark.parametrize("stage", ["runs", "artifacts", "compare"])
+@pytest.mark.parametrize("stage", ["runs", "artifacts", "tree"])
 def test_reuse_api_failure_logs_and_builds_not_optimistic_reuse(
     stage, github_output, capsys
 ):
@@ -1735,7 +2121,7 @@ def test_reuse_api_failure_logs_and_builds_not_optimistic_reuse(
     elif stage == "artifacts":
         gh.page("/actions/runs/555/artifacts", http_error(503))
     else:
-        gh.add("GET", ROOT + f"/compare/{OLD}...{SHA}", http_error(503))
+        add_tree(gh, OLD, http_error(503))
     assert validate_pair(control, gh, github_output) == reuse_result("none")
     logs = capsys.readouterr()
     assert "503" in logs.err
