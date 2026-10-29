@@ -65,7 +65,11 @@ from tests.e2e.models._offline_runner import (  # noqa: E402
 )
 
 # --- Server readiness / fatal detection ------------------------------------
-SERVER_READY_TIMEOUT = 1800
+# Cold start on PPU is dominated by CUDA graph capture. With the checkpoint's
+# 1M-token context the engine captures 51 piecewise graphs plus 2 full ones,
+# measured at 997s, on top of ~317s of weight loading and ~200s of JIT kernel
+# warmup. The old 1800s budget expired mid-warmup.
+SERVER_READY_TIMEOUT = 3600
 SERVER_POST_READY_SLEEP = 30
 FATAL_RE = re.compile(
     r"Traceback \(most recent"
