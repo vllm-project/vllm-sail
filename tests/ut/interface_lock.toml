@@ -11,7 +11,7 @@
 schema = 1
 vllm_version_range = ">=0.32.0,<0.33.0"
 key_interface_count = 10
-target_count = 277
+target_count = 275
 
 [[key_interface]]
 symbol = "vllm.platforms.interface.PlatformEnum"
