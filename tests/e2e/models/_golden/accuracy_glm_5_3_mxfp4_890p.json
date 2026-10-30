@@ -16,9 +16,13 @@
     "num_expected": 1319
   },
   "serving": {
-    "tensor_parallel_size": 4,
-    "gpu_memory_utilization": 0.9,
-    "seed": 0
+    "ppu_count": 8,
+    "tensor_parallel_size": 8,
+    "data_parallel_size": 1,
+    "enable_expert_parallel": false,
+    "gpu_memory_utilization": null,
+    "max_model_len": null,
+    "seed": null
   },
   "score": 0.9689,
   "score_num": 1278,

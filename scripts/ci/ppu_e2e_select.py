@@ -83,7 +83,7 @@ def build_accuracy_matrix(catalog: list[dict], models: str) -> dict:
                 # its configuration off model_key instead.
                 "model_id": entry["model_id"],
                 "board": entry["board"],
-                "ppu_count": int(entry["tp"]),
+                "ppu_count": int(entry["ppu_count"]),
                 # Empty (or absent) means "use the evaluator's built-in argv".
                 "server_cmd": entry.get("server_cmd") or [],
                 # Extra environment for the server process only; merged over
