@@ -220,6 +220,11 @@ class PPUPlatform(NvmlCudaPlatform):
         if "+sparse_attn_indexer" not in compilation_config.custom_ops:
             compilation_config.custom_ops.append("+sparse_attn_indexer")
 
+        # Same for the glm5_next kpool indexer (additionally registers the
+        # `ppu_sparse_attn_indexer_kpool` custom op via vllm_sail.ops).
+        if "+sparse_attn_indexer_kpool" not in compilation_config.custom_ops:
+            compilation_config.custom_ops.append("+sparse_attn_indexer_kpool")
+
         # Prefer the compiled dynamic_per_token_scaled_fp8_quant kernel over the
         # fused Triton kernel torch.compile generates from forward_native: on PPU
         # the compiled path is faster. Respect an explicit user opt-out.
