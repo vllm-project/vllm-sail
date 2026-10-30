@@ -86,6 +86,9 @@ def build_accuracy_matrix(catalog: list[dict], models: str) -> dict:
                 "ppu_count": int(entry["tp"]),
                 # Empty (or absent) means "use the evaluator's built-in argv".
                 "server_cmd": entry.get("server_cmd") or [],
+                # Extra environment for the server process only; merged over
+                # the inherited environment by the evaluator.
+                "server_env": entry.get("server_env") or {},
             }
         )
     return {"include": include}
