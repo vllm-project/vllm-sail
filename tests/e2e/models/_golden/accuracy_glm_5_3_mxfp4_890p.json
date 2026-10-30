@@ -24,6 +24,11 @@
     "max_model_len": null,
     "seed": null
   },
+  "generation": {
+    "temperature": 1.0,
+    "top_p": 1.0,
+    "max_tokens": 10240
+  },
   "score": 0.9689,
   "score_num": 1278,
   "tolerance": {

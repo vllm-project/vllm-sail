@@ -137,8 +137,13 @@ mirrored root (`_offline_runner.CHECKPOINT_ROOT_MIRRORS`).
     "max_model_len": 16384,          // null = the checkpoint's own window
     "seed": 0                        // null = the engine's default seed
   },
+  "generation": {
+    "temperature": 1.0,              // owned by the weights, not by the case
+    "top_p": 1.0,
+    "max_tokens": 10240              // below the served 16384 window
+  },
   "score": 0.9742,                     // evalscope accuracy (0.0–1.0)
-  "score_num": 1319,                   // number of evaluated samples
+  "score_num": 1284,                   // correct answers, = round(score * 1319)
   "tolerance": {
     "mode": "band",                    // symmetric band around score
     "abs": 0.02                        // ±2 points
@@ -174,6 +179,27 @@ recorded for that weight.
 The first `--update-golden` run against a seeded baseline replaces it with a
 measured record (timestamp filled in, `baseline_origin` gone).
 
+## Sampling contract (`generation`)
+
+`generation` is the evalscope sampling contract the score was measured under
+and, unlike `serving`, a gate reads it. It belongs to the **weights**: every
+case over one checkpoint takes the same `generation_config` from
+`MODEL_CONFIGS` and gates against that checkpoint's single golden, so the two
+DeepSeek-V4-Flash cases measure one number one way. A case changes its serve
+argv, never its sampling parameters.
+
+The values follow `reference_generation_config.json` in `LLM_validator` for the
+weight family — `temperature` 1.0 for nearly every weight, `top_p` 1.0 or 0.95,
+plus `top_k` / `min_p` / the penalties where the family sets them. `max_tokens`
+is ours and uniform at 10240: below the 16384 served window, so a model that
+starts repeating still stops inside one sample instead of burning the whole
+window.
+
+Changing any of these invalidates the goldens recorded under the old contract.
+The nightly then reports `fail_config` naming the drifted knob rather than
+`fail_accuracy`, and the fix is to re-record with `--update-golden`, not to
+widen the band.
+
 ## Comparison rules
 
 1. **Identity gate**: `chip` must match; `checkpoint_tail` (when present) must
@@ -181,9 +207,13 @@ measured record (timestamp filled in, `baseline_origin` gone).
    lane serves by Hugging Face id, so the tail is the whole `<org>/<name>`;
    when a case serves a path the helper keeps its last two segments, which
    survives a different mount root.
-2. **Golden band gate** (when a formal golden exists), in order:
+2. **Golden gates** (when a formal golden exists), in order:
    a. **Completeness**: `num == dataset.num_expected`.
-   b. **Band**: `golden.score - abs <= score <= golden.score + abs`, i.e.
+   b. **Generation contract**: `generation` must equal the sampling parameters
+      this run used, key by key. A drift, or a golden without the block, is
+      reported as `fail_config` — a score from another contract cannot
+      arbitrate this run, and blaming the weights for it would be wrong.
+   c. **Band**: `golden.score - abs <= score <= golden.score + abs`, i.e.
       `golden ± 0.02` by default. Two points absorbs run-to-run noise on PPU
       and is still narrow enough that a real regression cannot hide; the band
       is symmetric so an abnormally high golden is caught as well.
@@ -281,3 +311,15 @@ layout (`tensor-parallel-size`) still share a golden: the band is the same
 ±2 points, which is what makes a TP8 baseline a meaningful reference for a
 DP8+EP8 run of the same weights — if the two layouts really do diverge by more
 than that, the case needs its own `model_key` rather than a wider band.
+
+Sampling parameters per weight (`max_tokens` 10240 for every one of them):
+
+| Model key | temperature | top_p | other | Reference row |
+|-----------|-------------|-------|-------|---------------|
+| `deepseek_v4_int8` | 1.0 | 1.0 | — | `deepseek_v4_flash` |
+| `deepseek_v4_mxfp4` | 1.0 | 1.0 | — | `deepseek_v4_flash` |
+| `minimax-m3-fp8` | 1.0 | 0.95 | — | `minimax_m3` |
+| `glm_5_3_mxfp4` | 1.0 | 1.0 | — | `glm_5_3` |
+| `glm_5_3_flash_mxfp4` | 1.0 | 1.0 | — | `glm_5_3` |
+| `kimi_k2_6_mxfp4` | 1.0 | 0.95 | — | `kimi_k2_6` |
+| `qwen3.8-flash-next` | 1.0 | 0.95 | `top_k` 20, `min_p` 0, `presence_penalty` 0, `repetition_penalty` 1.0 | every `qwen3_8` weight |

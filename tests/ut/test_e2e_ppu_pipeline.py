@@ -388,8 +388,8 @@ def test_committed_goldens_describe_their_own_checkpoint() -> None:
         assert golden["tolerance"] == {"mode": "band", "abs": 0.02}, path.name
         expected = golden["dataset"]["num_expected"]
         assert expected == 1319, path.name
-        # The recorded sample count has to be the one that produced the score.
-        assert abs(golden["score_num"] / expected - golden["score"]) < 5e-5, path.name
+        # ``score_num`` is the correct-answer count behind the score.
+        assert golden["score_num"] == round(golden["score"] * expected), path.name
         # checkpoint_tail is what the identity gate compares against the run.
         # The lane serves by Hugging Face id, so the tail is that id's last
         # two segments -- i.e. the whole "<org>/<name>" string.
@@ -459,6 +459,55 @@ def test_committed_goldens_report_the_recipe_that_produced_them() -> None:
         # Cards asked for can never be fewer than the parallelism they host.
         assert serving["ppu_count"] >= serving["tensor_parallel_size"], path.name
         assert serving["ppu_count"] >= serving["data_parallel_size"], path.name
+
+
+def test_committed_goldens_carry_the_weight_sampling_contract() -> None:
+    """A golden is only comparable under the contract it was measured in.
+
+    The block is keyed on the weights, so every case over one checkpoint has
+    to produce the same one -- that is what lets the DP+EP case gate against
+    the baseline the plain case established.
+    """
+    evaluator = _load_evaluator()
+    configs = evaluator.MODEL_CONFIGS
+    for path in sorted(GOLDEN.glob("accuracy_*.json")):
+        golden = json.loads(path.read_text())
+        contract = configs[golden["model"]]["generation_config"]
+        assert golden["generation"] == contract, path.name
+        # Below the served window: see the budget test in the readiness suite.
+        assert contract["max_tokens"] < evaluator.DEFAULT_MAX_MODEL_LEN, path.name
+
+
+def test_every_model_config_declares_one_output_budget() -> None:
+    """``max_tokens`` is uniform, so a timeout means a bad answer, not luck."""
+    evaluator = _load_evaluator()
+    assert evaluator.DEFAULT_MAX_TOKENS == 10240
+    assert evaluator.DEFAULT_MAX_MODEL_LEN == 16384
+    for key, config in evaluator.MODEL_CONFIGS.items():
+        generation = config["generation_config"]
+        assert generation["max_tokens"] == evaluator.DEFAULT_MAX_TOKENS, key
+        assert 0.0 <= generation["temperature"] <= 2.0, key
+        assert 0.0 < generation["top_p"] <= 1.0, key
+
+
+def test_sibling_cases_over_one_weight_share_the_contract() -> None:
+    """deepseek-v4-mxfp4 and its DP+EP twin must not diverge."""
+    evaluator = _load_evaluator()
+    cases = [
+        entry
+        for entry in _catalog()
+        if entry.get("category") == "accuracy"
+        and entry["model_key"] == "deepseek_v4_mxfp4"
+    ]
+    assert len(cases) >= 2
+    contracts = {
+        json.dumps(
+            evaluator.MODEL_CONFIGS[entry["model_key"]]["generation_config"],
+            sort_keys=True,
+        )
+        for entry in cases
+    }
+    assert len(contracts) == 1
 
 
 def test_golden_coverage_names_the_weight_without_a_baseline() -> None:
