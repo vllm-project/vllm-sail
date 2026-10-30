@@ -64,26 +64,6 @@ It contains both wheels under `wheels/`, source commits and hashes in
 `wheels/wheel-manifest.json`, and build logs under `logs/`. See `--help` for
 SDK, mirror and parallelism options. Continue with step 4 for runtime checks.
 
-### Release wheels
-
-GitHub Releases provide matching vLLM and vllm-sail wheels, including for rc
-tags. Install both wheels from the same release in the matching SAIL SDK /
-SAIL PyTorch environment. The attached `release-manifest.json` records the
-source commits, build configuration, original package versions and SHA256 hashes.
-
-The release workflow calls `scripts/build_wheels.sh` once. After attaching the
-original wheels, the existing PTG publisher downloads only the verified
-vllm-sail wheel and retains its repackaging, source package, index and release
-data behavior. Its rc publishing gate is unchanged: rc wheels are attached to
-GitHub, but are not published to PTG. A PTG failure leaves the GitHub assets
-available and can be retried without recompiling.
-
-Release attachment builds currently accept one matrix configuration per run.
-Manual publishing requires an existing target tag on the selected workflow
-commit; running from an untagged branch only saves Actions artifacts. Existing
-same-name Release assets must have identical hashes; different contents are
-never overwritten.
-
 ### Install a separately supplied vLLM build
 
 Install a vLLM build with `VLLM_TARGET_DEVICE=empty` in the same environment.
