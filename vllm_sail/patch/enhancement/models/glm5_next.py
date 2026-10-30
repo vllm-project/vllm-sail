@@ -60,11 +60,6 @@ _REMOVE_WHEN = (
     "indexer queries, or upstream exposes a query-quantization format hook."
 )
 
-# Import the provider first so the original callable can be captured and any
-# already-imported consumer alias can be recognized.
-from vllm.models.glm5next.nvidia.ops import kpool_compress as _provider_module  # noqa: E402
-
-_upstream_fwht = _provider_module.fwht128_quant_fp8
 # Log through a vLLM model logger name: the CLI configures the "vllm" logger at
 # INFO, while a plugin-owned logger inherits the WARNING root level. The provider
 # module itself has no logger attribute.
@@ -72,14 +67,28 @@ from vllm.logger import init_logger  # noqa: E402
 
 logger = init_logger("vllm.models.glm5next.common.attention")
 
+# Import the provider first so the original callable can be captured and any
+# already-imported consumer alias can be recognized. Registering the patch also
+# imports this module, so a missing glm5next family (older transformers) is
+# detected here and turns the module into a no-op.
+try:
+    from vllm.models.glm5next.nvidia.ops import (  # noqa: E402
+        kpool_compress as _provider_module,
+    )
+except ImportError as exc:  # older transformers: the glm5next family is unavailable
+    _provider_module = None
+    _unavailable = True
+    logger.warning(
+        "Skipping the glm5next indexer query-quantisation patch: the upstream "
+        "model cannot be imported (%s). Install transformers>=5.16.1,<5.20.0 "
+        "to enable it.",
+        exc,
+    )
+else:
+    _unavailable = False
+    _upstream_fwht = _provider_module.fwht128_quant_fp8
 
-@patch(
-    _PROVIDER,
-    "fwht128_quant_fp8",
-    reason=_REASON,
-    affected_versions=_AFFECTED,
-    remove_when=_REMOVE_WHEN,
-)
+
 def fwht128_quant_fp8(q: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     original = getattr(fwht128_quant_fp8, PATCH_MARKER)[
         f"{_PROVIDER}.fwht128_quant_fp8"
@@ -97,16 +106,28 @@ def fwht128_quant_fp8(q: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     return original(q)
 
 
-for _consumer_name in _CONSUMERS:
-    _consumer = sys.modules.get(_consumer_name)
-    if (
-        _consumer is not None
-        and getattr(_consumer, "fwht128_quant_fp8", None) is _upstream_fwht
-    ):
-        patch(
-            _consumer_name,
-            "fwht128_quant_fp8",
-            reason=_REASON,
-            affected_versions=_AFFECTED,
-            remove_when=_REMOVE_WHEN,
-        )(fwht128_quant_fp8)
+# Registration is explicit so an environment without the glm5next model family
+# (older transformers) imports this module and skips it instead of failing the
+# whole plugin install.
+if not _unavailable:
+    patch(
+        _PROVIDER,
+        "fwht128_quant_fp8",
+        reason=_REASON,
+        affected_versions=_AFFECTED,
+        remove_when=_REMOVE_WHEN,
+    )(fwht128_quant_fp8)
+
+    for _consumer_name in _CONSUMERS:
+        _consumer = sys.modules.get(_consumer_name)
+        if (
+            _consumer is not None
+            and getattr(_consumer, "fwht128_quant_fp8", None) is _upstream_fwht
+        ):
+            patch(
+                _consumer_name,
+                "fwht128_quant_fp8",
+                reason=_REASON,
+                affected_versions=_AFFECTED,
+                remove_when=_REMOVE_WHEN,
+            )(fwht128_quant_fp8)

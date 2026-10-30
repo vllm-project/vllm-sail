@@ -32,7 +32,23 @@ import inspect
 import sys
 
 import torch
-from vllm.models.glm5next.nvidia import sparse_indexer as _kpool_indexer
+
+try:
+    from vllm.models.glm5next.nvidia import sparse_indexer as _kpool_indexer
+except ImportError as exc:  # older transformers: the glm5next family is unavailable
+    _kpool_indexer = None
+    _unavailable = True
+    from vllm.logger import init_logger
+
+    init_logger(__name__).warning(
+        "Skipping the glm5next kpool sparse-attention patches: the upstream "
+        "model cannot be imported (%s). Install transformers>=5.16.1,<5.20.0 "
+        "to enable them.",
+        exc,
+    )
+else:
+    _unavailable = False
+
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import _encode_layer_name
 
@@ -42,23 +58,25 @@ from vllm_sail.patch.utils import patch
 _AFFECTED = ">=0.32.0,<0.33.0"
 _MODULE = "vllm.models.glm5next.nvidia.sparse_indexer"
 
-_upstream_forward_native = _kpool_indexer.SparseAttnIndexerKpool.forward_native
-# The pinned upstream (db9527a46) has no ``topk_backend``; newer builds do.
-# Delegate with only the keywords the live upstream actually accepts.
-_UPSTREAM_FORWARD_NATIVE_KEYS = frozenset(
-    inspect.signature(_upstream_forward_native).parameters
-)
-_upstream_forward_cuda = getattr(
-    _kpool_indexer.SparseAttnIndexerKpool, "forward_cuda", None
-)
-# Native fp8 PPUs (890P/SM89) keep the upstream fp8 kernels; only PPU hardware
-# without native fp8 (810E/SM80) takes the INT8 port. Filter keywords the same
-# way as for ``forward_native`` (the pin has no ``topk_backend``).
-_UPSTREAM_FORWARD_CUDA_KEYS = (
-    frozenset(inspect.signature(_upstream_forward_cuda).parameters)
-    if _upstream_forward_cuda is not None
-    else frozenset()
-)
+if not _unavailable:
+    _upstream_forward_native = _kpool_indexer.SparseAttnIndexerKpool.forward_native
+    # The pinned upstream (db9527a46) has no ``topk_backend``; newer builds do.
+    # Delegate with only the keywords the live upstream actually accepts.
+    _UPSTREAM_FORWARD_NATIVE_KEYS = frozenset(
+        inspect.signature(_upstream_forward_native).parameters
+    )
+    _upstream_forward_cuda = getattr(
+        _kpool_indexer.SparseAttnIndexerKpool, "forward_cuda", None
+    )
+    # Native fp8 PPUs (890P/SM89) keep the upstream fp8 kernels; only PPU
+    # hardware without native fp8 (810E/SM80) takes the INT8 port. Filter
+    # keywords the same way as for ``forward_native`` (the pin has no
+    # ``topk_backend``).
+    _UPSTREAM_FORWARD_CUDA_KEYS = (
+        frozenset(inspect.signature(_upstream_forward_cuda).parameters)
+        if _upstream_forward_cuda is not None
+        else frozenset()
+    )
 
 #: Modules that must expose the class patched here. ``common.attention`` builds
 #: the live op; the selector re-exports the class for every other importer. A
@@ -70,25 +88,30 @@ _EXPECTED_CONSUMERS = (
 )
 
 
-@patch(
-    _MODULE,
-    "SparseAttnIndexerKpool.forward_ppu",
-    allow_missing=True,
-    reason=(
-        "PPU implementation of the kpool sparse-attention indexer, calling the "
-        "INT8 ppu_sparse_attn_indexer_kpool custom op registered by "
-        "vllm_sail.ops on PPUs without native fp8 (810E/SM80). fp8-capable "
-        "PPUs (890P/SM89) delegate to the upstream fp8 path. Upstream has no "
-        "forward_ppu; installed additively and reached through the "
-        "custom_op_dispatch patch (enabled path) or the forward_native "
-        "redirect (disabled path)."
-    ),
-    affected_versions=_AFFECTED,
-    remove_when=(
-        "upstream's kpool indexer grows a platform hook, or PPU stops "
-        "overriding this op."
-    ),
+_FORWARD_PPU_REASON = (
+    "PPU implementation of the kpool sparse-attention indexer, calling the "
+    "INT8 ppu_sparse_attn_indexer_kpool custom op registered by "
+    "vllm_sail.ops on PPUs without native fp8 (810E/SM80). fp8-capable "
+    "PPUs (890P/SM89) delegate to the upstream fp8 path. Upstream has no "
+    "forward_ppu; installed additively and reached through the "
+    "custom_op_dispatch patch (enabled path) or the forward_native "
+    "redirect (disabled path)."
 )
+_FORWARD_PPU_REMOVE_WHEN = (
+    "upstream's kpool indexer grows a platform hook, or PPU stops overriding this op."
+)
+_FORWARD_NATIVE_REASON = (
+    "Fork-equivalent redirect: on PPU without native fp8 (810E/SM80) the "
+    "kpool indexer must use the INT8 op even when the CustomOp is "
+    "disabled, so forward_native dispatches to forward_ppu before the "
+    "CUDA branch; other platforms and fp8-capable PPUs (890P/SM89, which "
+    "keep the upstream fp8 path) delegate to the upstream implementation."
+)
+_FORWARD_NATIVE_REMOVE_WHEN = (
+    "upstream's forward_native grows a platform hook, or PPU stops overriding this op."
+)
+
+
 def forward_ppu(
     self,
     hidden_states: torch.Tensor,
@@ -160,22 +183,6 @@ def forward_ppu(
     )
 
 
-@patch(
-    _MODULE,
-    "SparseAttnIndexerKpool.forward_native",
-    reason=(
-        "Fork-equivalent redirect: on PPU without native fp8 (810E/SM80) the "
-        "kpool indexer must use the INT8 op even when the CustomOp is "
-        "disabled, so forward_native dispatches to forward_ppu before the "
-        "CUDA branch; other platforms and fp8-capable PPUs (890P/SM89, which "
-        "keep the upstream fp8 path) delegate to the upstream implementation."
-    ),
-    affected_versions=_AFFECTED,
-    remove_when=(
-        "upstream's forward_native grows a platform hook, or PPU stops "
-        "overriding this op."
-    ),
-)
 def forward_native(
     self,
     hidden_states: torch.Tensor,
@@ -230,4 +237,23 @@ def _check_live_consumer() -> None:
             )
 
 
-_check_live_consumer()
+# Registration is explicit so an environment without the glm5next model family
+# (older transformers) can import this module and skip it instead of failing the
+# whole plugin install.
+if not _unavailable:
+    patch(
+        _MODULE,
+        "SparseAttnIndexerKpool.forward_ppu",
+        allow_missing=True,
+        reason=_FORWARD_PPU_REASON,
+        affected_versions=_AFFECTED,
+        remove_when=_FORWARD_PPU_REMOVE_WHEN,
+    )(forward_ppu)
+    patch(
+        _MODULE,
+        "SparseAttnIndexerKpool.forward_native",
+        reason=_FORWARD_NATIVE_REASON,
+        affected_versions=_AFFECTED,
+        remove_when=_FORWARD_NATIVE_REMOVE_WHEN,
+    )(forward_native)
+    _check_live_consumer()

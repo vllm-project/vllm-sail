@@ -43,6 +43,8 @@ _MODULE = "vllm.models.glm5next.common.model"
 _TARGET = "_try_load_fp8_attn_proj"
 _AFFECTED = ">=0.32.0,<0.33.0"
 _installed = False
+#: True when the upstream glm5next model cannot be imported (older transformers).
+_unavailable = False
 
 
 def _try_load_fp8_attn_proj(
@@ -167,11 +169,28 @@ def _try_load_fp8_attn_proj(
 
 def install() -> None:
     """Register the INT8 / FP8-per-channel aware MLA projection loader once."""
-    global _installed
-    if _installed:
+    global _installed, _unavailable
+    if _installed or _unavailable:
         return
 
-    from vllm.models.glm5next.common import model as glm5next_model  # noqa: F401
+    from vllm.logger import init_logger
+
+    logger = init_logger(__name__)
+    try:
+        from vllm.models.glm5next.common import model as glm5next_model  # noqa: F401
+    except ImportError as exc:
+        # The upstream glm5next model imports Glm5NextTextConfig while loading.
+        # A runtime image with an older transformers cannot host that model
+        # family at all, so leave the upstream loader untouched instead of
+        # failing the whole plugin install for unrelated model families.
+        _unavailable = True
+        logger.warning(
+            "Skipping the GLM-5.3-Flash INT8/FP8-per-channel MLA projection "
+            "dequantisation patch: the upstream glm5next model cannot be "
+            "imported (%s). Install transformers>=5.16.1,<5.20.0 to enable it.",
+            exc,
+        )
+        return
 
     patch(
         _MODULE,
