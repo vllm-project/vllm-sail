@@ -172,8 +172,6 @@ def gh_json(endpoint: str) -> dict:
 
 
 def publish(directory: Path) -> None:
-    from packaging.version import Version
-
     repository = repository_name(os.environ["GITHUB_REPOSITORY"])
     tag = validate_tag(os.environ["RELEASE_TAG"])
     commit = os.environ["GITHUB_SHA"]
@@ -208,21 +206,24 @@ def publish(directory: Path) -> None:
             "--verify-tag",
             "--title",
             tag,
+            "--prerelease",
+            "--latest=false",
             "--notes",
-            f"vLLM SAIL {tag}: matching vLLM and vllm-sail wheels.",
+            "",
         ]
-        if Version(tag).is_prerelease:
-            args.append("--prerelease")
         subprocess.run(args, check=True)
     release = gh_json(endpoint)
     if release["draft"]:
         raise ValueError("PTG requires a published, non-draft GitHub Release")
-    if release["prerelease"] != Version(tag).is_prerelease:
-        raise ValueError(
-            "existing Release prerelease classification differs from its tag"
-        )
     files.append(directory / MANIFEST)
     existing = {asset["name"] for asset in release["assets"]}
+    # Release notes, promotion and latest selection belong to the maintainer.
+    # A retry may reuse a manually finalized Release, but cannot modify it.
+    missing = [path.name for path in files if path.name not in existing]
+    if not release["prerelease"] and missing:
+        raise ValueError(
+            "finalized Release is missing required assets: " + ", ".join(missing)
+        )
     # Check every existing name before uploading anything. Never clobber assets.
     with tempfile.TemporaryDirectory() as temporary:
         for path in files:

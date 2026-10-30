@@ -26,16 +26,18 @@ TAG = "v0.31.0rc3.dev1"
 
 
 @pytest.fixture
-def assets(tmp_path, monkeypatch):
+def assets(tmp_path, monkeypatch, request):
+    tag = getattr(request, "param", TAG)
+    version = tag.removeprefix("v")
     wheels = tmp_path / "wheels"
     for name in ("vllm", "vllm_sail"):
         target = wheels / name
         target.mkdir(parents=True)
-        wheel = target / f"{name}-0.31.0rc3.dev1-cp312-cp312-linux_x86_64.whl"
+        wheel = target / f"{name}-{version}-cp312-cp312-linux_x86_64.whl"
         with zipfile.ZipFile(wheel, "w") as archive:
             archive.writestr(
-                f"{name}-0.31.0rc3.dev1.dist-info/METADATA",
-                f"Name: {name}\nVersion: 0.31.0rc3.dev1\n",
+                f"{name}-{version}.dist-info/METADATA",
+                f"Name: {name}\nVersion: {version}\n",
             )
             if name == "vllm":
                 archive.writestr("vllm/vllm-rs", b"executable")
@@ -48,7 +50,7 @@ def assets(tmp_path, monkeypatch):
         wheel = next(wheels.rglob(name.replace("-", "_") + "-*.whl"))
         records[name] = {
             "file": str(wheel.relative_to(wheels)),
-            "version": "0.31.0rc3.dev1",
+            "version": version,
             "sha256": release.digest(wheel),
         }
     manifest = {
@@ -64,7 +66,7 @@ def assets(tmp_path, monkeypatch):
         "GITHUB_OUTPUT": str(tmp_path / "outputs"),
         "GITHUB_SHA": COMMIT,
         "GITHUB_REPOSITORY": "vllm-project/vllm-sail",
-        "RELEASE_TAG": TAG,
+        "RELEASE_TAG": tag,
         "RELEASE_CONFIGURATION": json.dumps(CONFIG),
     }.items():
         monkeypatch.setenv(key, value)
@@ -177,7 +179,8 @@ def test_existing_different_asset_is_never_overwritten(assets, monkeypatch):
     assert not any(args[1:3] == ["release", "upload"] for args in calls)
 
 
-def test_publish_marks_rc_prerelease_and_emits_download_only_command(
+@pytest.mark.parametrize("assets", [TAG, "v0.31.0"], indirect=True)
+def test_publish_always_creates_prerelease_and_emits_download_only_command(
     assets, monkeypatch, tmp_path
 ):
     calls = []
@@ -202,13 +205,16 @@ def test_publish_marks_rc_prerelease_and_emits_download_only_command(
     release.publish(assets)
     create = next(args for args in calls if args[1:3] == ["release", "create"])
     assert "--verify-tag" in create and "--prerelease" in create
+    assert "--latest=false" in create
+    assert create[create.index("--notes") + 1] == ""
     assert len([args for args in calls if args[1:3] == ["release", "upload"]]) == 3
     output = (tmp_path / "outputs").read_text()
     assert "fetch-ptg" in output and "--manifest-sha256" in output
     assert "latest" not in output and "build_wheels" not in output
 
 
-def test_publish_rejects_existing_rc_marked_as_stable(assets, monkeypatch):
+@pytest.mark.parametrize("assets", ["v0.31.0"], indirect=True)
+def test_publish_does_not_add_assets_to_finalized_release(assets, monkeypatch):
     calls = []
 
     def api(endpoint):
@@ -222,9 +228,46 @@ def test_publish_rejects_existing_rc_marked_as_stable(assets, monkeypatch):
 
     monkeypatch.setattr(release, "gh_json", api)
     monkeypatch.setattr(release.subprocess, "run", run)
-    with pytest.raises(ValueError, match="prerelease classification"):
+    with pytest.raises(ValueError, match="finalized Release is missing"):
         release.publish(assets)
     assert not any(args[1:3] == ["release", "upload"] for args in calls)
+
+
+@pytest.mark.parametrize("assets", ["v0.31.0"], indirect=True)
+def test_retry_reuses_finalized_release_without_changing_notes_or_state(
+    assets, monkeypatch, tmp_path
+):
+    calls = []
+    names = [path.name for path in assets.iterdir()]
+    metadata = {
+        "draft": False,
+        "prerelease": False,
+        "body": "Release notes written by the maintainer.",
+        "assets": [{"name": name} for name in names],
+    }
+
+    def api(endpoint):
+        if "/git/ref/" in endpoint:
+            return {"object": {"type": "commit", "sha": COMMIT}}
+        return metadata
+
+    def run(args, **kwargs):
+        calls.append(args)
+        if args[1:3] == ["release", "download"]:
+            name = args[args.index("--pattern") + 1]
+            directory = Path(args[args.index("--dir") + 1])
+            shutil.copyfile(assets / name, directory / name)
+        return subprocess.CompletedProcess(args, 0, stdout="{}", stderr="")
+
+    monkeypatch.setattr(release, "gh_json", api)
+    monkeypatch.setattr(release.subprocess, "run", run)
+    release.publish(assets)
+    assert not any(
+        args[1:3] in (["release", "create"], ["release", "edit"], ["release", "upload"])
+        for args in calls
+    )
+    assert metadata["body"] == "Release notes written by the maintainer."
+    assert "fetch-ptg" in (tmp_path / "outputs").read_text()
 
 
 def test_plan_rejects_tag_pointing_to_other_source(monkeypatch):
