@@ -117,20 +117,20 @@
     ]
   },
   {
-    "key": "glm-5.3-mxfp4-tp8",
+    "key": "glm-5.3-mxfp4-tp4",
     "category": "accuracy",
     "model_key": "glm_5_3_mxfp4",
     "model_id": "T-HEAD/GLM-5.3-MoE-Quant-W-MXFP4-A-MXFP4-Dense-Quant-W-FP8-PerChannel-A-FP8-PerToken",
     "served_name": "glm-5.3-mxfp4",
     "board": "ZW-M890P",
-    "tp": 8,
+    "tp": 4,
     "extra_serve_flags": "--trust-remote-code",
     "server_cmd": [
       "vllm", "serve", "{model}",
       "--served-model-name", "{served_name}",
       "--host", "127.0.0.1", "--port", "{port}",
       "--trust-remote-code",
-      "--tensor-parallel-size", "8",
+      "--tensor-parallel-size", "4",
       "--max-model-len", "16384",
       "--tool-call-parser", "glm47",
       "--reasoning-parser", "glm45",

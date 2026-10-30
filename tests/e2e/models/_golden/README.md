@@ -1,8 +1,10 @@
 # Golden baselines — accuracy model E2E (schema v2)
 
 Per-chip evalscope GSM8K accuracy baselines for the model-precision suite
-(`tests/e2e/models`). Baselines are **captured on real PPU hardware**, never
-hand-written.
+(`tests/e2e/models`). A baseline normally comes from a run on real PPU
+hardware; the seeded records listed under
+[Model configurations](#model-configurations) are the exception, and they say
+so in their own `baseline_origin`.
 
 ## What changed (schema v1 → v2)
 
@@ -48,13 +50,13 @@ either direction fails.
 
 ```jsonc
 {
-  "key": "deepseek-v4-mxfp4-eager",      // unique; becomes the job label
+  "key": "deepseek-v4-mxfp4-dp-ep",      // unique; becomes the job label
   "category": "accuracy",
-  "model_key": "deepseek_v4_mxfp4",      // must exist in MODEL_CONFIGS
-  "model_id": "T-HEAD/...",              // resolved against the offline cache
+  "model_key": "deepseek_v4_mxfp4",       // must exist in MODEL_CONFIGS
+  "model_id": "T-HEAD/...",               // resolved against the offline cache
   "served_name": "deepseek-v4-mxfp4",
   "board": "ZW-M890P",
-  "tp": 8,                               // PPU count the container gets
+  "tp": 8,                                // PPU count the container gets
   "extra_serve_flags": "--trust-remote-code",
   // null / omitted: use the evaluator's built-in argv.  A non-empty array
   // replaces that argv wholesale, so include every flag this case needs.
@@ -62,8 +64,11 @@ either direction fails.
     "vllm", "serve", "{model}",
     "--served-model-name", "{served_name}",
     "--host", "127.0.0.1", "--port", "{port}",
-    "--tensor-parallel-size", "8",
-    "--enforce-eager"
+    "--trust-remote-code",
+    "--enable-auto-tool-choice",
+    "--data-parallel-size", "8", "--enable-expert-parallel",
+    "--all2all-backend", "deepep_low_latency",
+    "--max-model-len", "16384"
   ],
   // Optional: extra environment for the server process only, merged over the
   // inherited environment (HF_HOME etc. survive). Omit for the default env.
@@ -80,6 +85,16 @@ readiness probe can never match the process and the job burns the full
 engine-ready budget. Mirror these keys in `MODEL_CONFIGS` of
 `scripts/eval/ppu_gsm8k_eval.py` if the case needs a new `model_key`.
 
+The parallel layout belongs to the case recipe, not to this example: a case
+pins whatever `--tensor-parallel-size` / `--data-parallel-size` its own recipe
+calls for, and `tp` above only says how many cards the container gets. Never
+add `--enforce-eager`: CI measures the production path, which runs with CUDA
+graphs captured, and eager mode would both hide a graph-capture regression and
+change the numbers the golden was recorded from. `--max-model-len 16384` is
+likewise part of every recipe — without it the server falls back to the
+checkpoint's 1M-token window and spends ~997s capturing graphs that no GSM8K
+sample can use.
+
 `server_env` exists because some launch recipes need variables that no CLI flag
 expresses — `VLLM_ENGINE_READY_TIMEOUT_S` for a `--data-parallel-size 8
 --enable-expert-parallel` cold start, `DG_USE_MOE_DYNAMIC_TILE` for the Kimi
@@ -88,10 +103,12 @@ weights can run with different variables in the same job.
 
 ## Checkpoint resolution
 
-The checkpoint paths in scripts and `scripts/ci/ppu_e2e_models.json` may be
-recorded under either `/nas_aisw/datasets` or `/ppusw/datasets`. Both mount the
-same NFS export. `resolve_checkpoint` tries the recorded path first and then
-each mirrored root (`_offline_runner.CHECKPOINT_ROOT_MIRRORS`).
+The accuracy lane never resolves a path: it records and serves the model id,
+and vLLM finds the snapshot through the offline cache. The path-mirroring rule
+below applies to the offline lane, whose cases may record a checkpoint path
+under either `/nas_aisw/datasets` or `/ppusw/datasets`. Both mount the same
+NFS export. `resolve_checkpoint` tries the recorded path first and then each
+mirrored root (`_offline_runner.CHECKPOINT_ROOT_MIRRORS`).
 
 ## Schema (`schema_version: 2`)
 
@@ -99,9 +116,9 @@ each mirrored root (`_offline_runner.CHECKPOINT_ROOT_MIRRORS`).
 {
   "schema_version": 2,
   "model": "deepseek_v4_int8",        // model key
-  "chip": "810e",                      // must equal the running device chip
-  "checkpoint": "/ppusw/datasets/...", // resolved weight path
-  "checkpoint_tail": "v4/DeepSeek-V4-Flash-0731-W8A8-INT8",  // identity
+  "chip": "890p",                      // must equal the running device chip
+  "checkpoint": "T-HEAD/DeepSeek-V4-Flash-0731-W8A8-INT8",  // identifier served
+  "checkpoint_tail": "T-HEAD/DeepSeek-V4-Flash-0731-W8A8-INT8",  // identity
   "benchmark": "gsm8k",
   "evalscope_version": "1.14.1",
   "dataset": {
@@ -126,10 +143,26 @@ each mirrored root (`_offline_runner.CHECKPOINT_ROOT_MIRRORS`).
 }
 ```
 
+Two optional fields mark a baseline that was not produced by a run of this
+suite. Neither takes part in comparison:
+
+* `measured_at: null` — the score was not measured by the evaluator that will
+gate against it, so it carries no timestamp.
+* `baseline_origin` — free text naming where the number came from. The
+currently committed goldens point at rows of the team's shared
+`H20_vllm_evalscope_gsm8k_精度汇总_v2.csv`, using the newest framework version
+recorded for that weight.
+
+The first `--update-golden` run against a seeded baseline replaces it with a
+measured record (timestamp filled in, `baseline_origin` gone).
+
 ## Comparison rules
 
 1. **Identity gate**: `chip` must match; `checkpoint_tail` (when present) must
-   match — prevents cross-chip or cross-checkpoint comparison.
+   match — prevents cross-chip or cross-checkpoint comparison. The accuracy
+   lane serves by Hugging Face id, so the tail is the whole `<org>/<name>`;
+   when a case serves a path the helper keeps its last two segments, which
+   survives a different mount root.
 2. **Golden band gate** (when a formal golden exists), in order:
    a. **Completeness**: `num == dataset.num_expected`.
    b. **Band**: `golden.score - abs <= score <= golden.score + abs`, i.e.
@@ -201,15 +234,28 @@ first run cannot silently become the baseline. Promote it by either:
 
 ## Model configurations
 
-| Model key | Chip | Checkpoint |
-|-----------|------|-----------|
-| `deepseek_v4_int8` | 810e | `DeepSeek-V4-Flash-0731-W8A8-INT8` |
-| `deepseek_v4_mxfp4` | 890p | `DeepSeek-V4-Flash-0731-MoE-Quant-W-MXFP4-A-MXFP4-Dense-Quant-W-FP8-PerChannel-A-FP8-PerToken` |
-| `minimax-m3-fp8` | 890p | `MiniMax-M3-Quant-W-FP8-PerChannel-A-FP8-PerToken` |
-| `glm_5_3_mxfp4` | 890p | `GLM-5.3-MoE-Quant-W-MXFP4-A-MXFP4-Dense-Quant-W-FP8-PerChannel-A-FP8-PerToken` |
-| `glm_5_3_flash_mxfp4` | 890p | `GLM-5.3-Flash-MoE-Quant-W-MXFP4-A-MXFP4-Dense-Quant-W-FP8-PerChannel-A-FP8-PerToken` |
-| `kimi_k2_6_mxfp4` | 890p | `Kimi-K2.6-MXFP4-FP8` |
-| `qwen3.8-flash-next` | 890p | `Qwen3.8-Flash-Next` |
+| Model key | Chip | TP | Checkpoint | Baseline |
+|-----------|------|----|-----------|----------|
+| `deepseek_v4_int8` | 890p | 8 | `DeepSeek-V4-Flash-0731-W8A8-INT8` | 0.9689 seeded |
+| `deepseek_v4_mxfp4` | 890p | 8 | `DeepSeek-V4-Flash-0731-MoE-Quant-W-MXFP4-A-MXFP4-Dense-Quant-W-FP8-PerChannel-A-FP8-PerToken` | 0.9689 seeded |
+| `minimax-m3-fp8` | 890p | 8 | `MiniMax-M3-Quant-W-FP8-PerChannel-A-FP8-PerToken` | 0.9735 seeded |
+| `glm_5_3_mxfp4` | 890p | 4 | `GLM-5.3-MoE-Quant-W-MXFP4-A-MXFP4-Dense-Quant-W-FP8-PerChannel-A-FP8-PerToken` | 0.9689 seeded |
+| `glm_5_3_flash_mxfp4` | 890p | 2 | `GLM-5.3-Flash-MoE-Quant-W-MXFP4-A-MXFP4-Dense-Quant-W-FP8-PerChannel-A-FP8-PerToken` | none |
+| `kimi_k2_6_mxfp4` | 890p | 8 | `Kimi-K2.6-MXFP4-FP8` | 0.9788 seeded |
+| `qwen3.8-flash-next` | 890p | 8 | `Qwen3.8-Flash-Next` | none |
+
+`TP` is the layout its catalog case currently serves with, not a property of
+the weight or of the golden: a case may switch to DP+EP or another TP without
+touching its baseline.
+
+`deepseek_v4_int8` is listed as `890p` because the nightly lane runs on the
+`8-ppu-m890p` runner even though its catalog `board` is `OAM-810E`. A run on a
+real 810E host looks for `accuracy_deepseek_v4_int8_810e.json`, finds none,
+and gates on the threshold instead of the wrong board's band.
+
+`glm_5_3_flash_mxfp4` and `qwen3.8-flash-next` have no golden because the
+shared summary has no row for either weight. They run on the `score >= 0.9`
+fallback and upload a pending-review artifact; import the first one you accept.
 
 `chip` here is the golden's identity, so a checkpoint evaluated on more than
 one board needs one golden per board. Cases that only differ in parallel

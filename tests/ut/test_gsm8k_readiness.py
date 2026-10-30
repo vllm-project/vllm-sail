@@ -26,6 +26,8 @@ import importlib.util
 import io
 import json
 import os
+import sys
+import types
 from pathlib import Path
 from typing import Any
 
@@ -135,6 +137,12 @@ def test_default_argv_used_when_case_has_no_server_cmd(
     assert cmd[:3] == ["vllm", "serve", "/ckpt/model"]
     assert cmd[cmd.index("--tensor-parallel-size") + 1] == "4"
     assert cmd[cmd.index("--port") + 1] == "9999"
+    # Without this the engine falls back to the checkpoint's 1M window and
+    # spends ~997s capturing graphs no GSM8K sample can use.
+    assert cmd[cmd.index("--max-model-len") + 1] == "16384"
+    # Production serves with CUDA graphs; eager would change the numbers the
+    # goldens were recorded from.
+    assert "--enforce-eager" not in cmd
 
 
 def test_case_server_cmd_replaces_the_default_argv(
@@ -153,7 +161,7 @@ def test_case_server_cmd_replaces_the_default_argv(
             "{served_name}",
             "--port",
             "{port}",
-            "--enforce-eager",
+            "--enable-expert-parallel",
         ],
     )
     assert cmd == [
@@ -164,9 +172,34 @@ def test_case_server_cmd_replaces_the_default_argv(
         "demo-run-abc",
         "--port",
         "9999",
-        "--enforce-eager",
+        "--enable-expert-parallel",
     ]
     assert "--tensor-parallel-size" not in cmd
+
+
+def test_evalscope_budget_stays_below_the_served_window(
+    evaluator: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A repeating model never emits EOS, so max_tokens caps the damage.
+
+    Set to the served window instead, one broken sample would burn the whole
+    night's budget.
+    """
+    captured: dict[str, Any] = {}
+
+    class _FakeTaskConfig:
+        def __init__(self, **kwargs: Any) -> None:
+            captured.update(kwargs)
+
+    fake = types.ModuleType("evalscope")
+    fake.TaskConfig = _FakeTaskConfig
+    fake.run_task = lambda **_kwargs: {"gsm8k": None}
+    monkeypatch.setitem(sys.modules, "evalscope", fake)
+
+    evaluator.run_evalscope("demo-run-abc", 9999, "/data/gsm8k")
+    generation = captured["generation_config"]
+    assert generation["max_tokens"] == 8192
+    assert generation["max_tokens"] < evaluator.DEFAULT_MAX_MODEL_LEN
 
 
 def _capture_popen(
@@ -283,17 +316,17 @@ def test_cli_parses_server_cmd_json_into_an_argv(
         "--model-key",
         "deepseek_v4_mxfp4",
         "--case-id",
-        "deepseek-v4-mxfp4-eager",
+        "deepseek-v4-mxfp4-ep",
         "--server-cmd",
-        json.dumps(["vllm", "serve", "{model}", "--enforce-eager"]),
+        json.dumps(["vllm", "serve", "{model}", "--enable-expert-parallel"]),
     )
     assert captured["model_key"] == "deepseek_v4_mxfp4"
-    assert captured["case_id"] == "deepseek-v4-mxfp4-eager"
+    assert captured["case_id"] == "deepseek-v4-mxfp4-ep"
     assert captured["server_cmd"] == [
         "vllm",
         "serve",
         "{model}",
-        "--enforce-eager",
+        "--enable-expert-parallel",
     ]
 
 
@@ -310,7 +343,7 @@ def test_cli_omits_server_cmd_when_the_case_leaves_it_free(
     ("raw", "message"),
     [
         ("vllm serve {model}", "not valid JSON"),
-        ('"--enforce-eager"', "array of strings"),
+        ('"--enable-expert-parallel"', "array of strings"),
         ("[1, 2]", "array of strings"),
     ],
 )

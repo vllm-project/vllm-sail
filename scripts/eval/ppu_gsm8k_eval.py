@@ -65,10 +65,13 @@ from tests.e2e.models._offline_runner import (  # noqa: E402
 )
 
 # --- Server readiness / fatal detection ------------------------------------
-# Cold start on PPU is dominated by CUDA graph capture. With the checkpoint's
-# 1M-token context the engine captures 51 piecewise graphs plus 2 full ones,
-# measured at 997s, on top of ~317s of weight loading and ~200s of JIT kernel
-# warmup. The old 1800s budget expired mid-warmup.
+# Cold start on PPU is dominated by CUDA graph capture. Left at the checkpoint
+# default of 1,048,576 tokens the engine captures 51 piecewise graphs plus 2
+# full ones, measured at 997s, on top of ~317s of weight loading and ~200s of
+# JIT kernel warmup. Every serve command therefore pins the window explicitly:
+# GSM8K prompts and answers are far below it, and the shorter context collapses
+# the capture schedule. The old 1800s budget expired mid-warmup.
+DEFAULT_MAX_MODEL_LEN = 16384
 SERVER_READY_TIMEOUT = 3600
 SERVER_POST_READY_SLEEP = 30
 FATAL_RE = re.compile(
@@ -133,7 +136,8 @@ MODEL_CONFIGS: dict[str, dict[str, Any]] = {
         "served_name": "glm-5.3-mxfp4",
         "extra_flags": ["--trust-remote-code"],
         "chip": "890p",
-        "tp": 8,
+        # Half of a 890P node: the prefill recipe only needs four cards.
+        "tp": 4,
     },
     "glm_5_3_flash_mxfp4": {
         "model_id": (
@@ -270,6 +274,8 @@ def start_vllm_server(
             str(tp),
             "--gpu-memory-utilization",
             str(DEFAULT_GPU_MEMORY_UTILIZATION),
+            "--max-model-len",
+            str(DEFAULT_MAX_MODEL_LEN),
             "--trust-remote-code",
             "--seed",
             str(DEFAULT_SEED),
@@ -487,10 +493,10 @@ def run_evalscope(
         },
         generation_config={
             "temperature": 0,
-            # 10240 rather than the served context: a model that starts
-            # repeating never hits EOS and would otherwise burn the full
-            # window on every sample, turning one broken case into hours.
-            "max_tokens": 10240,
+            # Rather than the served context: a model that starts repeating
+            # never hits EOS and would otherwise burn the full window on every
+            # sample, turning one broken case into hours.
+            "max_tokens": 8192,
         },
         eval_batch_size=128,
         limit=limit,

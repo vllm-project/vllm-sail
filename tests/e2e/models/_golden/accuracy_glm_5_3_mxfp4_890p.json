@@ -1,0 +1,31 @@
+{
+  "schema_version": 2,
+  "model": "glm_5_3_mxfp4",
+  "chip": "890p",
+  "checkpoint": "T-HEAD/GLM-5.3-MoE-Quant-W-MXFP4-A-MXFP4-Dense-Quant-W-FP8-PerChannel-A-FP8-PerToken",
+  "checkpoint_tail": "T-HEAD/GLM-5.3-MoE-Quant-W-MXFP4-A-MXFP4-Dense-Quant-W-FP8-PerChannel-A-FP8-PerToken",
+  "benchmark": "gsm8k",
+  "evalscope_version": "",
+  "dataset": {
+    "dataset_id": "/nas_aisw/datasets/datasets/vision/EvalScope/data/gsm8k/v2/gsm8k",
+    "few_shot_num": 4,
+    "few_shot_random": false,
+    "subset_list": [
+      "main"
+    ],
+    "num_expected": 1319
+  },
+  "serving": {
+    "tensor_parallel_size": 4,
+    "gpu_memory_utilization": 0.9,
+    "seed": 0
+  },
+  "score": 0.9689,
+  "score_num": 1278,
+  "tolerance": {
+    "mode": "band",
+    "abs": 0.02
+  },
+  "measured_at": null,
+  "baseline_origin": "GLM-5.3 bf16 tp8 vllm0.28.0"
+}
