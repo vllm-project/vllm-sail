@@ -13,7 +13,6 @@ from tests.support.source import ROOT, definition, function
 from tests.ut.test_ppu_kernel_capabilities import modules as _modules
 
 modules = _modules
-PATCH = "vllm_sail/patch/enhancement/attention/kda.py"
 UPSTREAM = "vllm/models/kimi_k3/nvidia/kda.py"
 KERNELS = "vllm/models/kimi_k3/nvidia/recoverssm/kernels.py"
 RECORDS = "vllm/models/kimi_k3/nvidia/ops/recoverssm.py"
@@ -219,25 +218,19 @@ def check_constructor(path, name, recover, capability, source_root=None):
         assert events == []
 
 
-@pytest.mark.parametrize("recover", [False, True])
-@pytest.mark.parametrize("capability", [80, 89, 100])
-def test_constructor_owns_records_and_selects_compile_path(recover, capability):
-    check_constructor(PATCH, "_init", recover, capability)
-
-
 @pytest.mark.upstream_source
-@pytest.mark.parametrize("copied", [False, True])
 @pytest.mark.parametrize("recover", [False, True])
 @pytest.mark.parametrize("capability", [80, 89, 100])
 def test_actual_records_allocation_and_platform_predicate(
-    upstream_source_root, copied, recover, capability
+    upstream_source_root, recover, capability
 ):
-    path, name = (
-        (PATCH, "_init")
-        if copied
-        else (upstream_source_root / UPSTREAM, "KimiK3DeltaAttention.__init__")
+    check_constructor(
+        upstream_source_root / UPSTREAM,
+        "KimiK3DeltaAttention.__init__",
+        recover,
+        capability,
+        upstream_source_root,
     )
-    check_constructor(path, name, recover, capability, upstream_source_root)
 
 
 def check_forward(path, name, modules, recover, dim_first, real_verify_path=None):
@@ -400,38 +393,31 @@ def check_forward(path, name, modules, recover, dim_first, real_verify_path=None
         assert recurrent_args["out"].root is output
 
 
-@pytest.mark.parametrize("recover", [False, True])
-@pytest.mark.parametrize("dim_first", [False, True])
-def test_speculative_forward_uses_layer_verify_or_normal_convolution(
-    modules, recover, dim_first
-):
-    check_forward(PATCH, "_forward", modules, recover, dim_first)
-
-
 @pytest.mark.upstream_source
-@pytest.mark.parametrize("copied", [False, True])
 @pytest.mark.parametrize("recover", [False, True])
 @pytest.mark.parametrize("dim_first", [False, True])
 def test_actual_speculative_forward_ownership(
-    upstream_source_root, modules, copied, recover, dim_first
+    upstream_source_root, modules, recover, dim_first
 ):
-    path, name = (
-        (PATCH, "_forward")
-        if copied
-        else (upstream_source_root / UPSTREAM, "KimiK3DeltaAttention._forward")
+    check_forward(
+        upstream_source_root / UPSTREAM,
+        "KimiK3DeltaAttention._forward",
+        modules,
+        recover,
+        dim_first,
     )
-    check_forward(path, name, modules, recover, dim_first)
 
 
 @pytest.mark.upstream_source
-@pytest.mark.parametrize("copied", [False, True])
 @pytest.mark.parametrize("dim_first", [False, True])
 def test_actual_verify_helper_consumes_layer_records(
-    upstream_source_root, modules, copied, dim_first
+    upstream_source_root, modules, dim_first
 ):
-    path, name = (
-        (PATCH, "_forward")
-        if copied
-        else (upstream_source_root / UPSTREAM, "KimiK3DeltaAttention._forward")
+    check_forward(
+        upstream_source_root / UPSTREAM,
+        "KimiK3DeltaAttention._forward",
+        modules,
+        True,
+        dim_first,
+        upstream_source_root / UPSTREAM,
     )
-    check_forward(path, name, modules, True, dim_first, upstream_source_root / UPSTREAM)

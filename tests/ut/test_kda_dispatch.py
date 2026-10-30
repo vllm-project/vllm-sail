@@ -36,6 +36,7 @@ def test_pla_prefill_preserves_caller_buffers(monkeypatch, num_heads):
 
     namespace = {
         "current_platform": SimpleNamespace(is_ppu=lambda: True),
+        "ppu_envs": SimpleNamespace(VLLM_SAIL_USE_PLA=True),
         "logger": SimpleNamespace(info_once=lambda *args: None),
     }
     fn = function(
@@ -156,3 +157,212 @@ def test_replacements_accept_upstream_keywords(
     assert_accepts_upstream_keywords(
         local, local_name, upstream_source_root, upstream, upstream_name
     )
+
+
+def wrapper_forward(monkeypatch, namespace, pla_calls):
+    """Build the ``_forward`` replacement with a host PLA decode double."""
+    pla = ModuleType("pla.decode.kda")
+    pla.fused_kda_decode_mega_forward = lambda **kw: pla_calls.append(kw)
+    monkeypatch.setitem(sys.modules, pla.__name__, pla)
+    return function(
+        "vllm_sail/patch/enhancement/attention/kda.py", "_forward", namespace
+    )
+
+
+class SlicedView:
+    """A recorded view of a host double tensor."""
+
+    def __init__(self, source, index):
+        self.source, self.index = source, index
+
+
+class HostTensor:
+    def __init__(self, name):
+        self.name = name
+
+    def __getitem__(self, index):
+        return SlicedView(self.name, index if isinstance(index, tuple) else (index,))
+
+    def transpose(self, left, right):
+        return SlicedView(self.name, "transposed")
+
+
+def decode_metadata(**overrides):
+    metadata = SimpleNamespace(
+        num_actual_tokens=3,
+        num_spec_decodes=0,
+        num_prefills=0,
+        num_decodes=1,
+        non_spec_state_indices_tensor=HostTensor("state_indices"),
+    )
+    for key, value in overrides.items():
+        setattr(metadata, key, value)
+    return metadata
+
+
+def decode_layer():
+    return SimpleNamespace(
+        prefix="kda",
+        kda_decode_backend="cuda",
+        decode_conv1d_weight=object(),
+        decode_norm_weight=object(),
+        kv_cache=(HostTensor("conv_state"), object()),
+        conv1d=SimpleNamespace(bias=None),
+        A_log=object(),
+        dt_bias=object(),
+        gate_lower_bound=-5.0,
+        o_norm=SimpleNamespace(eps=1e-6),
+    )
+
+
+def test_forward_runs_the_pla_decode_kernel_on_ppu(monkeypatch):
+    pla_calls, upstream_calls = [], []
+    fn = wrapper_forward(
+        monkeypatch,
+        {
+            "current_platform": SimpleNamespace(is_ppu=lambda: True),
+            "ppu_envs": SimpleNamespace(VLLM_SAIL_USE_PLA=True),
+            "get_forward_context": lambda: SimpleNamespace(
+                attn_metadata={"kda": decode_metadata()}
+            ),
+            "logger": SimpleNamespace(info_once=lambda *args: None),
+            "is_conv_state_dim_first": lambda: False,
+            "_upstream_forward": lambda *args: upstream_calls.append(args),
+        },
+        pla_calls,
+    )
+    layer = decode_layer()
+    fn(
+        layer,
+        HostTensor("mixed"),
+        HostTensor("g1"),
+        HostTensor("g2"),
+        HostTensor("beta"),
+        HostTensor("out"),
+    )
+
+    assert upstream_calls == []
+    assert len(pla_calls) == 1
+    call = pla_calls[0]
+    assert call["weight"] is layer.decode_conv1d_weight
+    assert call["norm_weight"] is layer.decode_norm_weight
+    assert call["out"].source == "out"
+    assert call["conv_state"].index == "transposed"
+    assert call["state_indices"].source == "state_indices"
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"num_prefills": 1, "num_decodes": 0},
+        {"num_spec_decodes": 1},
+        {"num_decodes": 0},
+    ],
+)
+def test_forward_leaves_other_batches_to_upstream(monkeypatch, overrides):
+    pla_calls, upstream_calls = [], []
+    fn = wrapper_forward(
+        monkeypatch,
+        {
+            "current_platform": SimpleNamespace(is_ppu=lambda: True),
+            "ppu_envs": SimpleNamespace(VLLM_SAIL_USE_PLA=True),
+            "get_forward_context": lambda: SimpleNamespace(
+                attn_metadata={"kda": decode_metadata(**overrides)}
+            ),
+            "logger": SimpleNamespace(info_once=lambda *args: None),
+            "is_conv_state_dim_first": lambda: False,
+            "_upstream_forward": lambda *args: upstream_calls.append(args),
+        },
+        pla_calls,
+    )
+    tensors = [decode_layer(), *(object() for _ in range(5))]
+    fn(*tensors)
+
+    assert pla_calls == []
+    assert upstream_calls == [tuple(tensors)]
+
+
+@pytest.mark.parametrize("is_ppu,pla", [(False, True), (True, False)])
+def test_forward_delegates_to_upstream_off_the_pla_path(is_ppu, pla):
+    upstream_calls = []
+    fn = function(
+        "vllm_sail/patch/enhancement/attention/kda.py",
+        "_forward",
+        {
+            "current_platform": SimpleNamespace(is_ppu=lambda: is_ppu),
+            "ppu_envs": SimpleNamespace(VLLM_SAIL_USE_PLA=pla),
+            "_upstream_forward": lambda *args: upstream_calls.append(args),
+        },
+    )
+    tensors = [object() for _ in range(6)]
+    fn(*tensors)
+
+    assert upstream_calls == [tuple(tensors)]
+
+
+def test_init_delegates_to_upstream_off_ppu():
+    calls = []
+    fn = function(
+        "vllm_sail/patch/enhancement/attention/kda.py",
+        "_init",
+        {
+            "current_platform": SimpleNamespace(is_ppu=lambda: False),
+            "_upstream_init": lambda *args: calls.append(args),
+        },
+    )
+    layer, config, vllm_config = object(), object(), object()
+    fn(layer, config, vllm_config, "model.kda", None, True)
+
+    assert calls == [(layer, config, vllm_config, "model.kda", None, True)]
+
+
+def test_init_restores_the_flashkda_prefill_contract_on_ppu():
+    resolver_calls = []
+
+    def resolve(*args):
+        resolver_calls.append(args)
+        return "flashkda"
+
+    upstream_kda = SimpleNamespace(
+        resolve_kda_prefill_backend=resolve,
+        FlashKDAPrefillCheckpointExporter=lambda: "checkpoint-exporter",
+    )
+    original = upstream_kda.resolve_kda_prefill_backend
+
+    def upstream_init(self, config, vllm_config, prefix, aux_stream, run_gemm_rs_ar):
+        # Upstream stores whatever the resolver answered while building the
+        # layer, which is the demoted Triton choice. Restoring the FlashKDA
+        # contract afterwards is this patch's job.
+        self.kda_prefill_backend = upstream_kda.resolve_kda_prefill_backend(
+            "auto", 128, "bf16", "fp32", -5.0
+        )
+        self.local_num_heads, self.head_dim = 2, 128
+        self.model_config = SimpleNamespace(dtype="bf16")
+
+    layer = SimpleNamespace(get_state_dtype=lambda: ("bf16", "fp32"))
+    fn = function(
+        "vllm_sail/patch/enhancement/attention/kda.py",
+        "_init",
+        {
+            "current_platform": SimpleNamespace(is_ppu=lambda: True),
+            "_upstream_init": upstream_init,
+            "_kda": upstream_kda,
+            "logger": SimpleNamespace(info_once=lambda *args: None),
+            "torch": SimpleNamespace(uint8="uint8"),
+        },
+    )
+    vllm_config = SimpleNamespace(
+        scheduler_config=SimpleNamespace(max_num_batched_tokens=64, max_num_seqs=4)
+    )
+    fn(layer, object(), vllm_config, "model.kda", None, False)
+
+    assert len(resolver_calls) == 1
+    assert upstream_kda.resolve_kda_prefill_backend is original
+    assert layer.kda_prefill_backend == "flashkda"
+    assert layer._flashkda_buffer_specs == (
+        ((1, 64, 2, 128), "bf16"),
+        ((4, 2, 128, 128), "fp32"),
+        ((4, 2, 128, 128), "fp32"),
+        ((0,), "uint8"),
+    )
+    assert layer._checkpoint_exporter == "checkpoint-exporter"

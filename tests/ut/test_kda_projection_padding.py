@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""KDA delegates padding ownership to the Linear and preserves it after load."""
+"""Upstream KDA delegates in_proj padding to the Linear and preserves it."""
 
 import ast
 from types import SimpleNamespace as NS
@@ -8,7 +8,6 @@ import pytest
 
 from tests.support.source import ROOT, definition
 
-PATCH = "vllm_sail/patch/enhancement/attention/kda.py"
 UPSTREAM = "vllm/models/kimi_k3/nvidia/kda.py"
 
 
@@ -93,21 +92,12 @@ def check_constructor(path, name, heads):
     }
 
 
-@pytest.mark.parametrize("heads", [64, 128])
-def test_constructor_forwards_padding_to_linear(heads):
-    check_constructor(PATCH, "_init", heads)
-
-
 @pytest.mark.upstream_source
-@pytest.mark.parametrize("copied", [False, True])
 @pytest.mark.parametrize("heads", [64, 128])
-def test_actual_constructor_padding_contract(upstream_source_root, copied, heads):
-    path, name = (
-        (PATCH, "_init")
-        if copied
-        else (upstream_source_root / UPSTREAM, "KimiK3DeltaAttention.__init__")
+def test_actual_constructor_padding_contract(upstream_source_root, heads):
+    check_constructor(
+        upstream_source_root / UPSTREAM, "KimiK3DeltaAttention.__init__", heads
     )
-    check_constructor(path, name, heads)
 
 
 class Weight:
