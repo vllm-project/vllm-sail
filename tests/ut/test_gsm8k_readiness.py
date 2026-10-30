@@ -169,6 +169,80 @@ def test_case_server_cmd_replaces_the_default_argv(
     assert "--tensor-parallel-size" not in cmd
 
 
+def _capture_popen(
+    evaluator: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    log_path: Path,
+    **kwargs: Any,
+) -> dict[str, Any]:
+    """Start the server with a stubbed Popen and return its keyword args."""
+    captured: dict[str, Any] = {}
+
+    class _FakePopen:
+        def __init__(self, cmd: list[str], **popen_kwargs: Any) -> None:
+            captured["cmd"] = cmd
+            captured.update(popen_kwargs)
+
+    monkeypatch.setattr(evaluator.subprocess, "Popen", _FakePopen)
+    evaluator.start_vllm_server(
+        "/ckpt/model",
+        served_model_name="demo-run-abc",
+        port=9999,
+        log_path=log_path,
+        **kwargs,
+    )
+    return captured
+
+
+def test_server_env_merges_over_the_inherited_environment(
+    evaluator: Any, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The case env must add to the inherited env, never replace it."""
+    monkeypatch.setenv("HF_HOME", "/nas/hf_cache")
+    monkeypatch.setenv("VLLM_ENGINE_READY_TIMEOUT_S", "900")
+    popen = _capture_popen(
+        evaluator,
+        monkeypatch,
+        tmp_path / "serve.log",
+        server_env={"VLLM_ENGINE_READY_TIMEOUT_S": "6000", "DG_X": "1"},
+    )
+    env = popen["env"]
+    # Overridden key wins, inherited keys survive, new keys appear.
+    assert env["VLLM_ENGINE_READY_TIMEOUT_S"] == "6000"
+    assert env["HF_HOME"] == "/nas/hf_cache"
+    assert env["DG_X"] == "1"
+
+
+def test_no_server_env_keeps_the_inherited_environment(
+    evaluator: Any, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """``env=None`` lets Popen inherit, which is what legacy cases rely on."""
+    popen = _capture_popen(evaluator, monkeypatch, tmp_path / "serve.log")
+    assert popen["env"] is None
+
+
+@pytest.mark.parametrize(
+    ("server_env", "expected"),
+    [
+        # No override keeps the measured CUDA-graph cold-start budget.
+        (None, 3600),
+        ({}, 3600),
+        # A long engine-ready budget must also widen the probe, otherwise the
+        # probe abandons a DP+EP start the engine still considers healthy.
+        ({"VLLM_ENGINE_READY_TIMEOUT_S": "6000"}, 6000),
+        # A shorter engine budget never shrinks the measured floor.
+        ({"VLLM_ENGINE_READY_TIMEOUT_S": "600"}, 3600),
+        # Unrelated variables and junk values fall back to the floor.
+        ({"DG_USE_MOE_DYNAMIC_TILE": "1"}, 3600),
+        ({"VLLM_ENGINE_READY_TIMEOUT_S": "soon"}, 3600),
+    ],
+)
+def test_server_ready_timeout_tracks_the_engine_budget(
+    evaluator: Any, server_env: dict[str, str] | None, expected: int
+) -> None:
+    assert evaluator._server_ready_timeout(server_env) == expected
+
+
 def test_placeholder_expansion_only_touches_known_names(evaluator: Any) -> None:
     expanded = evaluator._expand_server_placeholders(
         "{model}/sub-{port}", model="/ckpt/m", port=8080, served_name="s"
@@ -226,9 +300,7 @@ def test_cli_parses_server_cmd_json_into_an_argv(
 def test_cli_omits_server_cmd_when_the_case_leaves_it_free(
     evaluator: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    captured = _run_cli(
-        evaluator, monkeypatch, "--model-key", "deepseek_v4_mxfp4"
-    )
+    captured = _run_cli(evaluator, monkeypatch, "--model-key", "deepseek_v4_mxfp4")
     # None, not [], so start_vllm_server takes its built-in branch.
     assert captured["server_cmd"] is None
     assert captured["case_id"] is None
@@ -258,6 +330,57 @@ def test_cli_rejects_malformed_server_cmd(
             "--model-key",
             "deepseek_v4_mxfp4",
             "--server-cmd",
+            raw,
+        ],
+    )
+    with pytest.raises(SystemExit, match=message):
+        evaluator.main()
+
+
+def test_cli_parses_server_env_json_into_a_map(
+    evaluator: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    captured = _run_cli(
+        evaluator,
+        monkeypatch,
+        "--model-key",
+        "deepseek_v4_int8",
+        "--server-env",
+        json.dumps({"VLLM_ENGINE_READY_TIMEOUT_S": "6000"}),
+    )
+    assert captured["server_env"] == {"VLLM_ENGINE_READY_TIMEOUT_S": "6000"}
+
+
+def test_cli_omits_server_env_when_the_case_leaves_it_free(
+    evaluator: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    captured = _run_cli(evaluator, monkeypatch, "--model-key", "deepseek_v4_mxfp4")
+    assert captured["server_env"] is None
+
+
+@pytest.mark.parametrize(
+    ("raw", "message"),
+    [
+        ("VLLM_ENGINE_READY_TIMEOUT_S=6000", "not valid JSON"),
+        ('"6000"', "JSON object of string values"),
+        ('{"A": 6000}', "JSON object of string values"),
+    ],
+)
+def test_cli_rejects_malformed_server_env(
+    evaluator: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    raw: str,
+    message: str,
+) -> None:
+    monkeypatch.setattr(evaluator, "run_accuracy_eval", pytest.fail)
+    monkeypatch.setattr(
+        evaluator.sys,
+        "argv",
+        [
+            "ppu_gsm8k_eval.py",
+            "--model-key",
+            "deepseek_v4_int8",
+            "--server-env",
             raw,
         ],
     )

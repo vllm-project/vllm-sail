@@ -120,6 +120,37 @@ MODEL_CONFIGS: dict[str, dict[str, Any]] = {
         "model_id": ("T-HEAD/MiniMax-M3-Quant-W-FP8-PerChannel-A-FP8-PerToken"),
         "served_name": "MiniMax-M3-Quant-W-FP8-PerChannel-A-FP8-PerToken",
         "extra_flags": ["--trust-remote-code"],
+        # The catalog runs this case on ZW-M890P; without the key the chip
+        # falls back to 810e and the golden would be filed under the wrong
+        # board.
+        "chip": "890p",
+    },
+    "glm_5_3_mxfp4": {
+        "model_id": (
+            "T-HEAD/GLM-5.3-MoE-Quant-W-MXFP4-A-MXFP4-Dense-"
+            "Quant-W-FP8-PerChannel-A-FP8-PerToken"
+        ),
+        "served_name": "glm-5.3-mxfp4",
+        "extra_flags": ["--trust-remote-code"],
+        "chip": "890p",
+        "tp": 8,
+    },
+    "glm_5_3_flash_mxfp4": {
+        "model_id": (
+            "T-HEAD/GLM-5.3-Flash-MoE-Quant-W-MXFP4-A-MXFP4-Dense-"
+            "Quant-W-FP8-PerChannel-A-FP8-PerToken"
+        ),
+        "served_name": "glm-5.3-flash-mxfp4",
+        "extra_flags": ["--trust-remote-code"],
+        "chip": "890p",
+        "tp": 2,
+    },
+    "kimi_k2_6_mxfp4": {
+        "model_id": "T-HEAD/Kimi-K2.6-MXFP4-FP8",
+        "served_name": "kimi-k2.6-mxfp4",
+        "extra_flags": ["--trust-remote-code"],
+        "chip": "890p",
+        "tp": 8,
     },
     "qwen3.8-flash-next": {
         "model_id": "Qwen/Qwen3.8-Flash-Next",
@@ -159,6 +190,36 @@ def _expand_server_placeholders(
     )
 
 
+def _parse_server_cmd(raw: str | None) -> list[str] | None:
+    """Decode ``--server-cmd`` into an argv, or ``None`` for the built-in one."""
+    if not raw:
+        return None
+    try:
+        value = json.loads(raw)
+    except ValueError as error:
+        raise SystemExit(f"--server-cmd is not valid JSON: {error}") from error
+    if not isinstance(value, list) or not all(
+        isinstance(token, str) for token in value
+    ):
+        raise SystemExit("--server-cmd must be a JSON array of strings")
+    return value
+
+
+def _parse_server_env(raw: str | None) -> dict[str, str] | None:
+    """Decode ``--server-env`` into a string map, or ``None`` when unused."""
+    if not raw:
+        return None
+    try:
+        value = json.loads(raw)
+    except ValueError as error:
+        raise SystemExit(f"--server-env is not valid JSON: {error}") from error
+    if not isinstance(value, dict) or not all(
+        isinstance(key, str) and isinstance(item, str) for key, item in value.items()
+    ):
+        raise SystemExit("--server-env must be a JSON object of string values")
+    return value
+
+
 def start_vllm_server(
     model: str,
     *,
@@ -167,6 +228,7 @@ def start_vllm_server(
     tp: int = 8,
     extra_flags: list[str] | None = None,
     server_cmd: list[str] | None = None,
+    server_env: dict[str, str] | None = None,
     log_path: Path | None = None,
 ) -> tuple[subprocess.Popen[bytes], Path]:
     """Start ``vllm serve`` in a new session; return (proc, log).
@@ -176,6 +238,10 @@ def start_vllm_server(
     argument list entirely, so a case can drop a default flag or pick a
     different parallel layout without the caller second-guessing it.  Cases
     that leave it unset keep the shared defaults below.
+
+    ``server_env`` adds variables for this server process only.  It is merged
+    over the inherited environment rather than replacing it, so ``HF_HOME``,
+    the wheel paths and the rest of the CI contract survive.
     """
     if log_path is None:
         log_path = Path("/tmp/vllm_serve_gsm8k.log")
@@ -210,12 +276,18 @@ def start_vllm_server(
         ]
         if extra_flags:
             cmd.extend(extra_flags)
+    env = None
+    if server_env:
+        # A DP+EP launch needs its own engine-ready budget; the value given by
+        # the docs is per case, so it belongs here and not in the wrapper.
+        env = {**os.environ, **{k: str(v) for k, v in server_env.items()}}
     log_fh = open(log_path, "w")  # noqa: SIM115
     proc = subprocess.Popen(
         cmd,
         start_new_session=True,
         stdout=log_fh,
         stderr=subprocess.STDOUT,
+        env=env,
     )
     return proc, log_path
 
@@ -260,6 +332,23 @@ def _probe_models_endpoint(url: str, expected_served_name: str) -> bool:
         if isinstance(item, dict) and item.get("id") == expected_served_name:
             return True
     return False
+
+
+def _server_ready_timeout(server_env: dict[str, str] | None) -> int:
+    """Readiness budget for one case.
+
+    A ``--data-parallel-size 8 --enable-expert-parallel`` launch raises vLLM's
+    own engine-ready budget (the recipes set ``VLLM_ENGINE_READY_TIMEOUT_S`` to
+    6000); polling for less than that would abandon a start the engine still
+    considers healthy.
+    """
+    if not server_env:
+        return SERVER_READY_TIMEOUT
+    try:
+        engine_budget = int(server_env.get("VLLM_ENGINE_READY_TIMEOUT_S", ""))
+    except (TypeError, ValueError):
+        return SERVER_READY_TIMEOUT
+    return max(SERVER_READY_TIMEOUT, engine_budget)
 
 
 def wait_server_ready(
@@ -442,6 +531,7 @@ def run_accuracy_eval(  # noqa: C901
     served_model_name: str | None = None,
     extra_serve_flags: list[str] | None = None,
     server_cmd: list[str] | None = None,
+    server_env: dict[str, str] | None = None,
     golden_dir: Path | None = None,
 ) -> dict[str, Any]:
     """Run the full GSM8K accuracy eval pipeline.
@@ -511,6 +601,7 @@ def run_accuracy_eval(  # noqa: C901
         tp=tp,
         extra_flags=flags,
         server_cmd=server_cmd,
+        server_env=server_env,
         log_path=log_path,
     )
     try:
@@ -519,6 +610,7 @@ def run_accuracy_eval(  # noqa: C901
             log_path,
             port=port,
             expected_served_name=unique_served,
+            timeout=_server_ready_timeout(server_env),
         )
         time.sleep(SERVER_POST_READY_SLEEP)
         # A readiness probe only proves the server was alive at the time it
@@ -726,6 +818,15 @@ def main() -> None:
         ),
     )
     parser.add_argument(
+        "--server-env",
+        default=None,
+        help=(
+            "JSON object of extra environment variables for this case's "
+            "server process, e.g. a larger engine-ready timeout. Merged "
+            "over the inherited environment."
+        ),
+    )
+    parser.add_argument(
         "--update-golden",
         action="store_true",
         help="Rewrite the formal golden baseline",
@@ -755,17 +856,8 @@ def main() -> None:
 
     extra = args.extra_serve_flags.split() if args.extra_serve_flags else None
     wd = Path(args.work_dir) if args.work_dir else None
-    if args.server_cmd:
-        try:
-            server_cmd = json.loads(args.server_cmd)
-        except ValueError as error:
-            raise SystemExit(f"--server-cmd is not valid JSON: {error}") from error
-        if not isinstance(server_cmd, list) or not all(
-            isinstance(token, str) for token in server_cmd
-        ):
-            raise SystemExit("--server-cmd must be a JSON array of strings")
-    else:
-        server_cmd = None
+    server_cmd = _parse_server_cmd(args.server_cmd)
+    server_env = _parse_server_env(args.server_env)
 
     result = run_accuracy_eval(
         args.model_key,
@@ -780,6 +872,7 @@ def main() -> None:
         served_model_name=args.served_model_name,
         extra_serve_flags=extra,
         server_cmd=server_cmd,
+        server_env=server_env,
         golden_dir=Path(args.golden_dir) if args.golden_dir else None,
     )
 

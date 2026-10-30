@@ -209,6 +209,7 @@ case "${mode}" in
             --env MODEL_KEY="${MODEL_KEY}"
             --env CASE_ID="${case_id}"
             --env SERVER_CMD="${SERVER_CMD:-}"
+            --env SERVER_ENV="${SERVER_ENV:-}"
             --env RESULTS_DIR=/artifacts
             --env UPDATE_GOLDEN="${UPDATE_GOLDEN:-0}"
             --env THRESHOLD="${THRESHOLD:-0.9}"

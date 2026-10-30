@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import subprocess
 from pathlib import Path
 
@@ -15,6 +16,7 @@ ACCURACY = ROOT / "scripts" / "ci" / "ppu_e2e_accuracy.sh"
 RUNTIME = ROOT / "scripts" / "ci" / "ppu_runtime_container.sh"
 SELECT = ROOT / "scripts" / "ci" / "ppu_e2e_select.py"
 MODELS = ROOT / "scripts" / "ci" / "ppu_e2e_models.json"
+EVAL_SCRIPT = ROOT / "scripts" / "eval" / "ppu_gsm8k_eval.py"
 MODEL_WORKFLOW = ROOT / ".github" / "workflows" / "_ppu-model-tests.yaml"
 ACCURACY_WORKFLOW = ROOT / ".github" / "workflows" / "_ppu-accuracy-tests.yaml"
 NIGHTLY_WORKFLOW = ROOT / ".github" / "workflows" / "ppu-accuracy-nightly.yaml"
@@ -26,6 +28,22 @@ def _load_select():
     module = importlib.util.module_from_spec(spec)
     assert spec.loader is not None
     spec.loader.exec_module(module)
+    return module
+
+
+def _load_evaluator():
+    """Import ``ppu_gsm8k_eval`` so the catalog can be checked against it."""
+    spec = importlib.util.spec_from_file_location("ppu_gsm8k_eval_catalog", EVAL_SCRIPT)
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    sentinel = "GSM8K_DATASET_PATH" not in os.environ
+    if sentinel:
+        os.environ["GSM8K_DATASET_PATH"] = "/unused/gsm8k"
+    try:
+        spec.loader.exec_module(module)
+    finally:
+        if sentinel:
+            del os.environ["GSM8K_DATASET_PATH"]
     return module
 
 
@@ -42,7 +60,7 @@ def _workflow(path: Path) -> dict:
 
 def test_models_catalog_is_partitioned_by_category_and_contract() -> None:
     catalog = _catalog()
-    assert isinstance(catalog, list) and len(catalog) == 5
+    assert isinstance(catalog, list) and catalog
     common = {"key", "served_name", "board", "tp"}
     for entry in catalog:
         assert common <= set(entry), entry
@@ -67,6 +85,11 @@ def test_catalog_keeps_smoke_and_accuracy_subsets_exact() -> None:
         "deepseek-v4-int8",
         "deepseek-v4-mxfp4",
         "minimax-m3-fp8",
+        "deepseek-v4-int8-dp-ep",
+        "deepseek-v4-mxfp4-dp-ep",
+        "glm-5.3-mxfp4-tp8",
+        "glm-5.3-flash-mxfp4-tp2",
+        "kimi-k2.6-mxfp4-tp8",
     }
 
 
@@ -97,7 +120,15 @@ def test_accuracy_catalog_keeps_model_ids_and_per_model_tp() -> None:
     )
     assert accuracy["deepseek-v4-int8"]["board"] == "OAM-810E"
     assert accuracy["deepseek-v4-mxfp4"]["board"] == "ZW-M890P"
-    assert {int(entry["tp"]) for entry in accuracy.values()} == {8}
+    # TP (== PPU count handed to the container) is per case, not per chip:
+    # GLM-5.3-Flash only needs two cards while everything else takes eight.
+    assert accuracy["glm-5.3-flash-mxfp4-tp2"]["tp"] == 2
+    others = {
+        key: entry["tp"]
+        for key, entry in accuracy.items()
+        if key != "glm-5.3-flash-mxfp4-tp2"
+    }
+    assert set(others.values()) == {8}, others
 
 
 # --- matrix selector ---------------------------------------------------------
@@ -137,6 +168,7 @@ def test_accuracy_matrix_uses_only_accuracy_and_eval_keys() -> None:
                 "board": "ZW-M890P",
                 "ppu_count": 8,
                 "server_cmd": [],
+                "server_env": {},
             },
             {
                 "case_id": "minimax-m3-fp8",
@@ -145,6 +177,7 @@ def test_accuracy_matrix_uses_only_accuracy_and_eval_keys() -> None:
                 "board": "ZW-M890P",
                 "ppu_count": 8,
                 "server_cmd": [],
+                "server_env": {},
             },
         ]
     }
@@ -153,17 +186,24 @@ def test_accuracy_matrix_uses_only_accuracy_and_eval_keys() -> None:
 def test_accuracy_matrix_default_contains_every_accuracy_model() -> None:
     select = _load_select()
     matrix = select.build_accuracy_matrix(_catalog(), "")
-    assert {entry["model_key"] for entry in matrix["include"]} == {
+    # Derived from the catalog so adding a case does not need a test edit; the
+    # explicit set pins the weights that already have a reviewed golden.
+    expected_keys = {
+        entry["model_key"] for entry in _catalog() if entry["category"] == "accuracy"
+    }
+    assert {entry["model_key"] for entry in matrix["include"]} == expected_keys
+    assert expected_keys == {
         "deepseek_v4_int8",
         "deepseek_v4_mxfp4",
         "minimax-m3-fp8",
+        "glm_5_3_mxfp4",
+        "glm_5_3_flash_mxfp4",
+        "kimi_k2_6_mxfp4",
     }
 
 
 def test_accuracy_catalog_entries_declare_model_key_and_server_cmd() -> None:
-    accuracy = [
-        entry for entry in _catalog() if entry["category"] == "accuracy"
-    ]
+    accuracy = [entry for entry in _catalog() if entry["category"] == "accuracy"]
     for entry in accuracy:
         # model_key picks the evaluator config and keys the golden file; it
         # must be present even though the catalog key is what labels a job.
@@ -211,6 +251,80 @@ def test_accuracy_matrix_keeps_multiple_cases_over_one_checkpoint() -> None:
     ]
 
 
+def test_every_case_server_cmd_keeps_the_readiness_contract() -> None:
+    """A case argv must still let the readiness probe identify the server.
+
+    The probe compares ``/v1/models`` ids against the run-unique served name
+    and polls ``--port``; a catalog argv that forgets either flag hangs the
+    job until the engine-ready timeout, so pin both here.
+    """
+    for entry in _catalog():
+        cmd = entry.get("server_cmd") or []
+        if not cmd:
+            continue
+        key = entry["key"]
+        assert "{model}" in cmd, key
+        assert "--served-model-name" in cmd, key
+        served = cmd[cmd.index("--served-model-name") + 1]
+        assert served == "{served_name}", key
+        assert "--host" in cmd, key
+        assert cmd[cmd.index("--host") + 1] == "127.0.0.1", key
+        assert "--port" in cmd, key
+        assert cmd[cmd.index("--port") + 1] == "{port}", key
+
+
+def test_accuracy_matrix_forwards_server_env() -> None:
+    select = _load_select()
+    catalog = [
+        {
+            "key": "dp-ep",
+            "category": "accuracy",
+            "model_key": "deepseek_v4_mxfp4",
+            "model_id": "T-HEAD/ckpt",
+            "board": "ZW-M890P",
+            "tp": 8,
+            "server_env": {"VLLM_ENGINE_READY_TIMEOUT_S": "6000"},
+        },
+        {
+            "key": "plain",
+            "category": "accuracy",
+            "model_key": "minimax-m3-fp8",
+            "model_id": "T-HEAD/ckpt2",
+            "board": "ZW-M890P",
+            "tp": 8,
+        },
+    ]
+    by_case = {
+        entry["case_id"]: entry
+        for entry in select.build_accuracy_matrix(catalog, "")["include"]
+    }
+    assert by_case["dp-ep"]["server_env"] == {"VLLM_ENGINE_READY_TIMEOUT_S": "6000"}
+    # Absent means "inherit", which must serialise as an empty object so the
+    # workflow can toJSON() it without a null branch.
+    assert by_case["plain"]["server_env"] == {}
+
+
+def test_accuracy_catalog_resolves_against_the_evaluator_configs() -> None:
+    """Every case must name a model_key the evaluator knows, for that model."""
+    evaluator = _load_evaluator()
+    configs = evaluator.MODEL_CONFIGS
+    board_to_chip = {"OAM-810E": "810e", "ZW-M890P": "890p"}
+    accuracy = [entry for entry in _catalog() if entry["category"] == "accuracy"]
+    assert accuracy
+    for entry in accuracy:
+        key = entry["key"]
+        assert entry["model_key"] in configs, key
+        config = configs[entry["model_key"]]
+        # One weight, one config: the id may not drift between the two.
+        assert config["model_id"] == entry["model_id"], key
+        assert config["served_name"] == entry["served_name"], key
+        # A config may leave ``chip``/``tp`` implicit and take the defaults.
+        chip = config.get("chip") or evaluator.DEFAULT_CHIP
+        assert chip == board_to_chip[entry["board"]], key
+        expected_tp = config.get("tp") or evaluator.tensor_parallel_for_chip(chip)
+        assert expected_tp == int(entry["tp"]), key
+
+
 def test_accuracy_matrix_rejects_entry_without_model_key() -> None:
     select = _load_select()
     catalog = [
@@ -241,8 +355,13 @@ def test_selector_cli_emits_separate_smoke_and_accuracy_outputs() -> None:
     outputs = dict(line.split("=", 1) for line in result.stdout.splitlines())
     smoke = json.loads(outputs["matrix"])
     accuracy = json.loads(outputs["accuracy_matrix"])
-    assert len(smoke["include"]) == 2
-    assert len(accuracy["include"]) == 3
+    catalog = _catalog()
+    assert len(smoke["include"]) == sum(
+        1 for entry in catalog if entry.get("category", "smoke") == "smoke"
+    )
+    assert len(accuracy["include"]) == sum(
+        1 for entry in catalog if entry.get("category") == "accuracy"
+    )
 
 
 # --- scripts -----------------------------------------------------------------
@@ -417,6 +536,18 @@ def test_accuracy_entrypoints_are_the_manual_debug_and_the_nightly_runs() -> Non
     assert "model-accuracy" not in automatic
 
 
+def test_nightly_select_step_labels_jobs_with_the_case_id() -> None:
+    """The select step must key on case_id, not on the shared model_key.
+
+    Two cases over one checkpoint share a model_key, so a model_key-keyed
+    mapping collapses them into one matrix row and the other case silently
+    never runs.
+    """
+    text = NIGHTLY_WORKFLOW.read_text()
+    assert '{"model": entry["case_id"]}' in text
+    assert "ACCURACY_MODEL_KEYS" not in text
+
+
 def test_accuracy_nightly_is_serial_and_wheel_sourced_from_the_build_commit() -> None:
     nightly = _workflow(NIGHTLY_WORKFLOW)
     accuracy = nightly["jobs"]["accuracy"]
@@ -445,9 +576,12 @@ def test_accuracy_nightly_is_serial_and_wheel_sourced_from_the_build_commit() ->
     # The accuracy work runs inside the reusable call, not on a hosted shell.
     assert "runs-on" not in accuracy
     text = NIGHTLY_WORKFLOW.read_text()
-    # Each model must reach the reusable workflow with one catalog key.
-    matrix = _load_select().build_accuracy_matrix(_catalog(), "")
-    assert len(matrix["include"]) == 3
+    # Each case must reach the reusable workflow with one catalog key.
+    catalog = _catalog()
+    matrix = _load_select().build_accuracy_matrix(catalog, "")
+    assert len(matrix["include"]) == sum(
+        1 for entry in catalog if entry.get("category") == "accuracy"
+    )
     assert "models: ${{ matrix.model }}" in text
 
 

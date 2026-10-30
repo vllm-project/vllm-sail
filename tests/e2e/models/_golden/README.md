@@ -64,15 +64,27 @@ either direction fails.
     "--host", "127.0.0.1", "--port", "{port}",
     "--tensor-parallel-size", "8",
     "--enforce-eager"
-  ]
+  ],
+  // Optional: extra environment for the server process only, merged over the
+  // inherited environment (HF_HOME etc. survive). Omit for the default env.
+  "server_env": {"VLLM_ENGINE_READY_TIMEOUT_S": "6000"}
 }
 ```
 
 `{model}` expands to the resolved checkpoint, `{port}` to `VLLM_PORT`, and
 `{served_name}` to the per-run nonce (`<served_name>-run-<hex>`), so the
 readiness probe and evalscope keep addressing the process this case started.
-Unknown braces are left untouched. Mirror these keys in `MODEL_CONFIGS` of
+Unknown braces are left untouched. Whenever `server_cmd` is set it must keep
+`--served-model-name {served_name}` and `--host`/`--port`, otherwise the
+readiness probe can never match the process and the job burns the full
+engine-ready budget. Mirror these keys in `MODEL_CONFIGS` of
 `scripts/eval/ppu_gsm8k_eval.py` if the case needs a new `model_key`.
+
+`server_env` exists because some launch recipes need variables that no CLI flag
+expresses — `VLLM_ENGINE_READY_TIMEOUT_S` for a `--data-parallel-size 8
+--enable-expert-parallel` cold start, `DG_USE_MOE_DYNAMIC_TILE` for the Kimi
+MXFP4 path. It is scoped to the `vllm serve` child, so two cases over the same
+weights can run with different variables in the same job.
 
 ## Checkpoint resolution
 
@@ -192,6 +204,16 @@ first run cannot silently become the baseline. Promote it by either:
 | Model key | Chip | Checkpoint |
 |-----------|------|-----------|
 | `deepseek_v4_int8` | 810e | `DeepSeek-V4-Flash-0731-W8A8-INT8` |
-| `deepseek_v4_mxfp4` | 890p | `DeepSeek-V4-Flash-0731-mxfp4-fp8channel` |
+| `deepseek_v4_mxfp4` | 890p | `DeepSeek-V4-Flash-0731-MoE-Quant-W-MXFP4-A-MXFP4-Dense-Quant-W-FP8-PerChannel-A-FP8-PerToken` |
 | `minimax-m3-fp8` | 890p | `MiniMax-M3-Quant-W-FP8-PerChannel-A-FP8-PerToken` |
+| `glm_5_3_mxfp4` | 890p | `GLM-5.3-MoE-Quant-W-MXFP4-A-MXFP4-Dense-Quant-W-FP8-PerChannel-A-FP8-PerToken` |
+| `glm_5_3_flash_mxfp4` | 890p | `GLM-5.3-Flash-MoE-Quant-W-MXFP4-A-MXFP4-Dense-Quant-W-FP8-PerChannel-A-FP8-PerToken` |
+| `kimi_k2_6_mxfp4` | 890p | `Kimi-K2.6-MXFP4-FP8` |
 | `qwen3.8-flash-next` | 890p | `Qwen3.8-Flash-Next` |
+
+`chip` here is the golden's identity, so a checkpoint evaluated on more than
+one board needs one golden per board. Cases that only differ in parallel
+layout (`tensor-parallel-size`) still share a golden: the band is the same
+±2 points, which is what makes a TP8 baseline a meaningful reference for a
+DP8+EP8 run of the same weights — if the two layouts really do diverge by more
+than that, the case needs its own `model_key` rather than a wider band.

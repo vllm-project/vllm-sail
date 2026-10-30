@@ -15,6 +15,9 @@
 #   SERVER_CMD         JSON array of the full ``vllm serve`` argv for this
 #                      case, with {model}/{port}/{served_name} placeholders.
 #                      Empty or "[]" uses the evaluator's built-in argv.
+#   SERVER_ENV         JSON object of extra environment variables for this
+#                      case's server process (e.g. VLLM_ENGINE_READY_TIMEOUT_S).
+#                      Empty or "{}" adds nothing.
 #   MODEL_ID           Hugging Face model id this key resolves to; checked
 #                      against the offline cache before the server starts
 #   WHEELS_DIR         directory holding the downloaded *.whl artifacts
@@ -44,6 +47,7 @@ export GSM8K_DATASET_PATH="${GSM8K_DATASET_PATH:?GSM8K_DATASET_PATH must be set}
 MODEL_KEY="${MODEL_KEY:?MODEL_KEY is required}"
 CASE_ID="${CASE_ID:-${MODEL_KEY}}"
 SERVER_CMD="${SERVER_CMD:-}"
+SERVER_ENV="${SERVER_ENV:-}"
 MODEL_ID="${MODEL_ID:?MODEL_ID is required}"
 WHEELS_DIR="${WHEELS_DIR:?WHEELS_DIR is required}"
 RESULTS_DIR="${RESULTS_DIR:?RESULTS_DIR is required}"
@@ -64,6 +68,7 @@ log "environment"
 echo "MODEL_KEY=${MODEL_KEY}"
 echo "CASE_ID=${CASE_ID}"
 echo "SERVER_CMD=${SERVER_CMD:-<built-in>}"
+echo "SERVER_ENV=${SERVER_ENV:-<none>}"
 echo "RESULTS_DIR=${RESULTS_DIR}"
 echo "UPDATE_GOLDEN=${UPDATE_GOLDEN}"
 echo "THRESHOLD=${THRESHOLD}"
@@ -180,6 +185,9 @@ eval_args=(
 )
 if [[ -n "${SERVER_CMD}" && "${SERVER_CMD}" != "[]" ]]; then
     eval_args+=(--server-cmd "${SERVER_CMD}")
+fi
+if [[ -n "${SERVER_ENV}" && "${SERVER_ENV}" != "{}" && "${SERVER_ENV}" != "null" ]]; then
+    eval_args+=(--server-env "${SERVER_ENV}")
 fi
 if [[ "${UPDATE_GOLDEN}" == "1" ]]; then
     eval_args+=(--update-golden)
