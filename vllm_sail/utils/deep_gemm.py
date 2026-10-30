@@ -959,6 +959,12 @@ def should_use_deepgemm_for_bf16_linear(
     must fall back to acblas (``F.linear``) to avoid the extra elementwise
     add overhead.  Otherwise (no bias) callers can use DeepGEMM when all
     conditions are satisfied.
+
+    The BF16 dense NT kernel tiles ``N`` in pairs and rejects an odd ``N``
+    at JIT time (``BF16 dense GEMM requires even N``).  Every odd ``N`` --
+    including ``N == 1``, which the kernel does not specialise (e.g. the 1-D
+    Kimi-K3 AttnRes projections) -- is rejected here so it falls back to
+    acblas instead of failing inside the kernel.
     """
     if bias is not None:
         return False
@@ -978,6 +984,7 @@ def should_use_deepgemm_for_bf16_linear(
         x.dtype == torch.bfloat16
         and weight.dtype == torch.bfloat16
         and weight.dim() == 2
+        and weight.shape[0] % 2 == 0
         and x.is_contiguous()
         and weight.is_contiguous()
     )
