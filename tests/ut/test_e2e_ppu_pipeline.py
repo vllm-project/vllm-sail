@@ -17,6 +17,7 @@ RUNTIME = ROOT / "scripts" / "ci" / "ppu_runtime_container.sh"
 SELECT = ROOT / "scripts" / "ci" / "ppu_e2e_select.py"
 MODELS = ROOT / "scripts" / "ci" / "ppu_e2e_models.json"
 EVAL_SCRIPT = ROOT / "scripts" / "eval" / "ppu_gsm8k_eval.py"
+GOLDEN = ROOT / "tests" / "e2e" / "models" / "_golden"
 MODEL_WORKFLOW = ROOT / ".github" / "workflows" / "_ppu-model-tests.yaml"
 ACCURACY_WORKFLOW = ROOT / ".github" / "workflows" / "_ppu-accuracy-tests.yaml"
 NIGHTLY_WORKFLOW = ROOT / ".github" / "workflows" / "ppu-accuracy-nightly.yaml"
@@ -87,7 +88,7 @@ def test_catalog_keeps_smoke_and_accuracy_subsets_exact() -> None:
         "minimax-m3-fp8",
         "deepseek-v4-int8-dp-ep",
         "deepseek-v4-mxfp4-dp-ep",
-        "glm-5.3-mxfp4-tp8",
+        "glm-5.3-mxfp4-tp4",
         "glm-5.3-flash-mxfp4-tp2",
         "kimi-k2.6-mxfp4-tp8",
     }
@@ -121,12 +122,14 @@ def test_accuracy_catalog_keeps_model_ids_and_per_model_tp() -> None:
     assert accuracy["deepseek-v4-int8"]["board"] == "OAM-810E"
     assert accuracy["deepseek-v4-mxfp4"]["board"] == "ZW-M890P"
     # TP (== PPU count handed to the container) is per case, not per chip:
-    # GLM-5.3-Flash only needs two cards while everything else takes eight.
+    # GLM-5.3 needs a TP4 prefill recipe and GLM-5.3-Flash a TP2 one, while
+    # every DeepSeek/Kimi case takes all eight cards.
+    assert accuracy["glm-5.3-mxfp4-tp4"]["tp"] == 4
     assert accuracy["glm-5.3-flash-mxfp4-tp2"]["tp"] == 2
     others = {
         key: entry["tp"]
         for key, entry in accuracy.items()
-        if key != "glm-5.3-flash-mxfp4-tp2"
+        if key not in {"glm-5.3-mxfp4-tp4", "glm-5.3-flash-mxfp4-tp2"}
     }
     assert set(others.values()) == {8}, others
 
@@ -226,19 +229,19 @@ def test_accuracy_matrix_keeps_multiple_cases_over_one_checkpoint() -> None:
             "server_cmd": None,
         },
         {
-            "key": "deepseek-v4-mxfp4-eager",
+            "key": "deepseek-v4-mxfp4-ep",
             "category": "accuracy",
             "model_key": "deepseek_v4_mxfp4",
             "model_id": "T-HEAD/ckpt",
             "board": "ZW-M890P",
             "tp": 8,
-            "server_cmd": ["vllm", "serve", "{model}", "--enforce-eager"],
+            "server_cmd": ["vllm", "serve", "{model}", "--enable-expert-parallel"],
         },
     ]
     include = select.build_accuracy_matrix(catalog, "")["include"]
     assert [entry["case_id"] for entry in include] == [
         "deepseek-v4-mxfp4",
-        "deepseek-v4-mxfp4-eager",
+        "deepseek-v4-mxfp4-ep",
     ]
     # Both cases compare against the same golden, so the identity must agree.
     assert {entry["model_key"] for entry in include} == {"deepseek_v4_mxfp4"}
@@ -247,7 +250,7 @@ def test_accuracy_matrix_keeps_multiple_cases_over_one_checkpoint() -> None:
         "vllm",
         "serve",
         "{model}",
-        "--enforce-eager",
+        "--enable-expert-parallel",
     ]
 
 
@@ -271,6 +274,44 @@ def test_every_case_server_cmd_keeps_the_readiness_contract() -> None:
         assert cmd[cmd.index("--host") + 1] == "127.0.0.1", key
         assert "--port" in cmd, key
         assert cmd[cmd.index("--port") + 1] == "{port}", key
+
+
+def test_no_accuracy_case_serves_in_eager_mode() -> None:
+    """CI must measure the production path, which captures CUDA graphs.
+
+    Eager mode would hide a graph-capture regression and shift the numbers
+    every golden was recorded from.
+    """
+    offenders = [
+        entry["key"]
+        for entry in _catalog()
+        if any(
+            token in {"--enforce-eager", "--enforce_eager"}
+            for token in (entry.get("server_cmd") or [])
+        )
+    ]
+    assert offenders == []
+
+
+def test_every_accuracy_case_pins_the_served_window() -> None:
+    """Without --max-model-len the engine captures graphs for a 1M window.
+
+    That measured 997s before the engine was even ready, so every case recipe
+    pins the same 16k window this lane evaluates in.
+    """
+    for entry in _catalog():
+        cmd = entry.get("server_cmd") or []
+        if not cmd:
+            continue
+        key = entry["key"]
+        assert "--max-model-len" in cmd, key
+        assert cmd[cmd.index("--max-model-len") + 1] == "16384", key
+
+
+def test_builtin_argv_also_pins_the_served_window() -> None:
+    """Cases that leave server_cmd null fall back to the built-in argv."""
+    evaluator = _load_evaluator()
+    assert evaluator.DEFAULT_MAX_MODEL_LEN == 16384
 
 
 def test_accuracy_matrix_forwards_server_env() -> None:
@@ -323,6 +364,52 @@ def test_accuracy_catalog_resolves_against_the_evaluator_configs() -> None:
         assert chip == board_to_chip[entry["board"]], key
         expected_tp = config.get("tp") or evaluator.tensor_parallel_for_chip(chip)
         assert expected_tp == int(entry["tp"]), key
+
+
+def test_committed_goldens_describe_their_own_checkpoint() -> None:
+    """A hand-written golden must still be a valid schema-v2 record.
+
+    The gate trusts the score in these files, so a typo in the checkpoint tail
+    or a stale tolerance would silently mis-score the nightly.
+    """
+    evaluator = _load_evaluator()
+    configs = evaluator.MODEL_CONFIGS
+    files = sorted(GOLDEN.glob("accuracy_*.json"))
+    assert files, "no committed golden found"
+    for path in files:
+        golden = json.loads(path.read_text())
+        model_key = golden["model"]
+        assert model_key in configs, path.name
+        assert path.name == f"accuracy_{model_key}_{golden['chip']}.json"
+        assert golden["schema_version"] == 2, path.name
+        assert golden["benchmark"] == "gsm8k", path.name
+        assert golden["tolerance"] == {"mode": "band", "abs": 0.02}, path.name
+        expected = golden["dataset"]["num_expected"]
+        assert expected == 1319, path.name
+        # The recorded sample count has to be the one that produced the score.
+        assert abs(golden["score_num"] / expected - golden["score"]) < 5e-5, path.name
+        # checkpoint_tail is what the identity gate compares against the run.
+        # The lane serves by Hugging Face id, so the tail is that id's last
+        # two segments -- i.e. the whole "<org>/<name>" string.
+        model_id = configs[model_key]["model_id"]
+        assert golden["checkpoint"] == model_id, path.name
+        assert golden["checkpoint_tail"] == model_id, path.name
+
+
+def test_golden_coverage_names_the_weight_without_a_baseline() -> None:
+    """Every accuracy weight has a golden except the one with no reference.
+
+    GLM-5.3-Flash is deliberately absent: the shared GSM8K summary has no row
+    for it, so the case runs on the threshold gate and uploads a
+    pending-review artifact until a real number exists.
+    """
+    covered = {
+        json.loads(path.read_text())["model"] for path in GOLDEN.glob("accuracy_*.json")
+    }
+    catalog_keys = {
+        entry["model_key"] for entry in _catalog() if entry["category"] == "accuracy"
+    }
+    assert covered == catalog_keys - {"glm_5_3_flash_mxfp4"}
 
 
 def test_accuracy_matrix_rejects_entry_without_model_key() -> None:
