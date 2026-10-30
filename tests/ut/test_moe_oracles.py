@@ -243,7 +243,8 @@ def test_map_functions_add_ppu_names_and_delegate_upstream_names(oracles) -> Non
     assert fp8.map_fp8_backend("ppu_deep_gemm") is fp8.Fp8MoeBackend.PPU_DEEPGEMM
     assert int8.map_int8_backend("ppu_acext") is int8.Int8MoeBackend.ACEXT
     assert mxfp4.map_mxfp4_backend("ppu_deep_gemm") == [
-        mxfp4.Mxfp4MoeBackend.PPU_DEEPGEMM_MXFP4
+        mxfp4.Mxfp4MoeBackend.PPU_DEEPGEMM_MXFP4,
+        mxfp4.Mxfp4MoeBackend.BATCHED_PPU_DEEPGEMM_MXFP4,
     ]
     assert unquantized.map_unquantized_backend("triton") is (
         unquantized._upstream_map_unquantized_backend("triton")
@@ -601,6 +602,16 @@ def test_select_mxfp4_batched_ppu_deep_gemm_uses_batched_member(
     captured = {}
 
     def _capture(backend, config, weight_key, activation_key, activation_format):
+        # map_mxfp4_backend() lists the standard PPU member followed by its
+        # batched sibling and lets the shared is_supported_config() format check
+        # drop the one that does not match the MoE layout; this stub mirrors it.
+        own_format = (
+            plugin.mk.FusedMoEActivationFormat.BatchedExperts
+            if backend.name.startswith("BATCHED_")
+            else plugin.mk.FusedMoEActivationFormat.Standard
+        )
+        if activation_format != own_format:
+            raise ValueError(f"{backend.value} rejected: activation format")
         captured.update(
             backend=backend,
             weight_key=weight_key,
@@ -631,6 +642,16 @@ def test_select_mxfp4_non_batched_ppu_deep_gemm_uses_standard_member(
     captured = {}
 
     def _capture(backend, config, weight_key, activation_key, activation_format):
+        # map_mxfp4_backend() lists the standard PPU member followed by its
+        # batched sibling and lets the shared is_supported_config() format check
+        # drop the one that does not match the MoE layout; this stub mirrors it.
+        own_format = (
+            plugin.mk.FusedMoEActivationFormat.BatchedExperts
+            if backend.name.startswith("BATCHED_")
+            else plugin.mk.FusedMoEActivationFormat.Standard
+        )
+        if activation_format != own_format:
+            raise ValueError(f"{backend.value} rejected: activation format")
         captured.update(
             backend=backend,
             weight_key=weight_key,
@@ -649,6 +670,14 @@ def test_select_mxfp4_non_batched_ppu_deep_gemm_uses_standard_member(
     assert captured["backend"] is plugin.Mxfp4MoeBackend.PPU_DEEPGEMM_MXFP4
     assert captured["activation_key"] is plugin.oracle.kMxfp4Dynamic
     assert captured["activation_format"] is plugin.mk.FusedMoEActivationFormat.Standard
+
+
+def test_select_mxfp4_moe_backend_is_upstreams(oracles) -> None:
+    """The plugin re-exports upstream's selector instead of copying its body."""
+    plugin = oracles.mxfp4
+    assert plugin.select_mxfp4_moe_backend is (
+        plugin._upstream_select_mxfp4_moe_backend
+    )
 
 
 # ---------------------------------------------------------------------------

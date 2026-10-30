@@ -11,7 +11,7 @@
 schema = 1
 vllm_version_range = ">=0.32.0,<0.33.0"
 key_interface_count = 10
-target_count = 277
+target_count = 275
 
 [[key_interface]]
 symbol = "vllm.platforms.interface.PlatformEnum"
@@ -682,14 +682,6 @@ present = true
 fingerprint = "sha256:545012cd4cfeb1c4614b043d6098246816395eeba49922dc88015d31536c2edf"
 
 [[patch_target]]
-name = "vllm.model_executor.layers.fused_moe.oracle.mxfp4.select_mxfp4_moe_backend"
-kind = "module"
-module = "vllm/model_executor/layers/fused_moe/oracle/mxfp4.py"
-symbol = "select_mxfp4_moe_backend"
-present = true
-fingerprint = "sha256:58a7106042a14752a19f60eb197874acac11f48b5c60e311e12861513e4877ea"
-
-[[patch_target]]
 name = "vllm.model_executor.layers.fused_moe.oracle.mxfp8.backend_to_kernel_cls"
 kind = "module"
 module = "vllm/model_executor/layers/fused_moe/oracle/mxfp8.py"
@@ -1270,14 +1262,6 @@ name = "vllm.model_executor.layers.quantization.mxfp4.select_deepseek_v4_mxfp4_m
 kind = "module"
 module = "vllm/model_executor/layers/quantization/mxfp4.py"
 symbol = "select_deepseek_v4_mxfp4_moe_backend"
-present = true
-fingerprint = "sha256:e96ed92fa9aff4c269a19021ece97f2ce9f1f377c1f4cf3eabb211bd94a02df0"
-
-[[patch_target]]
-name = "vllm.model_executor.layers.quantization.mxfp4.select_mxfp4_moe_backend"
-kind = "module"
-module = "vllm/model_executor/layers/quantization/mxfp4.py"
-symbol = "select_mxfp4_moe_backend"
 present = true
 fingerprint = "sha256:e96ed92fa9aff4c269a19021ece97f2ce9f1f377c1f4cf3eabb211bd94a02df0"
 
