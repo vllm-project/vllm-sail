@@ -198,7 +198,10 @@ _upstream_uses_fp4 = _indexer_module.dsa_indexer_uses_fp4
 @patch(
     _MODULE,
     "dsa_indexer_uses_fp4",
-    reason="PPU MXFP4 indexer support is supplied by SAIL DeepGEMM, not CUDA SM100.",
+    reason=(
+        "PPU MXFP4 indexer support is supplied by SAIL DeepGEMM, not CUDA "
+        "SM100, and sm_89 defaults indexer_kv_dtype to mxfp4."
+    ),
     affected_versions=_AFFECTED,
     remove_when="The indexer exposes a platform capability hook.",
 )
@@ -207,7 +210,14 @@ def dsa_indexer_uses_fp4(vllm_config):
 
     if not current_platform.is_ppu():
         return _upstream_uses_fp4(vllm_config)
-    kv_dtype = vllm_config.attention_config.resolve_indexer_kv_dtype("fp8")
+    # PPU MODIFICATION: begin -- sm_89 (ZW-890P) defaults to the MXFP4 indexer
+    # cache. It halves the per-token K cache (132B -> 68B) and keeps the whole
+    # indexer on the upstream Triton MXFP4 route instead of the INT8 quantising
+    # kernels that only exist for PPU 1.0. Upstream's fp8 default is kept on
+    # every other capability, where mxfp4 is rejected just below.
+    default_kv_dtype = "mxfp4" if current_platform.is_device_capability(89) else "fp8"
+    # PPU MODIFICATION: end
+    kv_dtype = vllm_config.attention_config.resolve_indexer_kv_dtype(default_kv_dtype)
     if kv_dtype not in _indexer_module.DSA_INDEXER_KV_DTYPES:
         raise ValueError(f"Unsupported PPU indexer_kv_dtype={kv_dtype!r}")
     if kv_dtype == "mxfp4" and not current_platform.is_device_capability(89):
