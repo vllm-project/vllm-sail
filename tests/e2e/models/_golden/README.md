@@ -56,7 +56,7 @@ either direction fails.
   "model_id": "T-HEAD/...",               // resolved against the offline cache
   "served_name": "deepseek-v4-mxfp4",
   "board": "ZW-M890P",
-  "tp": 8,                                // PPU count the container gets
+  "ppu_count": 8,                         // cards the container gets
   "extra_serve_flags": "--trust-remote-code",
   // null / omitted: use the evaluator's built-in argv.  A non-empty array
   // replaces that argv wholesale, so include every flag this case needs.
@@ -87,13 +87,13 @@ engine-ready budget. Mirror these keys in `MODEL_CONFIGS` of
 
 The parallel layout belongs to the case recipe, not to this example: a case
 pins whatever `--tensor-parallel-size` / `--data-parallel-size` its own recipe
-calls for, and `tp` above only says how many cards the container gets. Never
-add `--enforce-eager`: CI measures the production path, which runs with CUDA
-graphs captured, and eager mode would both hide a graph-capture regression and
-change the numbers the golden was recorded from. `--max-model-len 16384` is
-likewise part of every recipe — without it the server falls back to the
-checkpoint's 1M-token window and spends ~997s capturing graphs that no GSM8K
-sample can use.
+calls for, and `ppu_count` above only says how many cards the container gets.
+Never add `--enforce-eager`: CI measures the production path, which runs with
+CUDA graphs captured, and eager mode would both hide a graph-capture
+regression and change the numbers the golden was recorded from.
+`--max-model-len 16384` is likewise part of every recipe — without it the
+server falls back to the checkpoint's 1M-token window and spends ~997s
+capturing graphs that no GSM8K sample can use.
 
 `server_env` exists because some launch recipes need variables that no CLI flag
 expresses — `VLLM_ENGINE_READY_TIMEOUT_S` for a `--data-parallel-size 8
@@ -129,9 +129,13 @@ mirrored root (`_offline_runner.CHECKPOINT_ROOT_MIRRORS`).
     "num_expected": 1319
   },
   "serving": {
-    "tensor_parallel_size": 8,
-    "gpu_memory_utilization": 0.90,
-    "seed": 0
+    "ppu_count": 8,                  // cards the recorded run asked for
+    "tensor_parallel_size": 8,       // read off the argv that ran
+    "data_parallel_size": 1,
+    "enable_expert_parallel": false,
+    "gpu_memory_utilization": 0.9,   // null = the flag was not set
+    "max_model_len": 16384,          // null = the checkpoint's own window
+    "seed": 0                        // null = the engine's default seed
   },
   "score": 0.9742,                     // evalscope accuracy (0.0–1.0)
   "score_num": 1319,                   // number of evaluated samples
@@ -142,6 +146,20 @@ mirrored root (`_offline_runner.CHECKPOINT_ROOT_MIRRORS`).
   "measured_at": "2025-07-15T06:00:00+00:00"
 }
 ```
+
+`serving` records the layout the score was measured under. It is read off the
+argv that actually ran (`describe_serving`), not off `MODEL_CONFIGS`: a DP+EP
+recipe serves tensor parallel 1 and takes its memory fraction from its own
+flag, so copying the config defaults would publish numbers no process ran
+with. A field stays `null` when the argv does not pin it, which is why the
+committed seeded goldens carry `null` for the three flags their source row
+never recorded.
+
+For a seeded baseline it describes the production row named in
+`baseline_origin`, not today's CI case, so `ppu_count` and
+`tensor_parallel_size` may legitimately differ from the `Cards` column below --
+that difference is what `tolerance` is there to absorb. No gate reads this
+block; it exists so a human can tell what the number came from.
 
 Two optional fields mark a baseline that was not produced by a run of this
 suite. Neither takes part in comparison:
@@ -234,7 +252,7 @@ first run cannot silently become the baseline. Promote it by either:
 
 ## Model configurations
 
-| Model key | Chip | TP | Checkpoint | Baseline |
+| Model key | Chip | Cards | Checkpoint | Baseline |
 |-----------|------|----|-----------|----------|
 | `deepseek_v4_int8` | 890p | 8 | `DeepSeek-V4-Flash-0731-W8A8-INT8` | 0.9689 seeded |
 | `deepseek_v4_mxfp4` | 890p | 8 | `DeepSeek-V4-Flash-0731-MoE-Quant-W-MXFP4-A-MXFP4-Dense-Quant-W-FP8-PerChannel-A-FP8-PerToken` | 0.9689 seeded |
@@ -244,9 +262,9 @@ first run cannot silently become the baseline. Promote it by either:
 | `kimi_k2_6_mxfp4` | 890p | 8 | `Kimi-K2.6-MXFP4-FP8` | 0.9788 seeded |
 | `qwen3.8-flash-next` | 890p | 8 | `Qwen3.8-Flash-Next` | none |
 
-`TP` is the layout its catalog case currently serves with, not a property of
-the weight or of the golden: a case may switch to DP+EP or another TP without
-touching its baseline.
+`Cards` is the PPU count each catalog case asks the container for, not a
+property of the weight or of the golden: a case may switch to DP+EP or
+another TP without touching its baseline.
 
 `deepseek_v4_int8` is listed as `890p` because the nightly lane runs on the
 `8-ppu-m890p` runner even though its catalog `board` is `OAM-810E`. A run on a

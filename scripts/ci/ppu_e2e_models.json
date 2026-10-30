@@ -4,7 +4,7 @@
     "category": "smoke",
     "served_name": "qwen3.8-27b",
     "board": "OAM-810E",
-    "tp": 2,
+    "ppu_count": 2,
     "extra_serve_flags": "--trust-remote-code",
     "model_id": "Qwen/Qwen3.8-27B"
   },
@@ -13,7 +13,7 @@
     "category": "smoke",
     "served_name": "qwen3.8-27b",
     "board": "ZW-M890P",
-    "tp": 2,
+    "ppu_count": 2,
     "extra_serve_flags": "--trust-remote-code",
     "model_id": "Qwen/Qwen3.8-27B"
   },
@@ -24,7 +24,7 @@
     "model_id": "T-HEAD/DeepSeek-V4-Flash-0731-W8A8-INT8",
     "served_name": "deepseek-v4-int8",
     "board": "OAM-810E",
-    "tp": 8,
+    "ppu_count": 8,
     "extra_serve_flags": "--trust-remote-code",
     "server_cmd": null
   },
@@ -35,7 +35,7 @@
     "model_id": "T-HEAD/DeepSeek-V4-Flash-0731-MoE-Quant-W-MXFP4-A-MXFP4-Dense-Quant-W-FP8-PerChannel-A-FP8-PerToken",
     "served_name": "deepseek-v4-mxfp4",
     "board": "ZW-M890P",
-    "tp": 8,
+    "ppu_count": 8,
     "extra_serve_flags": "--trust-remote-code",
     "server_cmd": null
   },
@@ -46,7 +46,7 @@
     "model_id": "T-HEAD/MiniMax-M3-Quant-W-FP8-PerChannel-A-FP8-PerToken",
     "served_name": "MiniMax-M3-Quant-W-FP8-PerChannel-A-FP8-PerToken",
     "board": "ZW-M890P",
-    "tp": 8,
+    "ppu_count": 8,
     "extra_serve_flags": "--trust-remote-code",
     "server_cmd": null
   },
@@ -57,7 +57,7 @@
     "model_id": "T-HEAD/DeepSeek-V4-Flash-0731-W8A8-INT8",
     "served_name": "deepseek-v4-int8",
     "board": "OAM-810E",
-    "tp": 8,
+    "ppu_count": 8,
     "extra_serve_flags": "--trust-remote-code",
     "server_env": {
       "VLLM_ENGINE_READY_TIMEOUT_S": "6000"
@@ -90,7 +90,7 @@
     "model_id": "T-HEAD/DeepSeek-V4-Flash-0731-MoE-Quant-W-MXFP4-A-MXFP4-Dense-Quant-W-FP8-PerChannel-A-FP8-PerToken",
     "served_name": "deepseek-v4-mxfp4",
     "board": "ZW-M890P",
-    "tp": 8,
+    "ppu_count": 8,
     "extra_serve_flags": "--trust-remote-code",
     "server_env": {
       "VLLM_ENGINE_READY_TIMEOUT_S": "6000"
@@ -123,7 +123,7 @@
     "model_id": "T-HEAD/GLM-5.3-MoE-Quant-W-MXFP4-A-MXFP4-Dense-Quant-W-FP8-PerChannel-A-FP8-PerToken",
     "served_name": "glm-5.3-mxfp4",
     "board": "ZW-M890P",
-    "tp": 4,
+    "ppu_count": 4,
     "extra_serve_flags": "--trust-remote-code",
     "server_cmd": [
       "vllm", "serve", "{model}",
@@ -146,7 +146,7 @@
     "model_id": "T-HEAD/GLM-5.3-Flash-MoE-Quant-W-MXFP4-A-MXFP4-Dense-Quant-W-FP8-PerChannel-A-FP8-PerToken",
     "served_name": "glm-5.3-flash-mxfp4",
     "board": "ZW-M890P",
-    "tp": 2,
+    "ppu_count": 2,
     "extra_serve_flags": "--trust-remote-code",
     "server_cmd": [
       "vllm", "serve", "{model}",
@@ -170,7 +170,7 @@
     "model_id": "T-HEAD/Kimi-K2.6-MXFP4-FP8",
     "served_name": "kimi-k2.6-mxfp4",
     "board": "ZW-M890P",
-    "tp": 8,
+    "ppu_count": 8,
     "extra_serve_flags": "--trust-remote-code",
     "server_env": {
       "DG_USE_MOE_DYNAMIC_TILE": "1",

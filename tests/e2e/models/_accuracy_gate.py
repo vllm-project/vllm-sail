@@ -23,6 +23,8 @@ from pathlib import Path
 from typing import Any
 
 from tests.e2e.models._offline_runner import (
+    DEFAULT_GPU_MEMORY_UTILIZATION,
+    DEFAULT_SEED,
     PENDING_REVIEW_SUFFIX,
     _checkpoint_tail,
 )
@@ -68,6 +70,60 @@ def pending_golden_filename(model_key: str, chip: str) -> str:
 
 
 # --- Golden record builder --------------------------------------------------
+
+
+def _argv_value(argv: list[str], flag: str) -> str | None:
+    """Return ``flag``'s value in ``argv``, accepting ``--flag value`` and
+    ``--flag=value`` alike.  ``None`` when the flag is absent or valueless."""
+    for index, token in enumerate(argv):
+        if token == flag:
+            return argv[index + 1] if index + 1 < len(argv) else None
+        prefix = flag + "="
+        if token.startswith(prefix):
+            return token[len(prefix) :]
+    return None
+
+
+def describe_serving(
+    argv: list[str],
+    *,
+    ppu_count: int,
+    gpu_memory_utilization: float = DEFAULT_GPU_MEMORY_UTILIZATION,
+    seed: int = DEFAULT_SEED,
+) -> dict[str, Any]:
+    """Report the serve layout the recorded score was measured under.
+
+    The layout lives in the per-case argv, not in ``MODEL_CONFIGS``: the
+    DeepSeek DP+EP cases run tensor parallel 1 with ``--data-parallel-size 8
+    --enable-expert-parallel``, and take their memory fraction from their own
+    flag.  Copying the config defaults into the record instead would publish
+    numbers no process ever ran with.
+
+    ``ppu_count`` is the card count the job requested.  For a recipe that
+    keeps its parallelism inside one process it equals the tensor parallel
+    size, but for DP+EP it does not, so the two are recorded separately.
+    """
+
+    def value(flag: str, convert: Any, default: Any) -> Any:
+        raw = _argv_value(argv, flag)
+        return default if raw is None else convert(raw)
+
+    return {
+        "ppu_count": int(ppu_count),
+        # vLLM defaults both sizes to 1, and a DP+EP recipe sets only the
+        # second one.
+        "tensor_parallel_size": value("--tensor-parallel-size", int, 1),
+        "data_parallel_size": value("--data-parallel-size", int, 1),
+        "enable_expert_parallel": "--enable-expert-parallel" in argv,
+        "gpu_memory_utilization": value(
+            "--gpu-memory-utilization", float, gpu_memory_utilization
+        ),
+        # ``None`` means "whatever the checkpoint declares".  That is worth
+        # recording: an unset window is how one recipe spent ~997s capturing
+        # graphs no GSM8K sample can use.
+        "max_model_len": value("--max-model-len", int, None),
+        "seed": value("--seed", int, seed),
+    }
 
 
 def build_accuracy_golden(

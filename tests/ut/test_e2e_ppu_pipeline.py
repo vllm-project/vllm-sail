@@ -62,7 +62,7 @@ def _workflow(path: Path) -> dict:
 def test_models_catalog_is_partitioned_by_category_and_contract() -> None:
     catalog = _catalog()
     assert isinstance(catalog, list) and catalog
-    common = {"key", "served_name", "board", "tp"}
+    common = {"key", "served_name", "board", "ppu_count"}
     for entry in catalog:
         assert common <= set(entry), entry
         category = entry.get("category", "smoke")
@@ -107,12 +107,12 @@ def test_qwen_smoke_catalog_targets_both_boards(key: str, board: str) -> None:
     assert qwen["board"] == board
     selected = _load_select().build_matrix(_catalog(), key)["include"][0]
     assert selected["checkpoint"] == selected["model_id"]
-    assert int(qwen["tp"]) == 2
+    assert int(qwen["ppu_count"]) == 2
     assert qwen["served_name"] == "qwen3.8-27b"
     assert qwen["extra_serve_flags"] == "--trust-remote-code"
 
 
-def test_accuracy_catalog_keeps_model_ids_and_per_model_tp() -> None:
+def test_accuracy_catalog_keeps_model_ids_and_per_model_card_count() -> None:
     accuracy = {
         entry["key"]: entry for entry in _catalog() if entry["category"] == "accuracy"
     }
@@ -121,13 +121,14 @@ def test_accuracy_catalog_keeps_model_ids_and_per_model_tp() -> None:
     )
     assert accuracy["deepseek-v4-int8"]["board"] == "OAM-810E"
     assert accuracy["deepseek-v4-mxfp4"]["board"] == "ZW-M890P"
-    # TP (== PPU count handed to the container) is per case, not per chip:
+    # The card count handed to the container is per case, not per chip:
     # GLM-5.3 needs a TP4 prefill recipe and GLM-5.3-Flash a TP2 one, while
-    # every DeepSeek/Kimi case takes all eight cards.
-    assert accuracy["glm-5.3-mxfp4-tp4"]["tp"] == 4
-    assert accuracy["glm-5.3-flash-mxfp4-tp2"]["tp"] == 2
+    # every DeepSeek/Kimi case takes all eight cards.  A DP+EP case splits
+    # those cards across data parallel ranks, so this is not its TP size.
+    assert accuracy["glm-5.3-mxfp4-tp4"]["ppu_count"] == 4
+    assert accuracy["glm-5.3-flash-mxfp4-tp2"]["ppu_count"] == 2
     others = {
-        key: entry["tp"]
+        key: entry["ppu_count"]
         for key, entry in accuracy.items()
         if key not in {"glm-5.3-mxfp4-tp4", "glm-5.3-flash-mxfp4-tp2"}
     }
@@ -225,7 +226,7 @@ def test_accuracy_matrix_keeps_multiple_cases_over_one_checkpoint() -> None:
             "model_key": "deepseek_v4_mxfp4",
             "model_id": "T-HEAD/ckpt",
             "board": "ZW-M890P",
-            "tp": 8,
+            "ppu_count": 8,
             "server_cmd": None,
         },
         {
@@ -234,7 +235,7 @@ def test_accuracy_matrix_keeps_multiple_cases_over_one_checkpoint() -> None:
             "model_key": "deepseek_v4_mxfp4",
             "model_id": "T-HEAD/ckpt",
             "board": "ZW-M890P",
-            "tp": 8,
+            "ppu_count": 8,
             "server_cmd": ["vllm", "serve", "{model}", "--enable-expert-parallel"],
         },
     ]
@@ -323,7 +324,7 @@ def test_accuracy_matrix_forwards_server_env() -> None:
             "model_key": "deepseek_v4_mxfp4",
             "model_id": "T-HEAD/ckpt",
             "board": "ZW-M890P",
-            "tp": 8,
+            "ppu_count": 8,
             "server_env": {"VLLM_ENGINE_READY_TIMEOUT_S": "6000"},
         },
         {
@@ -332,7 +333,7 @@ def test_accuracy_matrix_forwards_server_env() -> None:
             "model_key": "minimax-m3-fp8",
             "model_id": "T-HEAD/ckpt2",
             "board": "ZW-M890P",
-            "tp": 8,
+            "ppu_count": 8,
         },
     ]
     by_case = {
@@ -359,11 +360,12 @@ def test_accuracy_catalog_resolves_against_the_evaluator_configs() -> None:
         # One weight, one config: the id may not drift between the two.
         assert config["model_id"] == entry["model_id"], key
         assert config["served_name"] == entry["served_name"], key
-        # A config may leave ``chip``/``tp`` implicit and take the defaults.
+        # A config may leave ``chip``/``ppu_count`` implicit and take the
+        # defaults.
         chip = config.get("chip") or evaluator.DEFAULT_CHIP
         assert chip == board_to_chip[entry["board"]], key
-        expected_tp = config.get("tp") or evaluator.tensor_parallel_for_chip(chip)
-        assert expected_tp == int(entry["tp"]), key
+        expected = config.get("ppu_count") or evaluator.tensor_parallel_for_chip(chip)
+        assert expected == int(entry["ppu_count"]), key
 
 
 def test_committed_goldens_describe_their_own_checkpoint() -> None:
@@ -396,6 +398,69 @@ def test_committed_goldens_describe_their_own_checkpoint() -> None:
         assert golden["checkpoint_tail"] == model_id, path.name
 
 
+def test_describe_serving_reads_the_layout_off_the_argv() -> None:
+    """A DP+EP recipe must not be recorded as tensor parallel 8.
+
+    The layout only exists in the per-case argv, so anything derived from
+    ``MODEL_CONFIGS`` would publish a parallel size no process ever used.
+    """
+    evaluator = _load_evaluator()
+    layout = evaluator.describe_serving(
+        [
+            "vllm",
+            "serve",
+            "T-HEAD/ckpt",
+            "--data-parallel-size",
+            "8",
+            "--enable-expert-parallel",
+            "--gpu-memory-utilization",
+            "0.9",
+            "--max-model-len",
+            "16384",
+        ],
+        ppu_count=8,
+    )
+    assert layout == {
+        "ppu_count": 8,
+        "tensor_parallel_size": 1,
+        "data_parallel_size": 8,
+        "enable_expert_parallel": True,
+        "gpu_memory_utilization": 0.9,
+        "max_model_len": 16384,
+        "seed": evaluator.DEFAULT_SEED,
+    }
+
+
+def test_describe_serving_accepts_the_equals_form_and_records_an_unset_window() -> None:
+    """``--flag=value`` is valid argv; an unset window stays visibly unset."""
+    evaluator = _load_evaluator()
+    layout = evaluator.describe_serving(
+        ["vllm", "serve", "ckpt", "--tensor-parallel-size=4"], ppu_count=4
+    )
+    assert layout["tensor_parallel_size"] == 4
+    assert layout["data_parallel_size"] == 1
+    assert layout["max_model_len"] is None
+
+
+def test_committed_goldens_report_the_recipe_that_produced_them() -> None:
+    """``serving`` has to stay a real layout, not a copy of the defaults."""
+    required = {
+        "ppu_count",
+        "tensor_parallel_size",
+        "data_parallel_size",
+        "enable_expert_parallel",
+        "gpu_memory_utilization",
+        "max_model_len",
+        "seed",
+    }
+    for path in sorted(GOLDEN.glob("accuracy_*.json")):
+        serving = json.loads(path.read_text())["serving"]
+        assert set(serving) == required, path.name
+        # Cards asked for can never be fewer than the parallelism they host.
+        assert serving["ppu_count"] >= serving["tensor_parallel_size"], path.name
+        assert serving["ppu_count"] >= serving["data_parallel_size"], path.name
+
+
 def test_golden_coverage_names_the_weight_without_a_baseline() -> None:
     """Every accuracy weight has a golden except the one with no reference.
 
@@ -420,7 +485,7 @@ def test_accuracy_matrix_rejects_entry_without_model_key() -> None:
             "category": "accuracy",
             "model_id": "T-HEAD/ckpt",
             "board": "ZW-M890P",
-            "tp": 8,
+            "ppu_count": 8,
         }
     ]
     with pytest.raises(ValueError, match="missing 'model_key'"):

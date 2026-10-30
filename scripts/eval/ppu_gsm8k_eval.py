@@ -49,6 +49,7 @@ from tests.e2e.models._accuracy_gate import (  # noqa: E402
     check_accuracy_golden,
     check_golden_identity,
     check_score_threshold,
+    describe_serving,
     golden_filename,
     pending_golden_filename,
     read_golden,
@@ -107,7 +108,7 @@ MODEL_CONFIGS: dict[str, dict[str, Any]] = {
         #   heads_per_group = n_local_heads // n_local_groups
         # which divides by zero when TP > o_groups because
         #   n_local_groups = o_groups // tp_size = 8 // 16 = 0.
-        "tp": 8,
+        "ppu_count": 8,
     },
     "deepseek_v4_mxfp4": {
         "model_id": (
@@ -137,7 +138,7 @@ MODEL_CONFIGS: dict[str, dict[str, Any]] = {
         "extra_flags": ["--trust-remote-code"],
         "chip": "890p",
         # Half of a 890P node: the prefill recipe only needs four cards.
-        "tp": 4,
+        "ppu_count": 4,
     },
     "glm_5_3_flash_mxfp4": {
         "model_id": (
@@ -147,14 +148,14 @@ MODEL_CONFIGS: dict[str, dict[str, Any]] = {
         "served_name": "glm-5.3-flash-mxfp4",
         "extra_flags": ["--trust-remote-code"],
         "chip": "890p",
-        "tp": 2,
+        "ppu_count": 2,
     },
     "kimi_k2_6_mxfp4": {
         "model_id": "T-HEAD/Kimi-K2.6-MXFP4-FP8",
         "served_name": "kimi-k2.6-mxfp4",
         "extra_flags": ["--trust-remote-code"],
         "chip": "890p",
-        "tp": 8,
+        "ppu_count": 8,
     },
     "qwen3.8-flash-next": {
         "model_id": "Qwen/Qwen3.8-Flash-Next",
@@ -224,6 +225,60 @@ def _parse_server_env(raw: str | None) -> dict[str, str] | None:
     return value
 
 
+def build_serve_argv(
+    model: str,
+    *,
+    served_model_name: str,
+    port: int = 9985,
+    tp: int = 8,
+    extra_flags: list[str] | None = None,
+    server_cmd: list[str] | None = None,
+) -> list[str]:
+    """Return the ``vllm serve`` argv this case will actually run.
+
+    ``server_cmd`` replaces the built-in argument list entirely when present.
+    It is a pure function so the golden can describe the layout the process
+    was started with instead of guessing from ``MODEL_CONFIGS``.
+
+    ``tp`` only shapes the built-in list: a recipe that ships its own argv
+    picks its own parallelism there, and this value then serves as nothing but
+    the card count the job requested.
+    """
+    if server_cmd:
+        return [
+            _expand_server_placeholders(
+                token,
+                model=model,
+                port=port,
+                served_name=served_model_name,
+            )
+            for token in server_cmd
+        ]
+    cmd = [
+        "vllm",
+        "serve",
+        model,
+        "--served-model-name",
+        served_model_name,
+        "--host",
+        "127.0.0.1",
+        "--port",
+        str(port),
+        "--tensor-parallel-size",
+        str(tp),
+        "--gpu-memory-utilization",
+        str(DEFAULT_GPU_MEMORY_UTILIZATION),
+        "--max-model-len",
+        str(DEFAULT_MAX_MODEL_LEN),
+        "--trust-remote-code",
+        "--seed",
+        str(DEFAULT_SEED),
+    ]
+    if extra_flags:
+        cmd.extend(extra_flags)
+    return cmd
+
+
 def start_vllm_server(
     model: str,
     *,
@@ -249,39 +304,14 @@ def start_vllm_server(
     """
     if log_path is None:
         log_path = Path("/tmp/vllm_serve_gsm8k.log")
-    if server_cmd:
-        cmd: list[str] = [
-            _expand_server_placeholders(
-                token,
-                model=model,
-                port=port,
-                served_name=served_model_name,
-            )
-            for token in server_cmd
-        ]
-    else:
-        cmd = [
-            "vllm",
-            "serve",
-            model,
-            "--served-model-name",
-            served_model_name,
-            "--host",
-            "127.0.0.1",
-            "--port",
-            str(port),
-            "--tensor-parallel-size",
-            str(tp),
-            "--gpu-memory-utilization",
-            str(DEFAULT_GPU_MEMORY_UTILIZATION),
-            "--max-model-len",
-            str(DEFAULT_MAX_MODEL_LEN),
-            "--trust-remote-code",
-            "--seed",
-            str(DEFAULT_SEED),
-        ]
-        if extra_flags:
-            cmd.extend(extra_flags)
+    cmd = build_serve_argv(
+        model,
+        served_model_name=served_model_name,
+        port=port,
+        tp=tp,
+        extra_flags=extra_flags,
+        server_cmd=server_cmd,
+    )
     env = None
     if server_env:
         # A DP+EP launch needs its own engine-ready budget; the value given by
@@ -567,15 +597,18 @@ def run_accuracy_eval(  # noqa: C901
             raise RuntimeError("no CUDA device available")
         cap = torch.cuda.get_device_capability(0)
         chip = CAPABILITY_TO_CHIP.get((cap[0], cap[1]), DEFAULT_CHIP)
-    # Per-model TP override (e.g. DeepSeek-V4 o_groups=8 caps at TP=8).
-    tp = model_cfg.get("tp") or tensor_parallel_for_chip(chip)
+    # Per-model card count override (e.g. DeepSeek-V4 o_groups=8 caps TP at
+    # 8).  A recipe whose parallelism stays inside one process spends all of
+    # these cards on tensor parallel; a DP+EP recipe splits them across data
+    # parallel ranks instead.
+    ppu_count = model_cfg.get("ppu_count") or tensor_parallel_for_chip(chip)
 
     # -- guard: enough GPUs? ------------------------------------------
     import torch
 
-    if torch.cuda.device_count() < tp:
+    if torch.cuda.device_count() < ppu_count:
         raise RuntimeError(
-            f"need {tp} GPUs for chip {chip!r} but only "
+            f"need {ppu_count} GPUs for chip {chip!r} but only "
             f"{torch.cuda.device_count()} available"
         )
 
@@ -600,11 +633,22 @@ def run_accuracy_eval(  # noqa: C901
     log_path = wd / f"vllm_serve_{case_id or model_key}.log"
 
     # -- start server -------------------------------------------------
+    # Built here as well as inside ``start_vllm_server`` so the golden records
+    # the args the process really ran with; a pure function yields the same
+    # argv from the same inputs.
+    serve_argv = build_serve_argv(
+        model_id,
+        served_model_name=unique_served,
+        port=port,
+        tp=ppu_count,
+        extra_flags=flags,
+        server_cmd=server_cmd,
+    )
     server, log_path = start_vllm_server(
         model_id,
         served_model_name=unique_served,
         port=port,
-        tp=tp,
+        tp=ppu_count,
         extra_flags=flags,
         server_cmd=server_cmd,
         server_env=server_env,
@@ -652,11 +696,7 @@ def run_accuracy_eval(  # noqa: C901
             "subset_list": ["main"],
             "num_expected": GSM8K_FULL_SIZE,
         }
-        srv_cfg: dict[str, Any] = {
-            "tensor_parallel_size": tp,
-            "gpu_memory_utilization": (DEFAULT_GPU_MEMORY_UTILIZATION),
-            "seed": DEFAULT_SEED,
-        }
+        srv_cfg: dict[str, Any] = describe_serving(serve_argv, ppu_count=ppu_count)
         tol = dict(DEFAULT_TOLERANCE)
         record = build_accuracy_golden(
             model_key=model_key,
