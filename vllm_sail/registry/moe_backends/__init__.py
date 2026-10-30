@@ -90,13 +90,10 @@ _ORACLE_ALIAS_CONSUMERS = {
             "vllm.model_executor.layers.quantization.online.mxfp4",
             "vllm.model_executor.layers.quantization.quark.quark_moe",
         ),
-        "select_mxfp4_moe_backend": (
-            "vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe.compressed_tensors_moe_w4a4_mxfp4",
-            "vllm.model_executor.layers.quantization.inc.schemes.inc_mxfp4_moe",
-            "vllm.model_executor.layers.quantization.mxfp4",
-            "vllm.model_executor.layers.quantization.online.mxfp4",
-            "vllm.model_executor.layers.quantization.quark.quark_moe",
-        ),
+        # select_mxfp4_moe_backend is absent on purpose: the PPU differences
+        # live in the helpers it calls (map_mxfp4_backend,
+        # backend_to_kernel_cls, _backend_activation_key), so upstream's selector
+        # object is never replaced and a consumer's captured alias stays valid.
         "select_deepseek_v4_mxfp4_moe_backend": (
             "vllm.model_executor.layers.quantization.mxfp4",
         ),
