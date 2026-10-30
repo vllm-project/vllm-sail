@@ -185,6 +185,42 @@ def test_evalscope_budget_stays_below_the_served_window(
     Set to the served window instead, one broken sample would burn the whole
     night's budget.
     """
+    captured = _capture_task_config(evaluator, monkeypatch)
+
+    evaluator.run_evalscope("demo-run-abc", 9999, "/data/gsm8k")
+    generation = captured["generation_config"]
+    assert generation["max_tokens"] == 10240
+    assert generation["max_tokens"] < evaluator.DEFAULT_MAX_MODEL_LEN
+
+
+def test_evalscope_passes_the_weight_contract_through(
+    evaluator: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Sampling parameters are forwarded verbatim, knobs the SDK lacks included.
+
+    evalscope moves whatever the OpenAI SDK rejects (``top_k``, ``min_p``)
+    into ``extra_body``, so the evaluator must not filter them here.
+    """
+    captured = _capture_task_config(evaluator, monkeypatch)
+    contract = {
+        "temperature": 1.0,
+        "top_p": 0.95,
+        "top_k": 20,
+        "min_p": 0.0,
+        "max_tokens": 10240,
+    }
+
+    evaluator.run_evalscope(
+        "demo-run-abc", 9999, "/data/gsm8k", generation_config=contract
+    )
+
+    assert captured["generation_config"] == contract
+
+
+def _capture_task_config(
+    evaluator: Any, monkeypatch: pytest.MonkeyPatch
+) -> dict[str, Any]:
+    """Run evalscope against a stubbed ``TaskConfig`` and return its kwargs."""
     captured: dict[str, Any] = {}
 
     class _FakeTaskConfig:
@@ -195,11 +231,7 @@ def test_evalscope_budget_stays_below_the_served_window(
     fake.TaskConfig = _FakeTaskConfig
     fake.run_task = lambda **_kwargs: {"gsm8k": None}
     monkeypatch.setitem(sys.modules, "evalscope", fake)
-
-    evaluator.run_evalscope("demo-run-abc", 9999, "/data/gsm8k")
-    generation = captured["generation_config"]
-    assert generation["max_tokens"] == 8192
-    assert generation["max_tokens"] < evaluator.DEFAULT_MAX_MODEL_LEN
+    return captured
 
 
 def _capture_popen(

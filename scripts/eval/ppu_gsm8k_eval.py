@@ -47,6 +47,7 @@ from tests.e2e.models._accuracy_gate import (  # noqa: E402
     GSM8K_FULL_SIZE,
     build_accuracy_golden,
     check_accuracy_golden,
+    check_generation_config,
     check_golden_identity,
     check_score_threshold,
     describe_serving,
@@ -96,6 +97,47 @@ if not GSM8K_DATASET_PATH:
 # --- Golden / reports directories ------------------------------------------
 GOLDEN_DIR = _PROJECT_ROOT / "tests" / "e2e" / "models" / "_golden"
 
+# --- Generation parameters -------------------------------------------------
+# Sampling parameters belong to the weights, not to a case: two cases over one
+# checkpoint are compared against that checkpoint's single golden, so they must
+# be measured under one contract or their scores are not comparable.  A case
+# that needs a different layout changes its serve argv, never these values.
+#
+# ``max_tokens`` stays below ``DEFAULT_MAX_MODEL_LEN``: a model that starts
+# repeating never emits EOS, and one sample would otherwise burn the whole
+# served window.
+DEFAULT_MAX_TOKENS = 10240
+# Fallback only: every weight in ``MODEL_CONFIGS`` carries its own contract, and
+# a weight added without one falls back to greedy -- the reproducible choice.
+DEFAULT_GENERATION_CONFIG: dict[str, Any] = {
+    "temperature": 0.0,
+    "top_p": 0.95,
+    "max_tokens": DEFAULT_MAX_TOKENS,
+}
+
+
+def _generation(
+    *,
+    temperature: float,
+    top_p: float,
+    **extra: Any,
+) -> dict[str, Any]:
+    """Build the sampling parameters one weight is measured under.
+
+    ``temperature`` / ``top_p`` follow the team's reference generation config
+    for that weight family; ``max_tokens`` is ours and stays uniform.  Extra
+    keys (`top_k`, `min_p`, the penalties) are passed through as-is: evalscope
+    moves whatever the OpenAI SDK does not accept into ``extra_body``, and
+    vLLM reads it from there.
+    """
+    return {
+        "temperature": temperature,
+        "top_p": top_p,
+        "max_tokens": DEFAULT_MAX_TOKENS,
+        **extra,
+    }
+
+
 # --- Model configurations --------------------------------------------------
 MODEL_CONFIGS: dict[str, dict[str, Any]] = {
     "deepseek_v4_int8": {
@@ -109,6 +151,8 @@ MODEL_CONFIGS: dict[str, dict[str, Any]] = {
         # which divides by zero when TP > o_groups because
         #   n_local_groups = o_groups // tp_size = 8 // 16 = 0.
         "ppu_count": 8,
+        # reference_generation_config.json: deepseek_v4_flash
+        "generation_config": _generation(temperature=1.0, top_p=1.0),
     },
     "deepseek_v4_mxfp4": {
         "model_id": (
@@ -119,6 +163,8 @@ MODEL_CONFIGS: dict[str, dict[str, Any]] = {
         "served_name": "deepseek-v4-mxfp4",
         "extra_flags": ["--trust-remote-code"],
         "chip": "890p",
+        # Same weights family as the int8 case: one contract, one golden.
+        "generation_config": _generation(temperature=1.0, top_p=1.0),
     },
     "minimax-m3-fp8": {
         "model_id": ("T-HEAD/MiniMax-M3-Quant-W-FP8-PerChannel-A-FP8-PerToken"),
@@ -128,6 +174,8 @@ MODEL_CONFIGS: dict[str, dict[str, Any]] = {
         # falls back to 810e and the golden would be filed under the wrong
         # board.
         "chip": "890p",
+        # reference_generation_config.json: minimax_m3
+        "generation_config": _generation(temperature=1.0, top_p=0.95),
     },
     "glm_5_3_mxfp4": {
         "model_id": (
@@ -139,6 +187,8 @@ MODEL_CONFIGS: dict[str, dict[str, Any]] = {
         "chip": "890p",
         # Half of a 890P node: the prefill recipe only needs four cards.
         "ppu_count": 4,
+        # reference_generation_config.json: glm_5_3
+        "generation_config": _generation(temperature=1.0, top_p=1.0),
     },
     "glm_5_3_flash_mxfp4": {
         "model_id": (
@@ -149,6 +199,8 @@ MODEL_CONFIGS: dict[str, dict[str, Any]] = {
         "extra_flags": ["--trust-remote-code"],
         "chip": "890p",
         "ppu_count": 2,
+        # No row of its own in the reference config: same family as glm_5_3.
+        "generation_config": _generation(temperature=1.0, top_p=1.0),
     },
     "kimi_k2_6_mxfp4": {
         "model_id": "T-HEAD/Kimi-K2.6-MXFP4-FP8",
@@ -156,11 +208,23 @@ MODEL_CONFIGS: dict[str, dict[str, Any]] = {
         "extra_flags": ["--trust-remote-code"],
         "chip": "890p",
         "ppu_count": 8,
+        # reference_generation_config.json: kimi_k2_6
+        "generation_config": _generation(temperature=1.0, top_p=0.95),
     },
     "qwen3.8-flash-next": {
         "model_id": "Qwen/Qwen3.8-Flash-Next",
         "served_name": "Qwen3.8-Flash-Next",
         "extra_flags": ["--trust-remote-code"],
+        # No row of its own: reference_generation_config.json gives every
+        # qwen3_8 weight the same sampling parameters.
+        "generation_config": _generation(
+            temperature=1.0,
+            top_p=0.95,
+            top_k=20,
+            min_p=0.0,
+            presence_penalty=0.0,
+            repetition_penalty=1.0,
+        ),
     },
 }
 
@@ -501,12 +565,22 @@ def run_evalscope(
     port: int,
     gsm8k_path: str,
     *,
+    generation_config: dict[str, Any] | None = None,
     limit: int | None = None,
     work_dir: Path | None = None,
 ) -> Any:
-    """Run evalscope GSM8K (runtime import)."""
+    """Run evalscope GSM8K (runtime import).
+
+    ``generation_config`` is the sampling contract of the weights under test;
+    it is passed through to ``TaskConfig`` untouched so every case over one
+    checkpoint samples identically.  The benchmark settings around it --
+    dataset, few-shot, batch size, seed -- stay shared by all cases.
+    """
     from evalscope import TaskConfig, run_task  # type: ignore[import-untyped]
 
+    generation = dict(
+        DEFAULT_GENERATION_CONFIG if generation_config is None else generation_config
+    )
     cfg = TaskConfig(
         model=served_name,
         api_url=f"http://127.0.0.1:{port}/v1",
@@ -521,13 +595,7 @@ def run_evalscope(
                 "subset_list": ["main"],
             }
         },
-        generation_config={
-            "temperature": 0,
-            # Rather than the served context: a model that starts repeating
-            # never hits EOS and would otherwise burn the full window on every
-            # sample, turning one broken case into hours.
-            "max_tokens": 8192,
-        },
+        generation_config=generation,
         eval_batch_size=128,
         limit=limit,
         seed=42,
@@ -585,6 +653,11 @@ def run_accuracy_eval(  # noqa: C901
             f"unknown model key {model_key!r}; available: {sorted(MODEL_CONFIGS)}"
         )
     model_cfg = MODEL_CONFIGS[model_key]
+    # Sampling parameters belong to the weights: the DP+EP case and the plain
+    # case over one checkpoint share them, and therefore share one golden.
+    generation_cfg = dict(
+        model_cfg.get("generation_config") or DEFAULT_GENERATION_CONFIG
+    )
 
     # -- resolve model ------------------------------------------------
     model_id = model_override or model_cfg["model_id"]
@@ -674,6 +747,7 @@ def run_accuracy_eval(  # noqa: C901
             unique_served,
             port,
             gsm8k_path,
+            generation_config=generation_cfg,
             limit=limit,
             work_dir=wd / "evalscope",
         )
@@ -705,8 +779,11 @@ def run_accuracy_eval(  # noqa: C901
             evalscope_version=es_ver,
             dataset_cfg=ds_cfg,
             serving_cfg=srv_cfg,
+            generation_cfg=generation_cfg,
             score=score,
-            score_num=num,
+            # Correct answers, not samples asked: ``num`` is the sample count
+            # and the score is ``score_num / num``.
+            score_num=round(score * num),
             tolerance=tol,
         )
 
@@ -791,10 +868,19 @@ def _golden_compare(
             status = "fail_identity"
             error_msg = id_err
         else:
-            # The band replaces the threshold gate entirely here.
-            ok_g, acc_err = check_accuracy_golden(score, num, golden)
-            status = "pass" if ok_g else "fail_accuracy"
-            error_msg = acc_err
+            # A score recorded under different sampling parameters cannot
+            # arbitrate this run, so the contract is settled before the band:
+            # fail_config names the drifted knob instead of reporting the
+            # accuracy delta it caused.
+            ok_cfg, cfg_err = check_generation_config(golden, record["generation"])
+            if not ok_cfg:
+                status = "fail_config"
+                error_msg = cfg_err
+            else:
+                # The band replaces the threshold gate entirely here.
+                ok_g, acc_err = check_accuracy_golden(score, num, golden)
+                status = "pass" if ok_g else "fail_accuracy"
+                error_msg = acc_err
     elif not ok_thr:
         # No golden yet; threshold is the only gate.
         write_golden(record, pending_gf)

@@ -114,9 +114,17 @@ def test_invalid_scores_are_rejected() -> None:
 # ---------------------------------------------------------------------------
 
 
+#: The sampling contract every golden in these tests was recorded under.
+_GENERATION: dict[str, Any] = {
+    "temperature": 1.0,
+    "top_p": 0.95,
+    "max_tokens": 10240,
+}
+
+
 def _make_golden(
     score: float = 0.92,
-    score_num: int = 1319,
+    score_num: int | None = None,
     **overrides: Any,
 ) -> dict[str, Any]:
     """Helper: build a golden record with sensible defaults."""
@@ -136,8 +144,9 @@ def _make_golden(
             "gpu_memory_utilization": 0.9,
             "seed": 0,
         },
+        "generation_cfg": dict(_GENERATION),
         "score": score,
-        "score_num": score_num,
+        "score_num": round(score * 1319) if score_num is None else score_num,
     }
     kwargs.update(overrides)
     return gate.build_accuracy_golden(**kwargs)
@@ -150,7 +159,9 @@ def test_build_golden_has_required_fields() -> None:
     assert record["chip"] == "890p"
     assert record["benchmark"] == "gsm8k"
     assert record["score"] == 0.92
-    assert record["score_num"] == 1319
+    # Correct answers, not samples asked.
+    assert record["score_num"] == round(0.92 * 1319)
+    assert record["generation"] == _GENERATION
     assert "measured_at" in record
     assert "tolerance" in record
     assert record["checkpoint_tail"] is not None
@@ -278,6 +289,59 @@ def test_gates_are_evaluated_in_order() -> None:
     ok, err = gate.check_accuracy_golden(0.5, 100, golden)
     assert ok is False
     assert "completeness" in err
+
+
+# ---------------------------------------------------------------------------
+# check_generation_config — the golden and the run must sample alike.
+# ---------------------------------------------------------------------------
+
+
+def test_generation_gate_passes_on_the_same_contract() -> None:
+    golden = _make_golden()
+    assert gate.check_generation_config(golden, dict(_GENERATION)) == (True, None)
+
+
+def test_generation_gate_tolerates_int_float_spelling() -> None:
+    """A hand-edited ``1`` must compare equal to the recorded ``1.0``."""
+    golden = _make_golden(
+        generation_cfg={"temperature": 1, "max_tokens": 10240},
+    )
+    ok, err = gate.check_generation_config(
+        golden, {"temperature": 1.0, "max_tokens": 10240.0}
+    )
+    assert ok is True
+    assert err is None
+
+
+def test_generation_gate_fails_on_a_drifted_value() -> None:
+    golden = _make_golden()
+    ok, err = gate.check_generation_config(golden, {**_GENERATION, "temperature": 0.0})
+    assert ok is False
+    assert "temperature" in err
+    assert "run=0.0" in err
+
+
+def test_generation_gate_fails_when_a_knob_is_added_or_lost() -> None:
+    """Either direction of drift makes the two scores incomparable."""
+    golden = _make_golden()
+    ok, err = gate.check_generation_config(golden, {**_GENERATION, "top_k": 20})
+    assert ok is False
+    assert "top_k" in err
+    assert "<absent>" in err
+
+    ok, err = gate.check_generation_config(golden, {"temperature": 1.0})
+    assert ok is False
+    assert "top_p" in err
+    assert "max_tokens" in err
+
+
+def test_generation_gate_rejects_a_golden_without_the_block() -> None:
+    """A golden that predates the contract cannot gate a run at all."""
+    golden = _make_golden()
+    golden.pop("generation")
+    ok, err = gate.check_generation_config(golden, dict(_GENERATION))
+    assert ok is False
+    assert "--update-golden" in err
 
 
 # ---------------------------------------------------------------------------

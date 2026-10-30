@@ -8,6 +8,7 @@ single source of truth for:
 * schema constants and tolerance defaults,
 * golden record construction (:func:`build_accuracy_golden`),
 * identity binding (:func:`check_golden_identity`),
+* sampling-contract binding (:func:`check_generation_config`),
 * scoring gates (:func:`check_accuracy_golden`).
 
 It imports neither ``torch`` nor ``vllm``, so CPU-only unit tests exercise
@@ -135,11 +136,23 @@ def build_accuracy_golden(
     evalscope_version: str = "",
     dataset_cfg: dict[str, Any],
     serving_cfg: dict[str, Any],
+    generation_cfg: dict[str, Any],
     score: float,
     score_num: int,
     tolerance: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Build a golden record dict in schema v2 format."""
+    """Build a golden record dict in schema v2 format.
+
+    ``generation_cfg`` records the sampling contract the score was measured
+    under.  It belongs to the weights, so every case over one checkpoint
+    carries the same block and gates against the same golden.
+
+    ``score_num`` is how many GSM8K questions the checkpoint answered
+    correctly -- ``round(score * num)`` -- not how many it was asked.  The
+    sample count already lives in ``dataset.num_expected``; repeating it here
+    carried no information, while the correct-answer count is the integer the
+    score was computed from and can be re-derived from it.
+    """
     return {
         "schema_version": GOLDEN_SCHEMA_VERSION,
         "model": model_key,
@@ -150,6 +163,7 @@ def build_accuracy_golden(
         "evalscope_version": evalscope_version,
         "dataset": dataset_cfg,
         "serving": serving_cfg,
+        "generation": generation_cfg,
         "score": score,
         "score_num": score_num,
         "tolerance": tolerance or dict(DEFAULT_TOLERANCE),
@@ -196,6 +210,72 @@ def check_golden_identity(
             f"{golden_bench!r} but this run evaluates {benchmark!r}",
         )
     return (True, None)
+
+
+# --- Generation contract gate -----------------------------------------------
+
+
+def check_generation_config(
+    golden: dict[str, Any],
+    expected: dict[str, Any],
+) -> tuple[bool, str | None]:
+    """Verify the golden was measured under this run's sampling contract.
+
+    A score means nothing without the parameters that produced it:
+    ``temperature`` moves GSM8K by far more than the ±0.02 band, so a golden
+    recorded at 0.0 cannot arbitrate a run at 1.0 -- the comparison would
+    report a regression the weights never caused.  Because the block is keyed
+    by checkpoint, this gate also catches a case that drifted away from the
+    contract its sibling cases still use.
+
+    The block is required: a golden without one predates the contract and
+    must be re-recorded with ``--update-golden`` before it gates anything.
+    """
+    golden_gen = golden.get("generation")
+    if not isinstance(golden_gen, dict):
+        return (
+            False,
+            "generation gate failed: golden records no generation block; "
+            "re-record it with --update-golden",
+        )
+
+    drift: list[str] = []
+    for key in sorted(set(golden_gen) | set(expected)):
+        if key not in golden_gen or key not in expected:
+            absent = "<absent>"
+            drift.append(
+                f"{key}: golden={golden_gen.get(key, absent)!r} "
+                f"run={expected.get(key, absent)!r}"
+            )
+        elif not _same_value(golden_gen[key], expected[key]):
+            drift.append(f"{key}: golden={golden_gen[key]!r} run={expected[key]!r}")
+    if drift:
+        return (
+            False,
+            "generation gate failed: sampling parameters changed since the "
+            "golden was recorded -- " + "; ".join(drift),
+        )
+    return (True, None)
+
+
+def _same_value(left: Any, right: Any) -> bool:
+    """Compare two scalar JSON values, treating ``1`` and ``1.0`` alike.
+
+    Numbers are compared with a tolerance so a hand-edited ``1`` does not
+    disagree with the ``1.0`` the evaluator wrote; everything else has to be
+    equal outright.
+    """
+    if isinstance(left, bool) or isinstance(right, bool):
+        return left is right
+    if isinstance(left, float) or isinstance(right, float):
+        if isinstance(left, str) or isinstance(right, str):
+            return False
+        try:
+            return math.isclose(float(left), float(right), rel_tol=1e-9, abs_tol=1e-12)
+        except TypeError:
+            # A list, a dict or null in a field that should hold a number.
+            return False
+    return left == right
 
 
 # --- Accuracy scoring gates -------------------------------------------------
