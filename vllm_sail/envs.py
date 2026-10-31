@@ -158,7 +158,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Fuse the second GEMM's input quantization into DeepGEMM's activation
     # kernel (`silu_and_mul` / `situ_and_mul`) instead of running the activation
     # and a separate per-token/per-block quantize pass. The BF16 (w4a16 or
-    # unquantized) experts use the same kernel's values-only epilogue.
+    # unquantized) experts use the same kernel's values-only epilogue. The same
+    # epilogue also replaces the standalone `vllm::silu_and_mul` /
+    # `vllm::situ_and_mul` that unquantized BF16 dense MLPs and shared experts
+    # run on, through SiluAndMul / SituAndMul.
     "VLLM_SAIL_DEEPGEMM_MOE_FUSED_ACT_QUANT": _bool(
         "VLLM_SAIL_DEEPGEMM_MOE_FUSED_ACT_QUANT", False
     ),

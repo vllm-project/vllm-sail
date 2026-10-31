@@ -33,7 +33,7 @@ application in the allowlist.
 | `VLLM_SAIL_DENSE_BACKEND` | Automatic | `deepgemm`, `acext`, `triton` |
 | `VLLM_SAIL_DENSE_BF16_DEEPGEMM` | `0` | Opt into the PPU 1.5 BF16 dense DeepGEMM path |
 | `VLLM_SAIL_DEEPGEMM_MOE_TP_FUSED` | `0` | Enable the supported fused tensor-parallel MoE path |
-| `VLLM_SAIL_DEEPGEMM_MOE_FUSED_ACT_QUANT` | `0` | Fuse the activation and the second MoE GEMM's input quantization into DeepGEMM's SiLU/SiTU kernel for the FP8 and MXFP4 experts; the BF16 (w4a16 or unquantized) experts use its values-only kernel |
+| `VLLM_SAIL_DEEPGEMM_MOE_FUSED_ACT_QUANT` | `0` | Fuse the activation and the second MoE GEMM's input quantization into DeepGEMM's SiLU/SiTU kernel for the FP8 and MXFP4 experts; the BF16 (w4a16 or unquantized) experts use its values-only kernel, which also replaces the standalone `vllm::silu_and_mul` / `vllm::situ_and_mul` that unquantized BF16 dense MLPs and shared experts run on |
 | `VLLM_SAIL_USE_PLA` | `1` | Allow PLA linear-attention paths where available |
 | `VLLM_GDN_DECODE_KERNEL` | `auto` on PPU | `auto`, `cuda`, `pla`, `triton`; selects GDN decode independently of prefill and KDA |
 | `VLLM_SAIL_FUSED_RMSNORM_QUANT` | `0` | Enable supported fused RMSNorm and quantization paths |
