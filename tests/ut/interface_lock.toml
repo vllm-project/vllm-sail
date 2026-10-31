@@ -11,7 +11,7 @@
 schema = 1
 vllm_version_range = ">=0.32.0,<0.33.0"
 key_interface_count = 10
-target_count = 275
+target_count = 277
 
 [[key_interface]]
 symbol = "vllm.platforms.interface.PlatformEnum"
@@ -200,6 +200,22 @@ module = "vllm/model_executor/kernels/mhc/tilelang.py"
 symbol = "_hc_prenorm_gemm_outputs"
 present = true
 fingerprint = "sha256:99d79181417220d87f6a377fe74dc2434bd369b0a167db1b9ca36d9e680e439b"
+
+[[patch_target]]
+name = "vllm.model_executor.layers.activation.SiluAndMul.forward_ppu"
+kind = "class"
+module = "vllm/model_executor/layers/activation.py"
+symbol = "SiluAndMul.forward_ppu"
+present = false
+fingerprint = ""
+
+[[patch_target]]
+name = "vllm.model_executor.layers.activation.SituAndMul.forward_ppu"
+kind = "class"
+module = "vllm/model_executor/layers/activation.py"
+symbol = "SituAndMul.forward_ppu"
+present = false
+fingerprint = ""
 
 [[patch_target]]
 name = "vllm.model_executor.layers.attention.mla_attention.MLAAttention.forward_impl"
