@@ -164,6 +164,16 @@ def test_selector_filters_smoke_without_leaking_accuracy() -> None:
     assert [entry["key"] for entry in matrix["include"]] == ["qwen3.8-27b-m890p"]
 
 
+def test_smoke_matrix_answers_the_default_branch_card_count_name() -> None:
+    """A PR run reads its workflow files from the default branch and its
+    catalog from the PR head.  The rename of the catalog's card count to
+    `ppu_count` is only visible on the PR side, so the matrix has to carry the
+    old name too or the PR's own smoke lane dies on an empty device count."""
+    matrix = _load_select().build_matrix(_catalog(), "")
+    for entry in matrix["include"]:
+        assert entry["tp"] == entry["ppu_count"]
+
+
 def test_accuracy_matrix_uses_only_accuracy_and_eval_keys() -> None:
     select = _load_select()
     matrix = select.build_accuracy_matrix(

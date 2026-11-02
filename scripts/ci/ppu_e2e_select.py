@@ -42,7 +42,7 @@ def _select(catalog: list[dict], models: str, category: str) -> list[dict]:
 
 
 def build_matrix(catalog: list[dict], models: str) -> dict:
-    """Return smoke entries plus a legacy checkpoint alias for old callers."""
+    """Return smoke entries plus the aliases default-branch callers read."""
     include = []
     for entry in _select(catalog, models, "smoke"):
         selected = dict(entry)
@@ -50,6 +50,13 @@ def build_matrix(catalog: list[dict], models: str) -> dict:
         # Its value is a model ID, never a runner-specific filesystem path.
         if "model_id" in selected:
             selected.setdefault("checkpoint", selected["model_id"])
+        # A PR run takes its workflow files from the default branch and its
+        # catalog from the PR head, so the two disagree on the card count's
+        # name until the rename reaches the default branch. Answering both
+        # keeps a PR from failing on its own catalog; the alias can go once
+        # every caller reads `ppu_count`.
+        if "ppu_count" in selected:
+            selected.setdefault("tp", selected["ppu_count"])
         include.append(selected)
     return {"include": include}
 
