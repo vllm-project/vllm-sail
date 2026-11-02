@@ -91,6 +91,8 @@ def test_catalog_keeps_smoke_and_accuracy_subsets_exact() -> None:
         "glm-5.3-mxfp4-tp4",
         "glm-5.3-flash-mxfp4-tp2",
         "kimi-k2.6-mxfp4-tp8",
+        "qwen3.8-flash-next-tp4",
+        "qwen3.8-flash-next-dp-ep",
     }
 
 
@@ -127,10 +129,17 @@ def test_accuracy_catalog_keeps_model_ids_and_per_model_card_count() -> None:
     # those cards across data parallel ranks, so this is not its TP size.
     assert accuracy["glm-5.3-mxfp4-tp4"]["ppu_count"] == 4
     assert accuracy["glm-5.3-flash-mxfp4-tp2"]["ppu_count"] == 2
+    # Qwen3.8-Flash-Next keeps every card in a single tensor parallel group.
+    assert accuracy["qwen3.8-flash-next-tp4"]["ppu_count"] == 4
     others = {
         key: entry["ppu_count"]
         for key, entry in accuracy.items()
-        if key not in {"glm-5.3-mxfp4-tp4", "glm-5.3-flash-mxfp4-tp2"}
+        if key
+        not in {
+            "glm-5.3-mxfp4-tp4",
+            "glm-5.3-flash-mxfp4-tp2",
+            "qwen3.8-flash-next-tp4",
+        }
     }
     assert set(others.values()) == {8}, others
 
@@ -203,6 +212,7 @@ def test_accuracy_matrix_default_contains_every_accuracy_model() -> None:
         "glm_5_3_mxfp4",
         "glm_5_3_flash_mxfp4",
         "kimi_k2_6_mxfp4",
+        "qwen3.8-flash-next",
     }
 
 
@@ -361,11 +371,17 @@ def test_accuracy_catalog_resolves_against_the_evaluator_configs() -> None:
         assert config["model_id"] == entry["model_id"], key
         assert config["served_name"] == entry["served_name"], key
         # A config may leave ``chip``/``ppu_count`` implicit and take the
-        # defaults.
+        # defaults.  The default is the card count of the single-process
+        # recipe; a DP+EP case asks for as many cards as it has data parallel
+        # ranks, so the case may exceed it.
         chip = config.get("chip") or evaluator.DEFAULT_CHIP
         assert chip == board_to_chip[entry["board"]], key
         expected = config.get("ppu_count") or evaluator.tensor_parallel_for_chip(chip)
-        assert expected == int(entry["ppu_count"]), key
+        cmd = entry.get("server_cmd") or []
+        dp = 1
+        if "--data-parallel-size" in cmd:
+            dp = int(cmd[cmd.index("--data-parallel-size") + 1])
+        assert int(entry["ppu_count"]) == max(expected, dp), key
 
 
 def test_committed_goldens_describe_their_own_checkpoint() -> None:

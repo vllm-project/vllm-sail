@@ -382,7 +382,7 @@ def test_accuracy_test_uses_correct_marks() -> None:
     text = ACCURACY_TEST.read_text()
     assert "pytest.mark.ppu" in text
     assert "pytest.mark.model_e2e" in text
-    assert text.count("@pytest.mark.cap89") == 2
+    assert text.count("@pytest.mark.cap89") == 3
 
 
 def test_accuracy_test_requires_eight_devices() -> None:

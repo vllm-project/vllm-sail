@@ -290,7 +290,7 @@ first run cannot silently become the baseline. Promote it by either:
 | `glm_5_3_mxfp4` | 890p | 4 | `GLM-5.3-MoE-Quant-W-MXFP4-A-MXFP4-Dense-Quant-W-FP8-PerChannel-A-FP8-PerToken` | 0.9689 seeded |
 | `glm_5_3_flash_mxfp4` | 890p | 2 | `GLM-5.3-Flash-MoE-Quant-W-MXFP4-A-MXFP4-Dense-Quant-W-FP8-PerChannel-A-FP8-PerToken` | none |
 | `kimi_k2_6_mxfp4` | 890p | 8 | `Kimi-K2.6-MXFP4-FP8` | 0.9788 seeded |
-| `qwen3.8-flash-next` | 890p | 8 | `Qwen3.8-Flash-Next` | none |
+| `qwen3.8-flash-next` | 890p | 4 | `Qwen3.8-Flash-Next-MoE-Quant-W-MXFP4-A-MXFP4-Dense-Quant-W-FP8-PerChannel-A-FP8-PerToken` | 0.9742 seeded |
 
 `Cards` is the PPU count each catalog case asks the container for, not a
 property of the weight or of the golden: a case may switch to DP+EP or
@@ -301,9 +301,11 @@ another TP without touching its baseline.
 real 810E host looks for `accuracy_deepseek_v4_int8_810e.json`, finds none,
 and gates on the threshold instead of the wrong board's band.
 
-`glm_5_3_flash_mxfp4` and `qwen3.8-flash-next` have no golden because the
-shared summary has no row for either weight. They run on the `score >= 0.9`
-fallback and upload a pending-review artifact; import the first one you accept.
+`glm_5_3_flash_mxfp4` has no golden because the shared summary has no row for
+that weight. It runs on the `score >= 0.9` fallback and uploads a pending-review
+artifact; import the first one you accept. `qwen3.8-flash-next` is seeded from
+the GSM8K number the checkpoint README publishes for this quantized export
+(97.42), measured under the same sampling contract this lane runs.
 
 `chip` here is the golden's identity, so a checkpoint evaluated on more than
 one board needs one golden per board. Cases that only differ in parallel

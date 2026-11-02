@@ -212,9 +212,16 @@ MODEL_CONFIGS: dict[str, dict[str, Any]] = {
         "generation_config": _generation(temperature=1.0, top_p=0.95),
     },
     "qwen3.8-flash-next": {
-        "model_id": "Qwen/Qwen3.8-Flash-Next",
+        "model_id": (
+            "T-HEAD/Qwen3.8-Flash-Next-MoE-Quant-W-MXFP4-A-MXFP4-Dense-"
+            "Quant-W-FP8-PerChannel-A-FP8-PerToken"
+        ),
         "served_name": "Qwen3.8-Flash-Next",
         "extra_flags": ["--trust-remote-code"],
+        # The checkpoint README's recipe keeps every card in one process, so
+        # the requested count and the tensor parallel size are the same.
+        "chip": "890p",
+        "ppu_count": 4,
         # No row of its own: reference_generation_config.json gives every
         # qwen3_8 weight the same sampling parameters.
         "generation_config": _generation(

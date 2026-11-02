@@ -187,5 +187,70 @@
       "--distributed-timeout-seconds", "3600",
       "--cpu-distributed-timeout-seconds", "3600"
     ]
+  },
+  {
+    "key": "qwen3.8-flash-next-tp4",
+    "category": "accuracy",
+    "model_key": "qwen3.8-flash-next",
+    "model_id": "T-HEAD/Qwen3.8-Flash-Next-MoE-Quant-W-MXFP4-A-MXFP4-Dense-Quant-W-FP8-PerChannel-A-FP8-PerToken",
+    "served_name": "Qwen3.8-Flash-Next",
+    "board": "ZW-M890P",
+    "ppu_count": 4,
+    "extra_serve_flags": "--trust-remote-code",
+    "server_env": {
+      "VLLM_ENGINE_READY_TIMEOUT_S": "6000"
+    },
+    "server_cmd": [
+      "vllm", "serve", "{model}",
+      "--served-model-name", "{served_name}",
+      "--host", "127.0.0.1", "--port", "{port}",
+      "--tensor-parallel-size", "4",
+      "--gpu-memory-utilization", "0.95",
+      "--max-num-seqs", "256",
+      "--max-model-len", "16384",
+      "--trust-remote-code",
+      "--tool-call-parser", "qwen3_xml",
+      "--reasoning-parser", "qwen3",
+      "--enable-auto-tool-choice",
+      "--speculative-config", "{\"method\": \"mtp\", \"num_speculative_tokens\": 3}",
+      "--moe-backend", "ppu-deep-gemm",
+      "--enable-prefix-caching",
+      "--distributed-timeout-seconds", "3600",
+      "--cpu-distributed-timeout-seconds", "3600"
+    ]
+  },
+  {
+    "key": "qwen3.8-flash-next-dp-ep",
+    "category": "accuracy",
+    "model_key": "qwen3.8-flash-next",
+    "model_id": "T-HEAD/Qwen3.8-Flash-Next-MoE-Quant-W-MXFP4-A-MXFP4-Dense-Quant-W-FP8-PerChannel-A-FP8-PerToken",
+    "served_name": "Qwen3.8-Flash-Next",
+    "board": "ZW-M890P",
+    "ppu_count": 8,
+    "extra_serve_flags": "--trust-remote-code",
+    "server_env": {
+      "VLLM_PLE_CPU_OFFLOAD": "1",
+      "HGGC_EMBEDDED_COPY_THRESHOLD": "0x10000",
+      "VLLM_ENGINE_READY_TIMEOUT_S": "6000"
+    },
+    "server_cmd": [
+      "vllm", "serve", "{model}",
+      "--served-model-name", "{served_name}",
+      "--host", "127.0.0.1", "--port", "{port}",
+      "--trust-remote-code",
+      "--enable-auto-tool-choice",
+      "--data-parallel-size", "8",
+      "--all2all-backend", "deepep_low_latency",
+      "--enable-expert-parallel",
+      "--speculative-config", "{\"method\": \"mtp\", \"num_speculative_tokens\": 3}",
+      "--engram-config", "{\"cpu_offload\": true, \"embedding_across_dp\": true}",
+      "--moe-backend", "ppu-deep-gemm",
+      "--reasoning-parser", "qwen3",
+      "--tool-call-parser", "qwen3_xml",
+      "--gpu-memory-utilization", "0.9",
+      "--max-model-len", "16384",
+      "--distributed-timeout-seconds", "3600",
+      "--cpu-distributed-timeout-seconds", "3600"
+    ]
   }
 ]
