@@ -216,3 +216,43 @@ def test_ppu_576_keeps_the_upstream_answer(
     """DeepSeek-style 576 heads are outside this gate and still resolve."""
     _install_rope_dim(monkeypatch, 64)
     assert _supports_combination(backend_cls, head_size=576) is None
+
+
+# ---------------------------------------------------------------------------
+# kpool cache-block alignment (paged MQA-logits kernel contract)
+# ---------------------------------------------------------------------------
+
+
+def _fake_vllm_config(index_kpool):
+    text_config = types.SimpleNamespace()
+    if index_kpool is not None:
+        text_config.index_kpool = index_kpool
+    return types.SimpleNamespace(
+        model_config=types.SimpleNamespace(hf_text_config=text_config)
+    )
+
+
+def test_kpool_block_alignment_targets_64_entry_pages() -> None:
+    """PPU must align to the largest legal pool page, not CUDA's smallest.
+
+    CUDA's ``index_kpool * min(PAGED_MQA_PAGE_SIZES)`` (= 128 for kpool 4)
+    splits a block into 32-entry pages, which the PPU INT8 paged MQA-logits
+    kernel rejects (``block_kv == 64``).
+    """
+    from vllm.utils.deep_gemm import PAGED_MQA_PAGE_SIZES
+
+    from vllm_sail.platform import PPUPlatform
+
+    alignment = PPUPlatform._get_indexer_block_alignment(_fake_vllm_config(4))
+    assert alignment == 4 * max(PAGED_MQA_PAGE_SIZES)
+    assert alignment % max(PAGED_MQA_PAGE_SIZES) == 0
+    # A block of this size splits into exactly 64-entry pool pages.
+    assert alignment // 4 == max(PAGED_MQA_PAGE_SIZES)
+
+
+@pytest.mark.parametrize("index_kpool", [None, 1])
+def test_kpool_block_alignment_is_inert_without_compression(index_kpool) -> None:
+    from vllm_sail.platform import PPUPlatform
+
+    config = _fake_vllm_config(index_kpool)
+    assert PPUPlatform._get_indexer_block_alignment(config) is None
