@@ -11,7 +11,7 @@
 schema = 1
 vllm_version_range = ">=0.32.0,<0.33.0"
 key_interface_count = 10
-target_count = 286
+target_count = 287
 
 [[key_interface]]
 symbol = "vllm.platforms.interface.PlatformEnum"
@@ -2176,6 +2176,14 @@ module = "vllm/v1/attention/backends/mla/indexer.py"
 symbol = "get_paged_mqa_logits_metadata"
 present = true
 fingerprint = "sha256:8e658afea194ac1429d46be51d6def525250990c475a7f89d7412d027a7c3528"
+
+[[patch_target]]
+name = "vllm.v1.attention.backends.mla.indexer.DeepseekV32IndexerMetadataBuilder.update_draft_decode_metadata"
+kind = "class"
+module = "vllm/v1/attention/backends/mla/indexer.py"
+symbol = "DeepseekV32IndexerMetadataBuilder.update_draft_decode_metadata"
+present = true
+fingerprint = "sha256:59d094b16acbc6a6c1e90d017d62b9bb7251c892f2300095f5d80b3760462479"
 
 [[patch_target]]
 name = "vllm.v1.attention.backends.mla.prefill.flash_attn.FlashAttnPrefillBackend.__init__"
