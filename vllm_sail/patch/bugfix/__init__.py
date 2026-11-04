@@ -12,6 +12,7 @@ from __future__ import annotations
 
 try:
     from vllm_sail.patch.bugfix import glm5_next_layer_types  # noqa: F401
+    from vllm_sail.patch.bugfix import glm5_next_int8_mla_dequant  # noqa: F401
 except ModuleNotFoundError as _exc:  # vLLM-less runner: nothing to patch
     if _exc.name != "vllm":
         raise
