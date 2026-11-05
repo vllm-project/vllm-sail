@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 """The installed DSA indexer patch resolves PPU auto dtype through its provider."""
 
+import sys
+import types
 from types import SimpleNamespace as NS
 
 import pytest
@@ -24,7 +26,7 @@ def config(value, model_type="deepseek_v4"):
 
 
 @pytest.fixture
-def installed_indexer(modules, patch_utils_module):
+def installed_indexer(modules, patch_utils_module, monkeypatch):
     def load(
         capability, *, ppu=True, consumer_name="vllm.models.deepseek_v41.attention"
     ):
@@ -73,12 +75,29 @@ def installed_indexer(modules, patch_utils_module):
             DSA_INDEXER_KV_DTYPES=("fp8", "mxfp4"),
         )
         consumer = modules(consumer_name, dsa_indexer_uses_fp4=upstream)
+        # Kimi K3.1's ``dsa_cache`` re-exports the helper at module scope, so it
+        # captured upstream's function before this patch could run: the preloaded
+        # alias must be registered as a consumer and rebound by the installed
+        # patch (which is also what puts it in the manifest).
+        dsa_cache = types.ModuleType("vllm.models.kimi_k3.common.dsa_cache")
+        dsa_cache.dsa_indexer_uses_fp4 = upstream
+        monkeypatch.setitem(
+            sys.modules, "vllm.models.kimi_k3.common.dsa_cache", dsa_cache
+        )
         patch = load_patch("vllm_sail/patch/enhancement/attention/mla_indexer.py")
         assert provider.dsa_indexer_uses_fp4 is patch.dsa_indexer_uses_fp4
         assert consumer.dsa_indexer_uses_fp4 is patch.dsa_indexer_uses_fp4
+        assert dsa_cache.dsa_indexer_uses_fp4 is patch.dsa_indexer_uses_fp4
         target = f"{consumer_name}.dsa_indexer_uses_fp4"
         assert (
             patch_utils_module.original_of(consumer.dsa_indexer_uses_fp4, target)
+            is upstream
+        )
+        cache_target = "vllm.models.kimi_k3.common.dsa_cache.dsa_indexer_uses_fp4"
+        assert (
+            patch_utils_module.original_of(
+                dsa_cache.dsa_indexer_uses_fp4, cache_target
+            )
             is upstream
         )
         with pytest.raises(RuntimeError, match="already"):
@@ -89,13 +108,13 @@ def installed_indexer(modules, patch_utils_module):
                 affected_versions=">=0.32.0,<0.33.0",
                 remove_when="The consumer resolves the provider dynamically.",
             )(lambda config: False)
-        return provider.dsa_indexer_uses_fp4, calls
+        return provider.dsa_indexer_uses_fp4, calls, dsa_cache
 
     return load
 
 
 def test_preloaded_sparse_layer_uses_ppu_fp4_capability(installed_indexer):
-    uses_fp4, calls = installed_indexer(
+    uses_fp4, calls, _ = installed_indexer(
         89, consumer_name="vllm.model_executor.layers.sparse_mqa_indexer"
     )
     assert uses_fp4(config("mxfp4", "deepseek_v41")) is True
@@ -115,13 +134,13 @@ def test_preloaded_sparse_layer_uses_ppu_fp4_capability(installed_indexer):
 def test_indexer_cache_dtype_resolution(
     installed_indexer, capability, configured, expected
 ):
-    uses_fp4, calls = installed_indexer(capability)
+    uses_fp4, calls, _ = installed_indexer(capability)
     assert uses_fp4(config(configured)) is expected
     assert calls == []
 
 
 def test_mxfp4_stays_rejected_below_sm_89(installed_indexer):
-    uses_fp4, _ = installed_indexer(80)
+    uses_fp4, _, _ = installed_indexer(80)
     with pytest.raises(ValueError, match="requires capability sm_89"):
         uses_fp4(config("mxfp4"))
 
@@ -132,7 +151,7 @@ def test_mxfp4_stays_rejected_below_sm_89(installed_indexer):
 def test_mxfp4_default_is_available_to_both_deepseek_producers(
     installed_indexer, model_type
 ):
-    uses_fp4, _ = installed_indexer(89)
+    uses_fp4, _, _ = installed_indexer(89)
     assert uses_fp4(config("auto", model_type)) is True
 
 
@@ -140,7 +159,7 @@ def test_mxfp4_default_is_available_to_both_deepseek_producers(
 def test_fixed_fp8_models_do_not_inherit_deepseek_mxfp4_metadata(
     installed_indexer, model_type
 ):
-    uses_fp4, _ = installed_indexer(89)
+    uses_fp4, _, _ = installed_indexer(89)
     assert uses_fp4(config("auto", model_type)) is False
     assert uses_fp4(config("fp8", model_type)) is False
     with pytest.raises(ValueError, match="requires DeepSeek V4 or V4.1"):
@@ -148,7 +167,13 @@ def test_fixed_fp8_models_do_not_inherit_deepseek_mxfp4_metadata(
 
 
 def test_non_ppu_delegates_to_upstream(installed_indexer):
-    uses_fp4, calls = installed_indexer(100, ppu=False)
+    uses_fp4, calls, _ = installed_indexer(100, ppu=False)
     value = config("auto")
     assert uses_fp4(value) == "upstream"
     assert calls == [value]
+
+
+def test_preloaded_kimi_consumer_uses_the_provider(installed_indexer):
+    """Kimi K3.1 binds the helper with ``from ... import`` before the patch."""
+    uses_fp4, _, dsa_cache = installed_indexer(89)
+    assert dsa_cache.dsa_indexer_uses_fp4 is uses_fp4
