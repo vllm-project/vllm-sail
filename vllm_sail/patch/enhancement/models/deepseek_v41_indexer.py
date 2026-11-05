@@ -7,6 +7,7 @@ from vllm.models.deepseek_v41 import attention
 from vllm.platforms import current_platform
 from vllm.v1.attention.backends.mla.indexer import DeepseekV41IndexerBackend
 
+from vllm_sail.models.deepseek_v41.config import uses_int8_w8a8
 from vllm_sail.patch.utils import patch
 
 _cache_spec = attention.DeepseekV4IndexerCache.get_kv_cache_spec
@@ -18,7 +19,7 @@ _AFFECTED = ">=0.31.0,<0.32.0"
     "vllm.models.deepseek_v41.attention",
     "DeepseekV4IndexerCache.get_kv_cache_spec",
     reason=(
-        "SAIL paged FP8 logits requires 64 stored rows per page. V4.1 C1 and "
+        "SAIL paged indexer logits require 64 stored rows per page. V4.1 C1 and "
         "C2 indexers therefore need independent 64- and 128-token cache blocks; "
         "splitting the main cache's shared padded pages cannot express this."
     ),
@@ -34,6 +35,10 @@ def get_kv_cache_spec(self, vllm_config):
         spec = replace(
             spec, block_size=64 * self.compress_ratio, page_size_padded=None
         )
+        if uses_int8_w8a8(vllm_config):
+            config = vllm_config.model_config.hf_text_config
+            spec = replace(spec, indexer_n_head=config.index_n_heads,
+                           indexer_q_head_dim=config.index_head_dim)
     return spec
 
 

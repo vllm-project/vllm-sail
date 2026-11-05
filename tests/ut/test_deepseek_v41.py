@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """V4.1 integration contracts; CPU tests never import torch or vLLM."""
 
+from contextlib import contextmanager
 from types import SimpleNamespace
 
 import pytest
@@ -428,7 +429,16 @@ def test_v41_projection_preserves_weights_and_uses_bf16_helper(
         "vllm.models.deepseek_v41.nvidia.flashmla", DeepseekV4FlashMLAAttention=Upstream
     )
     modules("vllm_sail.models.deepseek_v4.flashmla", DeepseekV4FlashMLAAttention=object)
-    modules("vllm.platforms", current_platform=SimpleNamespace(is_ppu=lambda: True))
+    modules("vllm.models.deepseek_v41.sparse_mla", DeepseekV4FlashMLABackend=object)
+    modules("torch", int8="int8")
+    modules("vllm.config", get_current_vllm_config=lambda: None)
+    modules("vllm_sail.models.deepseek_v41.config", uses_int8_w8a8=lambda config: False)
+    modules(
+        "vllm.platforms",
+        current_platform=SimpleNamespace(
+            is_ppu=lambda: True, is_device_capability=lambda cap: False
+        ),
+    )
     module = load_patch("vllm_sail/models/deepseek_v41/flashmla.py")
     attn = module.DeepseekV41FlashMLAAttention()
     attn.__dict__.update(
@@ -450,6 +460,120 @@ def test_v41_projection_preserves_weights_and_uses_bf16_helper(
     assert attn.wo_a.weight is loaded
     assert attn.forward_mqa is Upstream.forward_mqa
     assert attn._forward_prefill is Upstream._forward_prefill
+
+
+@pytest.mark.parametrize(
+    "ppu,capability,contract",
+    [
+        (True, (8, 0), True),
+        (True, (8, 0), False),
+        (True, (8, 9), True),
+        (True, (8, 9), False),
+        (True, (9, 0), True),
+        (False, (8, 0), True),
+        (False, (8, 9), True),
+    ],
+)
+@pytest.mark.parametrize("weight_dtype", ["int8", "bf16"])
+@pytest.mark.parametrize("num_heads", [2, 4, 8, 16, 32, 64])
+def test_v41_projection_dispatches_by_quantization(
+    modules, ppu, capability, contract, weight_dtype, num_heads
+):
+    calls = []
+
+    class Upstream:
+        @classmethod
+        def get_padded_num_q_heads(cls, heads):
+            return 64
+
+        def _o_proj(self, *args):
+            calls.append(("upstream", args, {}))
+            return "upstream"
+
+    class Backend:
+        @classmethod
+        def supports_compute_capability(cls, cap):
+            return cap.major in (9, 10)
+
+    class PPUV4:
+        @classmethod
+        def get_padded_num_q_heads(cls, heads):
+            return heads + 128
+
+        def _o_proj(self, *args):
+            calls.append(("ppuv4", args, {}))
+            return "ppuv4"
+
+    class Output:
+        def __getitem__(self, slices):
+            assert slices == (slice(None), slice(None, num_heads))
+            return "actual_heads"
+
+    def int8(*args, **kw):
+        calls.append(("int8", args, kw))
+        return "int8"
+
+    modules("torch", int8="int8")
+    modules("vllm.config", get_current_vllm_config=lambda: object())
+    modules(
+        "vllm_sail.models.deepseek_v41.config", uses_int8_w8a8=lambda config: contract
+    )
+    modules(
+        "vllm.platforms",
+        current_platform=SimpleNamespace(is_ppu=lambda: ppu),
+    )
+    modules(
+        "vllm.model_executor.layers.quantization.utils.mxfp8_utils",
+        dequant_mxfp8_to_bf16=lambda *args: None,
+    )
+    modules(
+        "vllm.models.deepseek_v4.nvidia.ops.o_proj",
+        deep_gemm_fp8_o_proj=lambda *args: None,
+    )
+    modules("vllm_sail.models.deepseek_v4.ops.o_proj", deep_gemm_int8_o_proj=int8)
+    modules("vllm_sail.models.deepseek_v4.flashmla", DeepseekV4FlashMLAAttention=PPUV4)
+    modules(
+        "vllm.models.deepseek_v41.nvidia.flashmla", DeepseekV4FlashMLAAttention=Upstream
+    )
+    modules("vllm.models.deepseek_v41.sparse_mla", DeepseekV4FlashMLABackend=Backend)
+    module = load_patch("vllm_sail/models/deepseek_v41/flashmla.py")
+    cls = module.DeepseekV41FlashMLAAttention
+    attn = cls()
+    attn.__dict__.update(
+        _o_proj_block_size=128,
+        wo_a=SimpleNamespace(weight=SimpleNamespace(dtype=weight_dtype)),
+        _wo_b_proj=object(),
+        rotary_emb=SimpleNamespace(cos_sin_cache=object()),
+        n_local_groups=2,
+        n_local_heads=num_heads,
+        nope_head_dim=448,
+        rope_head_dim=64,
+        o_lora_rank=1024,
+    )
+    expected = (
+        "int8"
+        if ppu and contract and weight_dtype == "int8"
+        else "ppuv4"
+        if ppu
+        else "upstream"
+    )
+    assert attn._o_proj(Output(), object()) == expected
+    if expected == "int8":
+        _, args, kw = calls[-1]
+        assert (
+            args[0] == "actual_heads"
+            and args[3] is attn.wo_a
+            and args[4] is attn._wo_b_proj
+        )
+        assert kw["einsum_recipe"] == (1, 1, 128)
+        assert kw["heads_per_group"] == num_heads // attn.n_local_groups
+    expected_heads = num_heads if ppu and contract else num_heads + 128 if ppu else 64
+    assert cls.get_padded_num_q_heads(num_heads) == expected_heads
+    backend = module.PPUDeepseekV41FlashMLABackend
+    for major, minor in ((8, 0), (8, 9), (9, 0), (10, 0)):
+        assert backend.supports_compute_capability(
+            SimpleNamespace(major=major, minor=minor)
+        ) is (ppu or major in (9, 10))
 
 
 def test_v41_draft_inherits_its_own_loader_and_execution(modules):
@@ -486,3 +610,85 @@ def test_v41_draft_inherits_its_own_loader_and_execution(modules):
     assert draft.hf_to_vllm_mapper is mapper
     assert mapper_args == [("fp4", "weight_scale")]
     assert draft.packed_modules_mapping["fused_wqa_wkv"] == ["wq_a", "wkv"]
+
+
+@pytest.mark.parametrize("ppu", [False, True])
+@pytest.mark.parametrize("int8", [False, True])
+@pytest.mark.parametrize("eager", [False, True])
+@pytest.mark.parametrize("fail_forward", [False, True])
+@pytest.mark.parametrize("has_outer_config", [False, True])
+def test_v41_wrapper_scopes_int8_config_and_restores_forward_context(
+    modules, monkeypatch, ppu, int8, eager, fail_forward, has_outer_config
+):
+    calls = []
+    outer_config = object() if has_outer_config else None
+    current = [outer_config]
+    selected = ppu and int8
+    original_mapper, mapped = object(), object()
+    config = SimpleNamespace(
+        quant_config=None, model_config=SimpleNamespace(enforce_eager=eager)
+    )
+
+    @contextmanager
+    def configuration(value):
+        previous = current[0]
+        current[0] = value
+        calls.append(("configure", value))
+        try:
+            yield
+        finally:
+            current[0] = previous
+
+    class Base:
+        hf_to_vllm_mapper = original_mapper
+
+        def __init__(self, **kwargs):
+            calls.append(("construct", kwargs))
+
+        def forward(self, *args, **kwargs):
+            assert current[0] is (config if selected else outer_config)
+            calls.append(("forward", args, kwargs))
+            if fail_forward:
+                raise RuntimeError("forward failed")
+            return 17
+
+    def recognize(value):
+        assert value is config
+        calls.append(("recognize", value))
+        return int8
+
+    def map_weights(mapper):
+        assert mapper is original_mapper
+        calls.append(("map", mapper))
+        return mapped
+
+    modules("vllm.config", set_current_vllm_config=configuration)
+    modules("vllm.models.deepseek_v41.nvidia.vl_model", DeepseekV41ForCausalLM=Base)
+    modules("vllm.platforms", current_platform=SimpleNamespace(is_ppu=lambda: ppu))
+    modules("vllm_sail.models.deepseek_v41.config", uses_int8_w8a8=recognize)
+    module = load_patch("vllm_sail/models/deepseek_v41/ppu_model.py")
+    monkeypatch.setattr(module, "int8_weights_mapper", map_weights)
+    model = module.DeepseekV41ForCausalLM(vllm_config=config, prefix="model")
+    assert calls[0] == ("construct", dict(vllm_config=config, prefix="model"))
+    assert model._v41_int8_config is (config if selected else None)
+    assert model.hf_to_vllm_mapper is (mapped if selected else original_mapper)
+    assert Base.hf_to_vllm_mapper is original_mapper
+    assert sum(call[0] == "recognize" for call in calls) == int(ppu)
+    assert sum(call[0] == "map" for call in calls) == int(selected)
+    constructor_calls = list(calls)
+    calls.clear()
+    for _ in range(2):
+        if fail_forward:
+            with pytest.raises(RuntimeError, match="forward failed"):
+                model.forward(1, 2, 3, 4, lookback_token_ids=5, extra=6)
+        else:
+            assert model.forward(1, 2, 3, 4, lookback_token_ids=5, extra=6) == 17
+        assert calls[-1] == (
+            "forward",
+            (1, 2, 3, 4),
+            dict(lookback_token_ids=5, extra=6),
+        )
+        assert current[0] is outer_config
+    assert sum(call[0] == "configure" for call in calls) == 2 * int(selected)
+    assert all(call[0] in ("configure", "forward") for call in calls)
+    assert sum(call[0] == "construct" for call in constructor_calls) == 1
