@@ -1,0 +1,95 @@
+meta:
+  hardware:
+    810e: verified
+    m890: verified
+strategy_hardware:
+  multi_node_tep:
+    810e: supported
+    m890: supported
+  single_node_tp:
+    810e: unsupported
+    m890: unsupported
+  single_node_tep:
+    810e: unsupported
+    m890: unsupported
+  multi_node_tp:
+    810e: unsupported
+    m890: unsupported
+  pd_cluster:
+    810e: unsupported
+    m890: unsupported
+strategy_min_gpus:
+  810e: 32
+  m890: 32
+strategy_overrides:
+  multi_node_tep:
+    hardware_overrides:
+      810e:
+        extra_args:
+          - '--gpu-memory-utilization'
+          - '0.9'
+          - '--max-num-seqs'
+          - '256'
+          - '--max-model-len'
+          - auto
+          - '--disable-custom-all-reduce'
+          - '--no-enable-prefix-caching'
+          - '--moe-backend'
+          - ppu_deep_gemm_w4a16
+        extra_env:
+          VLLM_ENGINE_READY_TIMEOUT_S: '3600'
+          DG_USE_MOE_DYNAMIC_TILE: '1'
+      m890:
+        extra_args:
+          - '--tensor-parallel-size'
+          - '8'
+          - '--data-parallel-size'
+          - '4'
+          - '--all2all-backend'
+          - deepep_low_latency
+          - '--gpu-memory-utilization'
+          - '0.9'
+          - '--max-num-seqs'
+          - '32'
+          - '--max-model-len'
+          - auto
+          - '--disable-custom-all-reduce'
+          - '--no-enable-prefix-caching'
+        extra_env:
+          VLLM_ENGINE_READY_TIMEOUT_S: '3600'
+          DG_USE_MOE_DYNAMIC_TILE: '1'
+          VLLM_SAIL_DENSE_BF16_DEEPGEMM: '1'
+          VLLM_SAIL_DEEPGEMM_MOE_TP_FUSED: '1'
+          VLLM_SAIL_DEEPGEMM_MOE_FUSED_ACT_QUANT: '1'
+          VLLM_DEEPEPLL_RECV_HOOK: '0'
+          VLLM_DEEPEP_LOW_LATENCY_USE_MNNVL: '1'
+          DEEPEP_COMBINE_TOKEN_BALANCED: '1'
+features:
+  low_latency_decode:
+    hardware:
+      ppu: unsupported
+  nvfp4_kv_cache:
+    hardware:
+      ppu: unsupported
+variants:
+  default:
+    hardware_overrides:
+      810e:
+        docker_image: egslingjun-registry.cn-wulanchabu.cr.aliyuncs.com/egslingjun-tmp/inference-xpu-pytorch:kimi-k3.1-pro-vllm0.32.0-cuda13.0-pytorch2.13.0-20261103
+        docker_serve_command: vllm serve
+        install:
+          pip: false
+      m890:
+        docker_image: egslingjun-registry.cn-wulanchabu.cr.aliyuncs.com/egslingjun-tmp/inference-xpu-pytorch:kimi-k3.1-pro-vllm0.32.0-cuda13.0-pytorch2.13.0-20261103
+        docker_serve_command: vllm serve
+        install:
+          pip: false
+    supported_hardware:
+      - 810e
+      - m890
+guide_sections:
+  ppu: |
+    On Zhenwu PPUs, the default MXFP4 checkpoint runs without speculative decoding on
+    two 16-PPU 810E nodes with TP32 / EP32, or four 8-PPU M890 nodes with TP8 / DP4 / EP32.
+    On 810E, `ppu_deep_gemm_w4a16` loads the checkpoint with a W4A16 compute path.
+    Use the PPU image specified for each hardware configuration.
