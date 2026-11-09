@@ -20,9 +20,11 @@ import signal
 import socket
 import subprocess
 import sys
+import threading
 import time
 import urllib.error
 import urllib.request
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -152,6 +154,22 @@ def stop_server(process: subprocess.Popen) -> None:
     process.wait()
 
 
+@contextmanager
+def cleanup_signals():
+    """Finish owned-process cleanup and result writes after cancellation."""
+    previous = {}
+    if threading.current_thread() is threading.main_thread():
+        previous = {
+            signum: signal.signal(signum, signal.SIG_IGN)
+            for signum in (signal.SIGTERM, signal.SIGINT)
+        }
+    try:
+        yield
+    finally:
+        for signum, handler in previous.items():
+            signal.signal(signum, handler)
+
+
 def run_preset(preset: dict, checkpoint: Path, args, available_cards: int) -> dict:
     output = args.results_dir / preset["key"]
     output.mkdir()  # A prior run must not be overwritten.
@@ -165,6 +183,7 @@ def run_preset(preset: dict, checkpoint: Path, args, available_cards: int) -> di
         "stage": "preflight",
     }
     process = None
+    pool = None
     started = time.monotonic()
     try:
         config = checkpoint / "config.json"
@@ -211,11 +230,17 @@ def run_preset(preset: dict, checkpoint: Path, args, available_cards: int) -> di
                 stderr=subprocess.STDOUT,
                 start_new_session=True,
             )
+
+            def check_launcher():
+                code = process.poll()
+                if code is not None:
+                    result["launcher_exit_code"] = code
+                    raise RuntimeError(f"server exited with code {code}")
+
             deadline = time.monotonic() + args.ready_timeout
             endpoint = f"http://127.0.0.1:{args.port}"
             while True:
-                if process.poll() is not None:
-                    raise RuntimeError(f"server exited with code {process.returncode}")
+                check_launcher()
                 if time.monotonic() >= deadline:
                     raise TimeoutError(f"server not ready within {args.ready_timeout}s")
                 try:
@@ -229,6 +254,7 @@ def run_preset(preset: dict, checkpoint: Path, args, available_cards: int) -> di
             result["ready_seconds"] = time.monotonic() - started
             write_json(output / "models.json", models)
             result["stage"] = "generation"
+            check_launcher()
 
             def generate(index: int) -> dict:
                 payload = {
@@ -261,17 +287,29 @@ def run_preset(preset: dict, checkpoint: Path, args, available_cards: int) -> di
             # uses a 16-request burst; this does not assert per-rank routing.
             generate(0)
             concurrency = preset.get("concurrency", 1)
-            with concurrent.futures.ThreadPoolExecutor(concurrency) as pool:
-                list(pool.map(generate, range(1, concurrency + 1)))
+            # Joining the pool belongs after server cleanup: a blocked HTTP
+            # request must not delay termination of the process group it uses.
+            pool = concurrent.futures.ThreadPoolExecutor(concurrency)
+            list(pool.map(generate, range(1, concurrency + 1)))
             request_json(endpoint + "/health")
+            check_launcher()
             result.update(status="passed", stage="complete", requests=concurrency + 1)
+    except KeyboardInterrupt as error:
+        result.update(status="cancelled", error=f"KeyboardInterrupt: {error}")
     except Exception as error:
         result["error"] = f"{type(error).__name__}: {error}"
     finally:
-        if process is not None:
-            stop_server(process)
-        result["elapsed_seconds"] = time.monotonic() - started
-        write_json(output / "result.json", result)
+        with cleanup_signals():
+            try:
+                if process is not None:
+                    stop_server(process)
+            finally:
+                try:
+                    if pool is not None:
+                        pool.shutdown(wait=True, cancel_futures=True)
+                finally:
+                    result["elapsed_seconds"] = time.monotonic() - started
+                    write_json(output / "result.json", result)
     return result
 
 
@@ -338,6 +376,8 @@ def main() -> int:
         print(
             f"{result['status'].upper()} {key}: {result.get('error', '')}", flush=True
         )
+        if result["status"] == "cancelled":
+            return 130
     return int(any(result["status"] != "passed" for result in results))
 
 
