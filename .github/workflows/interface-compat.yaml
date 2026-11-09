@@ -29,7 +29,11 @@ jobs:
       - name: Run category-1 interface tests (skip upstream_source-marked)
         run: >-
           python -m pytest
-          tests/ut
+          tests/ut/test_patch_contracts.py
+          tests/ut/test_key_interface_contracts.py
+          tests/ut/test_patch_idempotency.py
+          tests/ut/test_patch_value.py
+          tests/ut/test_maintenance_tools.py
           -q -m "not upstream_source"
 
   upstream-contract:
@@ -64,7 +68,8 @@ jobs:
           VLLM_SOURCE_ROOT: ${{ github.workspace }}/.upstream/vllm
         run: >-
           python -m pytest
-          tests/ut
+          tests/ut/test_patch_contracts.py
+          tests/ut/test_key_interface_contracts.py
           -q -rs -m upstream_source --require-upstream-source
 
   category2-gate:
