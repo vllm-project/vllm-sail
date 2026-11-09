@@ -3,11 +3,12 @@
 
 from __future__ import annotations
 
+import ast
 from types import SimpleNamespace
 
 import pytest
 
-from tests.support.source import function
+from tests.support.source import ROOT, function
 from tests.support.upstream import dataclass_method, resolve_symbol
 
 
@@ -43,7 +44,7 @@ from tests.support.upstream import dataclass_method, resolve_symbol
         ),
         (
             "vllm.v1.attention.backends.registry.AttentionBackendEnum",
-            ("FLASH_ATTN", "FLASHMLA", "TRITON_MLA", "FLASHMLA_SPARSE", "get_class"),
+            ("get_class",),
         ),
     ],
 )
@@ -52,6 +53,64 @@ def test_required_upstream_members(upstream_source_root, owner, members):
     for member in members:
         target = f"{owner}.{member}"
         assert resolve_symbol(upstream_source_root, target).present, target
+
+
+def attention_backend_problems(upstream_root):
+    """Check the enum members the production platform actually references."""
+    platform = ROOT / "vllm_sail/platform.py"
+    members = {
+        node.attr
+        for node in ast.walk(ast.parse(platform.read_text()))
+        if isinstance(node, ast.Attribute)
+        and isinstance(node.value, ast.Name)
+        and node.value.id == "AttentionBackendEnum"
+    }
+    if not members:
+        return ["no platform attention backend references found"]
+    owner = "vllm.v1.attention.backends.registry.AttentionBackendEnum"
+    return [
+        f"missing platform attention backend: {owner}.{member}"
+        for member in sorted(members)
+        if not resolve_symbol(upstream_root, f"{owner}.{member}").present
+    ]
+
+
+@pytest.mark.upstream_source
+def test_platform_attention_dependencies_exist(upstream_source_root):
+    assert not attention_backend_problems(upstream_source_root)
+
+
+@pytest.mark.upstream_source
+@pytest.mark.parametrize("member", ["TRITON_ATTN", "FLEX_ATTENTION", "TORCH_SDPA"])
+def test_platform_contract_rejects_removed_attention_members(
+    upstream_source_root, tmp_path, member
+):
+    relative = "vllm/v1/attention/backends/registry.py"
+    tree = ast.parse((upstream_source_root / relative).read_text())
+    enum = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.ClassDef) and node.name == "AttentionBackendEnum"
+    )
+    removed = [
+        node
+        for node in enum.body
+        if isinstance(node, ast.Assign)
+        and any(
+            isinstance(target, ast.Name) and target.id == member
+            for target in node.targets
+        )
+    ]
+    assert len(removed) == 1, f"fault setup requires the real {member} member"
+    enum.body.remove(removed[0])
+    mutated = tmp_path / relative
+    mutated.parent.mkdir(parents=True)
+    mutated.write_text(ast.unparse(tree))
+    problems = attention_backend_problems(tmp_path)
+    assert problems == [
+        "missing platform attention backend: "
+        f"vllm.v1.attention.backends.registry.AttentionBackendEnum.{member}"
+    ]
 
 
 @pytest.mark.upstream_source
