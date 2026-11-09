@@ -239,6 +239,20 @@ def callable_signature(node: ast.AST) -> inspect.Signature:
     return inspect.Signature(parameters)
 
 
+def bound_value_problems(
+    before: inspect.BoundArguments, after: inspect.BoundArguments
+) -> list[str]:
+    """Keep positional meaning checks identical for generic and real calls."""
+    return [
+        f"argument {name!r} changes meaning"
+        for name, value in before.arguments.items()
+        if name in after.arguments
+        and before.signature.parameters[name].kind
+        not in (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD)
+        and after.arguments[name] is not value
+    ]
+
+
 def compatibility_problems(replacement: ast.AST, upstream: ast.AST) -> list[str]:
     """Check representative calls, including positional meaning and required args.
 
@@ -295,15 +309,5 @@ def compatibility_problems(replacement: ast.AST, upstream: ast.AST) -> list[str]
                         f"{len(call_args)} positional, keywords {sorted(call_kwargs)}: {exc}"
                     )
                     continue
-                for name, value in original.arguments.items():
-                    if (
-                        name in bound.arguments
-                        and up.parameters[name].kind
-                        not in (
-                            inspect.Parameter.VAR_POSITIONAL,
-                            inspect.Parameter.VAR_KEYWORD,
-                        )
-                        and bound.arguments[name] is not value
-                    ):
-                        problems.append(f"positional argument {name!r} changes meaning")
+                problems.extend(bound_value_problems(original, bound))
     return sorted(set(problems))

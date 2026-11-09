@@ -18,8 +18,10 @@ from tests.support.upstream import (
     FUNC_NODES,
     PATCH_ROOT,
     ROOT,
+    bound_value_problems,
     callable_signature,
     compatibility_problems,
+    dataclass_method,
     module_file,
     resolve_symbol,
 )
@@ -87,20 +89,105 @@ def actual_call_problems(root, hook, original, calls):
         except TypeError as exc:
             problems.append(f"{location}: {exc}")
             continue
-        for name, value in before.arguments.items():
-            if (
-                name in after.arguments
-                and upstream.parameters[name].kind
-                not in (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD)
-                and after.arguments[name] is not value
-            ):
-                problems.append(f"{location}: argument {name} changes meaning")
+        problems.extend(
+            f"{location}: {problem}" for problem in bound_value_problems(before, after)
+        )
     return problems if checked else [f"no source calls found for {hook.target}"]
+
+
+def imported_consumer_calls(root):
+    """Index direct calls through module imports and local exported names.
+
+    This deliberately handles source-visible imports and attribute chains only.
+    Missing consumers and unresolved argument expansion require a separate
+    feature contract instead of silently accepting an opaque callable.
+    """
+    calls = {}
+    for path in sorted((root / "vllm").rglob("*.py")):
+        parts = path.relative_to(root).with_suffix("").parts
+        module = ".".join(parts[:-1] if parts[-1] == "__init__" else parts)
+        package = (
+            module.split(".")
+            if path.name == "__init__.py"
+            else module.split(".")[:-1]
+        )
+        tree = ast.parse(path.read_text())
+        imports = {}
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom):
+                owner = node.module or ""
+                if node.level:
+                    owner = ".".join(
+                        [*package[: len(package) - node.level + 1], *owner.split(".")]
+                    ).rstrip(".")
+                for alias in node.names:
+                    imports.setdefault(alias.asname or alias.name, set()).add(
+                        f"{owner}.{alias.name}"
+                    )
+            elif isinstance(node, ast.Import):
+                for alias in node.names:
+                    name = alias.asname or alias.name.split(".")[0]
+                    imports.setdefault(name, set()).add(
+                        alias.name if alias.asname else name
+                    )
+        for call in ast.walk(tree):
+            if not isinstance(call, ast.Call):
+                continue
+            attributes = []
+            value = call.func
+            while isinstance(value, ast.Attribute):
+                attributes.insert(0, value.attr)
+                value = value.value
+            if not isinstance(value, ast.Name):
+                continue
+            # Keep every possible import binding: a nested scope must never
+            # overwrite a module-level alias and hide one of its call shapes.
+            owners = imports.get(value.id, {f"{module}.{value.id}"})
+            targets = {".".join([owner, *attributes]) for owner in owners}
+            if not attributes:
+                # Rebinding an imported name patches this module's export too.
+                targets.add(f"{module}.{value.id}")
+            for target in targets:
+                calls.setdefault(target, []).append((path, call))
+    return calls
+
+
+def consumer_call_problems(root, hook, calls):
+    replacement = callable_signature(hook.node)
+    found = calls.get(hook.target, [])
+    if not found:
+        return [f"no source calls found for opaque callable {hook.target}"]
+    # A forwarding (*args, **kwargs) wrapper accepts every expansion. Anything
+    # narrower must prove concrete bindings or supply a separate feature test.
+    kinds = {parameter.kind for parameter in replacement.parameters.values()}
+    forwards_all = kinds == {
+        inspect.Parameter.VAR_POSITIONAL,
+        inspect.Parameter.VAR_KEYWORD,
+    }
+    problems = []
+    for path, call in found:
+        location = f"{path.relative_to(root)}:{call.lineno}"
+        expanded = any(isinstance(arg, ast.Starred) for arg in call.args) or any(
+            keyword.arg is None for keyword in call.keywords
+        )
+        if expanded:
+            if not forwards_all:
+                problems.append(f"{location}: expanded call needs a feature contract")
+            continue
+        try:
+            replacement.bind(
+                *(object() for _ in call.args),
+                **{keyword.arg: object() for keyword in call.keywords},
+            )
+        except TypeError as exc:
+            problems.append(f"{location}: {exc}")
+    return problems
 
 
 def target_problems(root, hooks):
     failures = []
     calls = None
+    consumers = None
     registry = ROOT / "vllm_sail/registry/moe_backends/__init__.py"
     alias_bodies = {
         hook.target: hook.node
@@ -145,6 +232,22 @@ def target_problems(root, hooks):
                     calls = _feature_calls(root)
                 problems = actual_call_problems(root, hook, resolved.node, calls)
             failures.extend(f"{hook.target}: {problem}" for problem in problems)
+        elif resolved.present and isinstance(hook.node, FUNC_NODES):
+            if (
+                isinstance(resolved.node, ast.ClassDef)
+                and hook.path
+                == PATCH_ROOT / "enhancement/attention/kv_cache_interface.py"
+                and dataclass_method(resolved.node, hook.target.rsplit(".", 1)[-1])
+            ):
+                # The generated dataclass API has its own source dependency
+                # checks and real constructor/replace/merge behavior tests.
+                continue
+            if consumers is None:
+                consumers = imported_consumer_calls(root)
+            failures.extend(
+                f"{hook.target}: {problem}"
+                for problem in consumer_call_problems(root, hook, consumers)
+            )
     return failures
 
 
@@ -258,6 +361,122 @@ else:
     run = unavailable
 """)
     assert resolve_symbol(tmp_path, "vllm.consumer.run").present
+
+
+@pytest.mark.parametrize("guarded", [False, True])
+@pytest.mark.parametrize("valid", [False, True])
+@pytest.mark.parametrize("import_style", ["direct", "alias", "module", "local"])
+def test_fallback_callable_checks_real_consumer_arguments(
+    tmp_path, valid, import_style, guarded
+):
+    package = tmp_path / "vllm"
+    package.mkdir()
+    provider = package / "provider.py"
+    provider.write_text("""
+def unavailable(*args, **kwargs):
+    raise RuntimeError("optional library unavailable")
+if available:
+    from vllm.optional import run
+else:
+    run = unavailable
+""")
+    consumer = {
+        "direct": "from vllm.provider import run\nrun(1, used=2)\n",
+        "alias": "from vllm.provider import run as invoke\ninvoke(1, used=2)\n",
+        "module": "from vllm import provider as ops\nops.run(1, used=2)\n",
+        "local": "run(1, used=2)\n",
+    }[import_style]
+    if import_style == "local":
+        provider.write_text(provider.read_text() + consumer)
+    else:
+        (package / "consumer.py").write_text(consumer)
+    plugin = tmp_path / "plugin.py"
+    parameters = "*args, **kwargs" if valid else ""
+    declaration = (
+        '@patch("vllm.provider", "run")\n'
+        f"def replacement({parameters}): pass\n"
+    )
+    if guarded:
+        declaration = (
+            'if getattr(consumer, "run", None) is original:\n'
+            + "".join("    " + line for line in declaration.splitlines(keepends=True))
+        )
+    plugin.write_text(declaration)
+    hooks, unresolved = scan_patch_file(plugin)
+    assert not unresolved
+    assert isinstance(resolve_symbol(tmp_path, "vllm.provider.run").node, ast.Assign)
+    problems = target_problems(tmp_path, hooks)
+    assert bool(problems) is (not valid), problems
+    if not valid:
+        assert "vllm.provider.run" in " ".join(problems)
+
+
+@pytest.mark.parametrize("valid", [False, True])
+def test_local_import_cannot_hide_another_scope_consumer(tmp_path, valid):
+    package = tmp_path / "vllm"
+    package.mkdir()
+    (package / "provider.py").write_text("run = external_library\n")
+    (package / "other.py").write_text("def run(a): pass\n")
+    (package / "consumer.py").write_text("""
+from vllm.provider import run as invoke
+from vllm.provider import run
+def use():
+    invoke(1, used=2)
+def unrelated():
+    from vllm.other import run as invoke
+    invoke(3)
+run(1)
+""")
+    plugin = tmp_path / "plugin.py"
+    parameters = "a, *, used=None" if valid else "a"
+    plugin.write_text(
+        '@patch("vllm.provider", "run")\n'
+        f"def replacement({parameters}): pass\n"
+    )
+    hooks, _ = scan_patch_file(plugin)
+    problems = target_problems(tmp_path, hooks)
+    assert bool(problems) is (not valid), problems
+
+
+def test_guarded_alias_missing_from_new_upstream_is_skipped(tmp_path):
+    package = tmp_path / "vllm"
+    package.mkdir()
+    (package / "consumer.py").write_text("# the legacy import was removed\n")
+    plugin = tmp_path / "plugin.py"
+    plugin.write_text("""
+if getattr(consumer, "run", None) is original:
+    @patch("vllm.consumer", "run")
+    def replacement(a): pass
+""")
+    hooks, unresolved = scan_patch_file(plugin)
+    assert not unresolved and len(hooks) == 1
+    assert hooks[0].conditional_alias
+    assert not target_problems(tmp_path, hooks)
+
+
+def test_unresolved_callable_without_consumers_requires_a_feature_contract(tmp_path):
+    package = tmp_path / "vllm"
+    package.mkdir()
+    (package / "provider.py").write_text("run = external_library\n")
+    plugin = tmp_path / "plugin.py"
+    plugin.write_text('@patch("vllm.provider", "run")\ndef replacement(): pass\n')
+    hooks, _ = scan_patch_file(plugin)
+    assert "no source calls found" in " ".join(target_problems(tmp_path, hooks))
+
+
+@pytest.mark.upstream_source
+def test_flashmla_signature_fault_is_rejected_with_optional_source_missing(
+    upstream_source_root,
+):
+    path = PATCH_ROOT / "enhancement/attention/flashmla_ops.py"
+    hooks, unresolved = scan_patch_file(path)
+    assert not unresolved
+    target = "vllm.v1.attention.ops.flashmla.flash_mla_with_kvcache"
+    provider = next(hook for hook in hooks if hook.target == target)
+    assert not target_problems(upstream_source_root, [provider])
+    broken = provider._replace(node=_function("def flash_mla_with_kvcache(): pass"))
+    problems = target_problems(upstream_source_root, [broken])
+    assert problems and any(target in problem for problem in problems)
 
 
 def test_unconditional_dangling_import_cannot_be_repaired_by_later_assignment(tmp_path):
