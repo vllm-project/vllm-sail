@@ -40,8 +40,47 @@ def test_runtime_wrapper_mounts_inputs_read_only_and_artifacts_writable():
     assert "--env HF_HUB_OFFLINE=1" in text
     assert "--env TRANSFORMERS_OFFLINE=1" in text
     assert 'target=/artifacts"' in text
+    assert "--env BASELINE_ROOT=/source/tests/e2e/perf/baselines" in text
+    assert "--env BASELINE_OUTPUT_ROOT=/artifacts/baselines" in text
     assert "/source/scripts/ci/ppu_pin_ut.sh" in text
     assert "/source/scripts/ci/ppu_e2e_smoke.sh" in text
+
+
+def test_runtime_wrapper_keeps_dynamic_module_cache_writable():
+    text = SCRIPT.read_text()
+    # HF_HOME is mounted read-only, so transformers cannot materialise remote
+    # model code underneath it; both device lanes have to redirect the cache.
+    assert "hf_modules_cache=/tmp/hf-modules" in text
+    assert text.count('--env HF_MODULES_CACHE="${hf_modules_cache}"') == 2
+
+
+def test_runtime_wrapper_keeps_deep_gemm_cache_outside_the_container():
+    text = SCRIPT.read_text()
+    # Left to its default the cache lands under VLLM_CACHE_ROOT, i.e. in the
+    # container's writable layer, which docker rm discards -- every accuracy
+    # case then repeats the DeepGEMM JIT pass.
+    assert ': "${PPU_CI_DG_CACHE_DIR:?PPU_CI_DG_CACHE_DIR is required' in text
+    assert "dg_cache_root=$(realpath \"${PPU_CI_DG_CACHE_DIR}\")" in text
+    assert "[[ -d \"${dg_cache_root}\" ]]" in text
+    assert '--mount "type=bind,source=${dg_cache_root},target=${dg_cache_root}"' in text
+    # deep_gemm reads DG_JIT_CACHE_DIR; the SDK builds also honour the older
+    # DG_CACHE_DIR, so both names point at the same directory.
+    assert '--env DG_JIT_CACHE_DIR="${dg_cache_root}"' in text
+    assert '--env DG_CACHE_DIR="${dg_cache_root}"' in text
+    # One root serves every case: deep_gemm keys the cache by the toolchain
+    # that produced the binaries, so the wrapper must not invent a second level
+    # of its own on top of that.
+    assert "${image_id#sha256:}" not in text
+    assert "chmod 0777" not in text
+
+
+def test_accuracy_workflow_supplies_the_deep_gemm_cache_root():
+    workflow = (ROOT / ".github/workflows/_ppu-accuracy-tests.yaml").read_text()
+    # The wrapper fails closed on a missing root, so the caller has to pass one;
+    # the default keeps the nightly and the manual debug lane on one value.
+    assert "PPU_CI_DG_CACHE_DIR: ${{ inputs.dg_cache_dir }}" in workflow
+    assert "dg_cache_dir:" in workflow
+    assert "default: /nas_aisw/vllmci_dgcache" in workflow
 
 
 def test_runtime_wrapper_serializes_jobs_and_verifies_source_identity():

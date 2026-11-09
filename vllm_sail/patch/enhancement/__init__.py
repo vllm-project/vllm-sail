@@ -17,6 +17,7 @@ from vllm_sail.patch.enhancement import pynccl  # noqa: F401  (before communicat
 from vllm_sail.patch.enhancement import import_gates  # noqa: F401  (before kernel consumers)
 from vllm_sail.patch.enhancement import custom_op_dispatch  # noqa: F401
 from vllm_sail.patch.enhancement import attention  # noqa: F401  (needs custom_op_dispatch)
+from vllm_sail.patch.enhancement import fused_act  # noqa: F401  (needs custom_op_dispatch)
 from vllm_sail.patch.enhancement import compressed_tensors_ppu
 from vllm_sail.patch.enhancement import deepep  # noqa: F401
 from vllm_sail.patch.enhancement import deep_gemm_redirect  # noqa: F401
@@ -24,6 +25,7 @@ from vllm_sail.patch.enhancement import fused_moe_ppu
 from vllm_sail.patch.enhancement import int8_quant  # noqa: F401
 from vllm_sail.patch.enhancement import kernel_warmup  # noqa: F401
 from vllm_sail.patch.enhancement import modular_kernel  # noqa: F401
+from vllm_sail.patch.enhancement import online_quantization_dtype  # noqa: F401
 from vllm_sail.patch.enhancement import quant_keys  # noqa: F401
 from vllm_sail.patch.enhancement import tuned_config_lookup  # noqa: F401
 from vllm_sail.patch.enhancement import models  # noqa: F401

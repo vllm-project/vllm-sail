@@ -33,7 +33,7 @@ application in the allowlist.
 | `VLLM_SAIL_DENSE_BACKEND` | Automatic | `deepgemm`, `acext`, `triton` |
 | `VLLM_SAIL_DENSE_BF16_DEEPGEMM` | `0` | Opt into the PPU 1.5 BF16 dense DeepGEMM path |
 | `VLLM_SAIL_DEEPGEMM_MOE_TP_FUSED` | `0` | Enable the supported fused tensor-parallel MoE path |
-| `VLLM_SAIL_DEEPGEMM_MOE_FUSED_ACT_QUANT` | `0` | Fuse the activation and the second MoE GEMM's input quantization into DeepGEMM's SiLU/SiTU kernel for the FP8 and MXFP4 experts; the BF16 (w4a16 or unquantized) experts use its values-only kernel |
+| `VLLM_SAIL_DEEPGEMM_MOE_FUSED_ACT_QUANT` | `0` | Fuse the activation and the second MoE GEMM's input quantization into DeepGEMM's SiLU/SiTU kernel for the FP8 and MXFP4 experts; the BF16 (w4a16 or unquantized) experts use its values-only kernel, which also replaces the standalone `vllm::silu_and_mul` / `vllm::situ_and_mul` that unquantized BF16 dense MLPs and shared experts run on |
 | `VLLM_SAIL_USE_PLA` | `1` | Allow PLA linear-attention paths where available |
 | `VLLM_GDN_DECODE_KERNEL` | `auto` on PPU | `auto`, `cuda`, `pla`, `triton`; selects GDN decode independently of prefill and KDA |
 | `VLLM_SAIL_FUSED_RMSNORM_QUANT` | `0` | Enable supported fused RMSNorm and quantization paths |
@@ -66,7 +66,20 @@ unsupported-op stub. Its fused MTP kernel applies only to eligible batches;
 other batches use the existing Triton path. The new HGGC port still requires
 native build and device correctness verification before deployment.
 
+## DeepSeek V4.1
+
+The main integration retains upstream V4.1 target/DSpark execution, shared KV
+and index metadata, and adds PPU attention, delayed mHC, channelwise dense/Engram
+quantization and checkpoint-name mappings. These source adaptations still need
+device, model-load and inference verification; see the
+[verification guide](verification_guide.md).
+
 ## Compatibility controls
+
+For FP8/BF16 conversion and recipe selection, see [Online quantization](online_quantization.md).
+`VLLM_SAIL_FP8_LOAD_POLICY=native|bf16|int8` applies only when no explicit
+quantization argument was supplied. Leaving it unset preserves native behavior;
+the guide describes legacy opt-in variable precedence and source-format limits.
 
 | Variable | Default | Behavior |
 | --- | --- | --- |

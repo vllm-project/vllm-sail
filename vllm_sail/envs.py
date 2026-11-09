@@ -44,6 +44,10 @@ if TYPE_CHECKING:
     VLLM_SAIL_FORCE_MOE_WNA16_CUDA: bool = False
     VLLM_SAIL_ENABLE_MOE_MARLIN: bool = False
     VLLM_SAIL_USE_TRITON_INT8_QUANT: bool = True
+    VLLM_SAIL_FP8_LOAD_POLICY: str | None = None
+    VLLM_SAIL_ENABLE_FP8_TO_INT8: bool = False
+    VLLM_SAIL_KPOOL_DECODE_LOGITS: str = "non_paged"
+    VLLM_SAIL_KPOOL_MAX_DENSE_POOLS: int = 1 << 21
     VLLM_SAIL_NVTX_PROFILE: bool = False
     VLLM_SAIL_NVTX_DUMP_TOPK: bool = False
     VLLM_SAIL_NVTX_VFA_DUMP_SEQLEN: bool = False
@@ -64,6 +68,8 @@ if TYPE_CHECKING:
     VLLM_PPU_FORCE_MOE_WNA16_CUDA: bool = False
     VLLM_PPU_ENABLE_MOE_MARLIN: bool = False
     VLLM_PPU_USE_TRITON_INT8_QUANT: bool = True
+    VLLM_PPU_FP8_LOAD_POLICY: str | None = None
+    VLLM_PPU_ENABLE_FP8_TO_INT8: bool = False
     VLLM_PPU_NVTX_PROFILE: bool = False
     VLLM_PPU_NVTX_DUMP_TOPK: bool = False
     VLLM_PPU_NVTX_VFA_DUMP_SEQLEN: bool = False
@@ -73,6 +79,7 @@ _TRUTHY = ("true", "1", "yes", "on")
 #: Backend names accepted by both MoE and dense GEMM selection.
 GEMM_BACKENDS = ("deepgemm", "acext", "triton")
 GDN_DECODE_KERNELS = ("auto", "cuda", "pla", "triton")
+KPOOL_DECODE_LOGITS_BACKENDS = ("non_paged",)
 
 
 def _env_names(name: str) -> tuple[str, ...]:
@@ -121,6 +128,24 @@ def _choice(
     return _get
 
 
+def _positive_int(name: str, default: int) -> Callable[[], int]:
+    """Read a positive integer env var."""
+
+    def _get() -> int:
+        source, raw = _read_env(name)
+        if raw is None or raw.strip() == "":
+            return default
+        try:
+            value = int(raw)
+        except ValueError as exc:
+            raise ValueError(f"Expected an integer for {source}, got {raw!r}.") from exc
+        if value <= 0:
+            raise ValueError(f"{source} must be positive, got {value}.")
+        return value
+
+    return _get
+
+
 environment_variables: dict[str, Callable[[], Any]] = {
     "PPU_SDK": lambda: os.environ.get("PPU_SDK", "/usr/local/PPU_SDK"),
     # Shared upstream name; PPU extends the choices through its general plugin.
@@ -137,7 +162,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Fuse the second GEMM's input quantization into DeepGEMM's activation
     # kernel (`silu_and_mul` / `situ_and_mul`) instead of running the activation
     # and a separate per-token/per-block quantize pass. The BF16 (w4a16 or
-    # unquantized) experts use the same kernel's values-only epilogue.
+    # unquantized) experts use the same kernel's values-only epilogue. The same
+    # epilogue also replaces the standalone `vllm::silu_and_mul` /
+    # `vllm::situ_and_mul` that unquantized BF16 dense MLPs and shared experts
+    # run on, through SiluAndMul / SituAndMul.
     "VLLM_SAIL_DEEPGEMM_MOE_FUSED_ACT_QUANT": _bool(
         "VLLM_SAIL_DEEPGEMM_MOE_FUSED_ACT_QUANT", False
     ),
@@ -161,6 +189,23 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Triton implementation of dynamic per-token int8 quant; faster than the
     # compiled kernel on PPU.
     "VLLM_SAIL_USE_TRITON_INT8_QUANT": _bool("VLLM_SAIL_USE_TRITON_INT8_QUANT", True),
+    "VLLM_SAIL_FP8_LOAD_POLICY": _choice(
+        "VLLM_SAIL_FP8_LOAD_POLICY", None, ("native", "bf16", "int8")
+    ),
+    "VLLM_SAIL_ENABLE_FP8_TO_INT8": _bool("VLLM_SAIL_ENABLE_FP8_TO_INT8", False),
+    # Decode-time logits backend for the glm5_next kpool indexer.
+    # ``non_paged`` (default) gathers the pool K cache and uses the non-paged
+    # int8 kernel (same one as prefill). The paged INT8 kernel writes only
+    # part of the logits on PPU, so selecting it is rejected until fixed.
+    "VLLM_SAIL_KPOOL_DECODE_LOGITS": _choice(
+        "VLLM_SAIL_KPOOL_DECODE_LOGITS", "non_paged", KPOOL_DECODE_LOGITS_BACKENDS
+    ),
+    # Dense decode fallback bound: batch * ceil(max_seq_len / kpool) pools.
+    # Above it the fallback would materialise an O(batch * context) logits
+    # matrix (the 1M-context warmup needs ~256 GiB), so fail loudly instead.
+    "VLLM_SAIL_KPOOL_MAX_DENSE_POOLS": _positive_int(
+        "VLLM_SAIL_KPOOL_MAX_DENSE_POOLS", 1 << 21
+    ),
     # -- Attention / linear attention --------------------------------------
     # Legacy getter only. Current PLA/Triton dispatch uses VLLM_SAIL_USE_PLA.
     "VLLM_SAIL_FUSED_GDN_DECODE": _bool("VLLM_SAIL_FUSED_GDN_DECODE", True),

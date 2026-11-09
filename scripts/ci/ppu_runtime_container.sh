@@ -3,9 +3,9 @@
 # Run pin/model/accuracy validation in an isolated PPU runtime container.
 set -Eeuo pipefail
 
-mode=${1:?Usage: ppu_runtime_container.sh pin-ut|model-test|model-accuracy}
+mode=${1:?Usage: ppu_runtime_container.sh pin-ut|model-test|model-accuracy|kernel-perf}
 case "${mode}" in
-    pin-ut|model-test|model-accuracy) ;;
+    pin-ut|model-test|model-accuracy|kernel-perf) ;;
     *) printf 'Unknown runtime mode: %s\n' "${mode}" >&2; exit 2 ;;
 esac
 
@@ -42,6 +42,12 @@ done
     echo "PPU_CI_DEVICE_COUNT must be between 1 and 8" >&2
     exit 2
 }
+
+# transformers builds the cache for remote model code under HF_MODULES_CACHE,
+# which defaults to ${HF_HOME}/modules. HF_HOME is mounted read-only below, so
+# point it at a writable path; a weight that ships its own tokenizer stops at
+# engine start with EROFS instead of loading.
+hf_modules_cache=/tmp/hf-modules
 
 exec 9>/tmp/vllm-sail-ppu-ci.lock
 flock -n 9 || { echo "Another vLLM SAIL PPU job is active on this runner" >&2; exit 2; }
@@ -165,6 +171,7 @@ case "${mode}" in
             --mount "type=bind,source=${hf_home},target=${hf_home},readonly"
             --env MODEL_ID="${MODEL_ID}"
             --env HF_HOME="${hf_home}"
+            --env HF_MODULES_CACHE="${hf_modules_cache}"
             --env HF_HUB_OFFLINE=1
             --env TRANSFORMERS_OFFLINE=1
             --env SERVED_NAME="${SERVED_NAME}"
@@ -182,10 +189,14 @@ case "${mode}" in
     model-accuracy)
         : "${GSM8K_DATASET_PATH:?GSM8K_DATASET_PATH is required for model-accuracy}"
         : "${PPU_CI_HF_HOME:?PPU_CI_HF_HOME is required for model-accuracy}"
+        : "${PPU_CI_DG_CACHE_DIR:?PPU_CI_DG_CACHE_DIR is required for model-accuracy}"
         : "${MODEL_KEY:?MODEL_KEY is required for model-accuracy}"
         : "${MODEL_ID:?MODEL_ID is required for model-accuracy}"
+        # Several cases may share one checkpoint; only the label differs.
+        case_id="${CASE_ID:-${MODEL_KEY}}"
         hf_home=$(realpath "${PPU_CI_HF_HOME}")
         gsm8k_dataset=$(realpath "${GSM8K_DATASET_PATH}")
+        dg_cache_root=$(realpath "${PPU_CI_DG_CACHE_DIR}")
         [[ -d "${hf_home}" ]] || {
             echo "PPU_CI_HF_HOME is not a directory" >&2
             exit 2
@@ -194,17 +205,41 @@ case "${mode}" in
             echo "GSM8K_DATASET_PATH is not a directory" >&2
             exit 2
         }
+        [[ -d "${dg_cache_root}" ]] || {
+            echo "PPU_CI_DG_CACHE_DIR is not a directory" >&2
+            exit 2
+        }
+        # DeepGEMM compiles its kernels on first use and caches the binaries so
+        # the next start can skip the JIT pass. Left unset it writes under
+        # VLLM_CACHE_ROOT, i.e. inside the container's writable layer, which
+        # docker rm discards -- so every case of this lane recompiled from
+        # scratch. Point it at the shared host root instead.
+        #
+        # One root serves every case and every image: deep_gemm keys the cache
+        # by the toolchain that produced the binaries itself, so a stale entry
+        # cannot be mistaken for a hit.
+        #
+        # Two names because deep_gemm reads DG_JIT_CACHE_DIR while the PPU SDK
+        # builds also honour the older DG_CACHE_DIR, exactly like the vendor
+        # recipes which export both. Pin them at one directory.
         model_snapshot=$(resolve_snapshot "${MODEL_ID}")
         create+=(
             --shm-size=32g
             --mount "type=bind,source=${hf_home},target=${hf_home},readonly"
             --mount "type=bind,source=${gsm8k_dataset},target=${gsm8k_dataset},readonly"
+            --mount "type=bind,source=${dg_cache_root},target=${dg_cache_root}"
             --env HF_HOME="${hf_home}"
+            --env HF_MODULES_CACHE="${hf_modules_cache}"
             --env HF_HUB_OFFLINE=1
             --env TRANSFORMERS_OFFLINE=1
+            --env DG_JIT_CACHE_DIR="${dg_cache_root}"
+            --env DG_CACHE_DIR="${dg_cache_root}"
             --env MODEL_ID="${MODEL_ID}"
             --env GSM8K_DATASET_PATH="${gsm8k_dataset}"
             --env MODEL_KEY="${MODEL_KEY}"
+            --env CASE_ID="${case_id}"
+            --env SERVER_CMD="${SERVER_CMD:-}"
+            --env SERVER_ENV="${SERVER_ENV:-}"
             --env RESULTS_DIR=/artifacts
             --env UPDATE_GOLDEN="${UPDATE_GOLDEN:-0}"
             --env THRESHOLD="${THRESHOLD:-0.9}"
@@ -216,6 +251,23 @@ case "${mode}" in
         create+=(
             --entrypoint bash "${image_id}"
             /source/scripts/ci/ppu_e2e_accuracy.sh
+        )
+        ;;
+    kernel-perf)
+        : "${SUITE:?SUITE is required for kernel-perf}"
+        create+=(
+            --shm-size=8g
+            --env SUITE="${SUITE}"
+            --env TEST_PATH=tests/e2e/perf/test_kernel_perf.py
+            --env PYTEST_MARKER=perf
+            --env WHEELS_DIR=/wheels
+            --env RESULTS_DIR=/artifacts
+            --env BASELINE_ROOT=/source/tests/e2e/perf/baselines
+            --env BASELINE_OUTPUT_ROOT=/artifacts/baselines
+            --env VLLM_USE_RUST_FRONTEND=0
+            --env VLLM_USE_RUST_BENCH=0
+            --entrypoint bash "${image_id}"
+            /source/scripts/ci/perf_regression.sh
         )
         ;;
 esac

@@ -39,8 +39,13 @@ EXPECTED_MODULES = {
     "deepseek_v4_cache",
     "deepseek_v4_metadata",
     "deepseek_v4_compressor",
+    "deepseek_v41",
+    "deepseek_v41_engram",
+    "deepseek_v41_indexer",
+    "glm5_next",
     "kimi_k3",
     "llama4",
+    "minimax_m3",
     "moe_marlin_gate",
     "qwen3_fused_quant",
     "qwen3_moe",
@@ -226,13 +231,12 @@ _EXPECTED_TARGETS = {
         "vllm.models.kimi_k3.nvidia.latent_moe_runner.LatentMoERunner."
         "_overlap_allreduce_tail"
     ),
-    (
-        "vllm.models.kimi_k3.nvidia.latent_moe_runner.LatentMoERunner."
-        "_select_tail_tier"
-    ),
+    ("vllm.models.kimi_k3.nvidia.latent_moe_runner.LatentMoERunner._select_tail_tier"),
     "vllm.models.kimi_k3.nvidia.latent_moe_runner.LatentMoERunner.__init__",
     "vllm.models.kimi_k3.nvidia.model.KimiRoutedOutputTransform.forward",
     "vllm.model_executor.models.llama4.Llama4MoE.custom_routing_function",
+    "vllm.models.minimax_m3.nvidia.model.MiniMaxM3Model._init_fused_moe_finalize",
+    "vllm.models.minimax_m3.nvidia.model.MiniMaxM3MLP.__init__",
     "vllm.model_executor.models.qwen3_moe.Qwen3MoeSparseMoeBlock.__init__",
     "vllm.model_executor.models.qwen3_moe.Qwen3MoeDecoderLayer.__init__",
     "vllm.model_executor.models.qwen3_moe.Qwen3MoeModel.__init__",

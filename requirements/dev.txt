@@ -9,3 +9,6 @@ setuptools>=77.0.3,<81.0.0
 setuptools-scm>=8,<9
 wheel
 tomli; python_version < "3.11"
+# Same range as requirements/ppu.txt: the upstream glm5next model imports
+# Glm5NextTextConfig, and the pin-UT CI lane installs only this file.
+transformers>=5.16.1,<5.20.0

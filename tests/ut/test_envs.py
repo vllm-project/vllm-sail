@@ -26,11 +26,15 @@ BOOL_DEFAULTS = {
     "FORCE_MOE_WNA16_CUDA": False,
     "ENABLE_MOE_MARLIN": False,
     "USE_TRITON_INT8_QUANT": True,
+    "ENABLE_FP8_TO_INT8": False,
     "NVTX_PROFILE": False,
     "NVTX_DUMP_TOPK": False,
     "NVTX_VFA_DUMP_SEQLEN": False,
 }
 BACKENDS = ("MOE_BACKEND", "DENSE_BACKEND")
+# String env vars with a non-None default and no legacy VLLM_PPU_* alias.
+STRING_DEFAULTS = {"KPOOL_DECODE_LOGITS": "non_paged"}
+INT_DEFAULTS = {"KPOOL_MAX_DENSE_POOLS": 1 << 21}
 
 
 @pytest.fixture(autouse=True)
@@ -42,9 +46,14 @@ def clean_plugin_environment(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_defaults_and_canonical_snapshot() -> None:
     expected = {f"VLLM_SAIL_{key}": value for key, value in BOOL_DEFAULTS.items()}
     expected.update({f"VLLM_SAIL_{key}": None for key in BACKENDS})
+    expected.update(
+        {f"VLLM_SAIL_{key}": value for key, value in STRING_DEFAULTS.items()}
+    )
+    expected.update({f"VLLM_SAIL_{key}": value for key, value in INT_DEFAULTS.items()})
     expected["VLLM_DEEPEPLL_RECV_HOOK"] = True
     expected["PPU_SDK"] = "/usr/local/PPU_SDK"
     expected["VLLM_GDN_DECODE_KERNEL"] = "auto"
+    expected["VLLM_SAIL_FP8_LOAD_POLICY"] = None
     assert envs.snapshot() == expected
     assert set(envs.environment_variables) == set(expected)
     for suffix in (*BOOL_DEFAULTS, *BACKENDS):
@@ -256,3 +265,14 @@ def test_gdn_prefill_e2e_resolver_stubs_match_production(monkeypatch, name):
         # Devices may have cached PLA submodules; blocking only the parent cannot simulate a missing package.
         namespace["_install_fake_pla"](monkeypatch)
     namespace[name](monkeypatch)
+
+
+@pytest.mark.parametrize(
+    "name", ["VLLM_SAIL_KPOOL_DECODE_LOGITS", "VLLM_PPU_KPOOL_DECODE_LOGITS"]
+)
+def test_kpool_rejects_incomplete_paged_logits(monkeypatch, name):
+    monkeypatch.delenv("VLLM_SAIL_KPOOL_DECODE_LOGITS", raising=False)
+    monkeypatch.delenv("VLLM_PPU_KPOOL_DECODE_LOGITS", raising=False)
+    monkeypatch.setenv(name, "paged")
+    with pytest.raises(ValueError, match="Expected one of non_paged"):
+        _ = envs.VLLM_SAIL_KPOOL_DECODE_LOGITS

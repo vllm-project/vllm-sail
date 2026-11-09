@@ -8,7 +8,16 @@
 # Results (junit XML, golden JSON, vllm serve logs) land in RESULTS_DIR.
 #
 # Environment contract (injected by ppu_runtime_container.sh):
-#   MODEL_KEY          model config key (e.g. deepseek_v4_int8)
+#   MODEL_KEY          evaluator model-config key; also keys the golden file
+#                      (e.g. deepseek_v4_int8)
+#   CASE_ID            catalog case label; several cases may share one
+#                      MODEL_KEY and therefore one golden (default: MODEL_KEY)
+#   SERVER_CMD         JSON array of the full ``vllm serve`` argv for this
+#                      case, with {model}/{port}/{served_name} placeholders.
+#                      Empty or "[]" uses the evaluator's built-in argv.
+#   SERVER_ENV         JSON object of extra environment variables for this
+#                      case's server process (e.g. VLLM_ENGINE_READY_TIMEOUT_S).
+#                      Empty or "{}" adds nothing.
 #   MODEL_ID           Hugging Face model id this key resolves to; checked
 #                      against the offline cache before the server starts
 #   WHEELS_DIR         directory holding the downloaded *.whl artifacts
@@ -16,6 +25,8 @@
 #   UPDATE_GOLDEN      "1" to pass --update-golden (default: "0")
 #   THRESHOLD          accuracy threshold (default: 0.9)
 #   VLLM_PORT          dynamically allocated vLLM API port (default: 9985)
+#   DG_JIT_CACHE_DIR   host-backed DeepGEMM kernel cache; without it the JIT
+#                      pass is repeated from scratch on every container
 #   GOLDEN_SEED_DIR    reviewed goldens to seed from; the checkout is read-only
 #                      (default: /source/tests/e2e/models/_golden)
 set -Eeuo pipefail
@@ -36,6 +47,9 @@ export VLLM_USE_RUST_FRONTEND=0 VLLM_USE_RUST_BENCH=0
 
 export GSM8K_DATASET_PATH="${GSM8K_DATASET_PATH:?GSM8K_DATASET_PATH must be set}"
 MODEL_KEY="${MODEL_KEY:?MODEL_KEY is required}"
+CASE_ID="${CASE_ID:-${MODEL_KEY}}"
+SERVER_CMD="${SERVER_CMD:-}"
+SERVER_ENV="${SERVER_ENV:-}"
 MODEL_ID="${MODEL_ID:?MODEL_ID is required}"
 WHEELS_DIR="${WHEELS_DIR:?WHEELS_DIR is required}"
 RESULTS_DIR="${RESULTS_DIR:?RESULTS_DIR is required}"
@@ -54,10 +68,14 @@ log() { printf '\n=== %s ===\n' "$1"; }
 # ------------------------------------------------------------------
 log "environment"
 echo "MODEL_KEY=${MODEL_KEY}"
+echo "CASE_ID=${CASE_ID}"
+echo "SERVER_CMD=${SERVER_CMD:-<built-in>}"
+echo "SERVER_ENV=${SERVER_ENV:-<none>}"
 echo "RESULTS_DIR=${RESULTS_DIR}"
 echo "UPDATE_GOLDEN=${UPDATE_GOLDEN}"
 echo "THRESHOLD=${THRESHOLD}"
 echo "VLLM_PORT=${VLLM_PORT}"
+echo "DG_JIT_CACHE_DIR=${DG_JIT_CACHE_DIR:-<unset: JIT recompiles this case>}"
 echo "GOLDEN_SEED_DIR=${GOLDEN_SEED_DIR:-/source/tests/e2e/models/_golden}"
 python -c 'import sys; print("python", sys.version)'
 
@@ -135,7 +153,7 @@ PY
 echo "Resolved model_id '${MODEL_ID}' -> '${MODEL_PATH}'"
 
 # ------------------------------------------------------------------
-log "run accuracy eval: ${MODEL_KEY}"
+log "run accuracy eval: ${CASE_ID}"
 # Keep the read-only checkout off cwd/PYTHONPATH so the installed wheels win.
 cd /tmp
 unset PYTHONPATH
@@ -162,11 +180,18 @@ fi
 
 eval_args=(
     --model-key "${MODEL_KEY}"
+    --case-id "${CASE_ID}"
     --threshold "${THRESHOLD}"
     --work-dir "${RESULTS_DIR}"
     --golden-dir "${RESULTS_DIR}/golden"
     --port "${VLLM_PORT}"
 )
+if [[ -n "${SERVER_CMD}" && "${SERVER_CMD}" != "[]" ]]; then
+    eval_args+=(--server-cmd "${SERVER_CMD}")
+fi
+if [[ -n "${SERVER_ENV}" && "${SERVER_ENV}" != "{}" && "${SERVER_ENV}" != "null" ]]; then
+    eval_args+=(--server-env "${SERVER_ENV}")
+fi
 if [[ "${UPDATE_GOLDEN}" == "1" ]]; then
     eval_args+=(--update-golden)
 fi
@@ -182,7 +207,7 @@ ppu-smi > "${RESULTS_DIR}/ppu-smi.log" 2>&1 || true
 
 # ------------------------------------------------------------------
 if (( rc != 0 )); then
-    log "ACCURACY ${MODEL_KEY} FAILED (exit ${rc})"
+    log "ACCURACY ${CASE_ID} FAILED (exit ${rc})"
     exit "${rc}"
 fi
-log "ACCURACY ${MODEL_KEY} PASS"
+log "ACCURACY ${CASE_ID} PASS"

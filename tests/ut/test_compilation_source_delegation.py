@@ -43,7 +43,10 @@ def test_indexer_boundary_delegates_updated_upstream_policy(upstream_source_root
         "vllm_sail/patch/enhancement/residual/compilation_attention_ops.py",
         "install.set_splitting_ops_for_v1",
         {
-            "_PPU_ATTN_OP": "vllm::ppu_sparse_attn_indexer",
+            "_PPU_ATTN_OPS": (
+                "vllm::ppu_sparse_attn_indexer",
+                "vllm::ppu_sparse_attn_indexer_kpool",
+            ),
             "_upstream_set_splitting_ops": original,
         },
     )
@@ -63,7 +66,10 @@ def test_indexer_boundary_delegates_updated_upstream_policy(upstream_source_root
     backend = "deepep_high_throughput" if case == "deepep-ht" else "deepep_low_latency"
     for _ in range(2):
         config.set_splitting_ops_for_v1(backend, 8)
-    assert Config._attention_ops == attention_ops + ["vllm::ppu_sparse_attn_indexer"]
+    assert Config._attention_ops == attention_ops + [
+        "vllm::ppu_sparse_attn_indexer",
+        "vllm::ppu_sparse_attn_indexer_kpool",
+    ]
     if case in ("default", "deepep-ht"):
         assert "vllm::ppu_sparse_attn_indexer" in config.splitting_ops
         assert "vllm::qwen4_exp_qsa_prepare_with_output" in config.splitting_ops

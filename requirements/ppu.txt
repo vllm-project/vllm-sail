@@ -8,6 +8,10 @@
 apache-tvm-ffi==0.1.9
 fastsafetensors>=0.3.2
 tokenspeed-mla==0.1.2
+# The upstream glm5next model imports Glm5NextTextConfig, which older
+# transformers releases do not ship; the plugin loads that model at install().
+# Range matches the vLLM 0.32 pin and the validated PPU runtime (5.16.1).
+transformers>=5.16.1,<5.20.0
 
 # PPU SDK dependencies — supplied by the SDK and NOT installable from PyPI.
 # Their availability is checked at runtime: acext, deep_gemm, flash_attn,

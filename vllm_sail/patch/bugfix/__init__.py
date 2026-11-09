@@ -3,6 +3,10 @@
 
 
 def install() -> None:
-    from vllm_sail.patch.bugfix import async_llm_shutdown
+    from vllm_sail.patch.bugfix import (
+        async_llm_shutdown,
+        glm5_next_int8_mla_dequant,
+    )
 
     async_llm_shutdown.install()
+    glm5_next_int8_mla_dequant.install()
