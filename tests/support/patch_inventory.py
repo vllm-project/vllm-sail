@@ -96,8 +96,12 @@ def _value(node: ast.AST, env: dict[str, Any]) -> Any:
             isinstance(node.func, ast.Attribute)
             and node.func.attr == "items"
             and not node.args
+            and not node.keywords
         ):
-            return tuple(_value(node.func.value, env).items())
+            mapping = _value(node.func.value, env)
+            if not isinstance(mapping, dict):
+                raise Unknown(ast.unparse(node))
+            return tuple(mapping.items())
         if isinstance(node.func, ast.Name) and node.func.id in {
             "bind_body",
             "_with_target_globals",

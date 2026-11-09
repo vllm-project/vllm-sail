@@ -338,6 +338,38 @@ for module, names in TARGETS.items():
     assert len(unresolved) == 1
 
 
+def test_runtime_items_loop_does_not_hide_a_known_patch(tmp_path):
+    plugin = tmp_path / "plugin.py"
+    plugin.write_text("""
+from vllm.models.example import model as provider
+@patch("vllm.example", "run")
+def replacement(a):
+    mapping = provider.RUNTIME_TABLE
+    for suffix, info in mapping.items():
+        if suffix in a:
+            return info
+""")
+    hooks, unresolved = scan_patch_file(plugin)
+    assert [hook.target for hook in hooks] == ["vllm.example.run"]
+    assert not unresolved
+
+
+def test_runtime_items_installation_stays_unresolved(tmp_path):
+    plugin = tmp_path / "plugin.py"
+    plugin.write_text("""
+from vllm.models.example import model as provider
+def install():
+    mapping = provider.RUNTIME_TABLE
+    for name, replacement in mapping.items():
+        patch("vllm.example", name)(replacement)
+""")
+    hooks, unresolved = scan_patch_file(plugin)
+    assert not hooks
+    assert len(unresolved) == 1
+    assert unresolved[0].scope == "install"
+    assert "vllm.example" in unresolved[0].expression
+
+
 @pytest.mark.parametrize("present", [True, False])
 def test_discovery_to_gate_resolves_reexport_providers(tmp_path, present):
     package = tmp_path / "vllm"
