@@ -86,6 +86,15 @@ def _value(node: ast.AST, env: dict[str, Any]) -> Any:
     if isinstance(node, ast.Call):
         if (
             isinstance(node.func, ast.Name)
+            and node.func.id in {"staticmethod", "classmethod"}
+            and node.func.id not in env
+            and len(node.args) == 1
+            and not node.keywords
+        ):
+            # Built-in method descriptors keep the authored callable body.
+            return _value(node.args[0], env)
+        if (
+            isinstance(node.func, ast.Name)
             and node.func.id == "getattr"
             and len(node.args) == 2
         ):
@@ -239,8 +248,7 @@ def scan_patch_file(path: Path) -> tuple[list[Hook], list[Unresolved]]:
                         and isinstance(part.func, ast.Name)
                         and part.func.id == "getattr"
                         and len(part.args) == 3
-                        and isinstance(part.args[1], ast.Constant)
-                        and part.args[1].value == attr
+                        and _maybe_value(part.args[1], env) == attr
                         and isinstance(part.args[2], ast.Constant)
                         and part.args[2].value is None
                         for part in ast.walk(parent.test)
@@ -285,6 +293,9 @@ def scan_patch_file(path: Path) -> tuple[list[Hook], list[Unresolved]]:
                         node.args.posonlyargs + node.args.args + node.args.kwonlyargs
                     ):
                         nested[arg.arg] = None
+                    for arg in (node.args.vararg, node.args.kwarg):
+                        if arg is not None:
+                            nested[arg.arg] = None
                 statements(node.body, nested, node.name)
             elif isinstance(node, ast.For):
                 values = _maybe_value(node.iter, env)

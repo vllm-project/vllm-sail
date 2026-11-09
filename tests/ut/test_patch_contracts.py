@@ -486,6 +486,93 @@ if getattr(consumer, "run", None) is original:
     assert not target_problems(tmp_path, hooks)
 
 
+@pytest.mark.parametrize("guard_matches", [False, True])
+@pytest.mark.parametrize("present", [False, True])
+@pytest.mark.parametrize("valid", [False, True])
+def test_loop_alias_guard_resolves_the_replacement_name(
+    tmp_path, guard_matches, present, valid
+):
+    package = tmp_path / "vllm"
+    package.mkdir()
+    (package / "provider.py").write_text("def run(a): pass\n")
+    parameters = "a" if valid else "a, *, used=None"
+    (package / "consumer.py").write_text(
+        f"def run({parameters}): pass\n" if present else "# legacy alias removed\n"
+    )
+    guard_name = "name" if guard_matches else '"unrelated"'
+    plugin = tmp_path / "plugin.py"
+    plugin.write_text(f"""
+@patch("vllm.provider", "run")
+def run(a): pass
+def rebind():
+    for replacement in (run,):
+        name = replacement.__name__
+        for consumer in ("vllm.consumer",):
+            module = sys.modules.get(consumer)
+            if module is not None and getattr(module, {guard_name}, None) is original:
+                patch(consumer, name)(replacement)
+""")
+    hooks, unresolved = scan_patch_file(plugin)
+    assert not unresolved
+    assert {hook.target for hook in hooks} == {
+        "vllm.provider.run",
+        "vllm.consumer.run",
+    }
+    problems = target_problems(tmp_path, hooks)
+    assert bool(problems) is (not valid if present else not guard_matches), problems
+
+
+@pytest.mark.parametrize("descriptor", ["staticmethod", "classmethod"])
+@pytest.mark.parametrize("valid", [False, True])
+def test_descriptor_replacement_keeps_its_callable_contract(tmp_path, descriptor, valid):
+    package = tmp_path / "vllm"
+    package.mkdir()
+    receiver = "cls, " if descriptor == "classmethod" else ""
+    (package / "provider.py").write_text(
+        f"class Owner:\n    @{descriptor}\n"
+        f"    def run({receiver}a, *, used=None): pass\n"
+    )
+    parameters = f"{receiver}a" + (", *, used=None" if valid else "")
+    plugin = tmp_path / "plugin.py"
+    plugin.write_text(
+        f"def replacement({parameters}): pass\n"
+        f'patch("vllm.provider", "Owner.run")({descriptor}(replacement))\n'
+    )
+    hooks, unresolved = scan_patch_file(plugin)
+    assert not unresolved
+    problems = target_problems(tmp_path, hooks)
+    assert bool(problems) is (not valid), problems
+    if not valid:
+        assert any("used" in problem for problem in problems)
+
+
+@pytest.mark.parametrize("descriptor", ["staticmethod", "classmethod"])
+@pytest.mark.parametrize("binding", ["assignment", "parameter", "vararg", "kwarg"])
+def test_shadowed_descriptor_requires_a_callable_contract(tmp_path, descriptor, binding):
+    package = tmp_path / "vllm"
+    package.mkdir()
+    (package / "provider.py").write_text("class Owner:\n    def run(a): pass\n")
+    plugin = tmp_path / "plugin.py"
+    declaration = (
+        "def replacement(a): pass\n"
+        f'patch("vllm.provider", "Owner.run")({descriptor}(replacement))\n'
+    )
+    if binding == "assignment":
+        declaration = f"{descriptor} = external_decorator\n" + declaration
+    else:
+        prefix = {"parameter": "", "vararg": "*", "kwarg": "**"}[binding]
+        declaration = f"def install({prefix}{descriptor}):\n" + "".join(
+            "    " + line for line in declaration.splitlines(keepends=True)
+        )
+    plugin.write_text(declaration)
+    hooks, unresolved = scan_patch_file(plugin)
+    assert not unresolved
+    assert any(
+        "unresolved callable replacement" in problem
+        for problem in target_problems(tmp_path, hooks)
+    )
+
+
 def test_unresolved_callable_without_consumers_requires_a_feature_contract(tmp_path):
     package = tmp_path / "vllm"
     package.mkdir()
