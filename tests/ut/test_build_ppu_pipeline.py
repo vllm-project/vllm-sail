@@ -444,6 +444,48 @@ def test_ci_uses_separate_pinned_build_and_runtime_stacks():
             assert "image" not in trigger["inputs"]
 
 
+def test_unit_test_workflow_covers_all_contract_tests():
+    import yaml
+
+    unit_tests = yaml.safe_load((WORKFLOW.parent / "ut.yaml").read_text())
+    cpu = next(
+        step["run"].split()
+        for step in unit_tests["jobs"]["cpu-unit-tests"]["steps"]
+        if "pytest" in step.get("run", "")
+    )
+    assert cpu[:4] == ["python", "-m", "pytest", "tests/ut"]
+    narrowing = {"-m", "-k", "--deselect", "--ignore", "--ignore-glob"}
+    assert not [arg for arg in cpu[4:] if arg.split("=")[0] in narrowing]
+    source = unit_tests["jobs"]["vllm-source-contracts"]
+    assert source["name"] == "vLLM source (main-verified)"
+    upstream = next(
+        step for step in source["steps"] if "repository" in step.get("with", {})
+    )
+    assert upstream["with"] == {
+        "repository": "vllm-project/vllm",
+        "ref": "${{ steps.upstream.outputs.ref }}",
+        "path": ".upstream/vllm",
+        "persist-credentials": False,
+    }
+    contracts = next(
+        step for step in source["steps"] if "VLLM_SOURCE_ROOT" in step.get("env", {})
+    )
+    assert contracts["env"]["VLLM_SOURCE_ROOT"] == (
+        "${{ github.workspace }}/.upstream/vllm"
+    )
+    assert contracts["run"].split() == [
+        "python",
+        "-m",
+        "pytest",
+        "tests/ut",
+        "-q",
+        "-rs",
+        "-m",
+        "upstream_source",
+        "--require-upstream-source",
+    ]
+
+
 @pytest.fixture
 def image_stack():
     import importlib.util
