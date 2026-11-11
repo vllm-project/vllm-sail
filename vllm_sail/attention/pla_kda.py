@@ -57,9 +57,20 @@ class PLAKDAReplayCommitContext:
         *,
         spec_query_len: int,
         max_num_reqs: int,
-        conv_state_layout: str,
-        null_block_id: int,
+        backend: str = "triton",
     ) -> PLAKDAReplayCommitContext:
+        # Signature parity with KDARecoverSSMCommitContext.create, so the two
+        # commit contexts are drop-in for one another. The conv-state layout and
+        # null block id are environment/module facts, not caller inputs, so
+        # derive them here -- upstream's create reads is_conv_state_dim_first()
+        # the same way. PLA ships one kernel set, so ``backend`` (upstream's
+        # cute/triton plan selector) is accepted for parity and ignored.
+        from vllm.model_executor.layers.mamba.mamba_utils import (
+            is_conv_state_dim_first,
+        )
+        from vllm.models.kimi_k3.nvidia.kda_metadata import NULL_BLOCK_ID
+
+        conv_state_layout = "DS" if is_conv_state_dim_first() else "SD"
         # PLA reads exactly ``(conv, state)`` and ``replay_records`` from each
         # layer; upstream layers carry more cache entries and other records.
         views = [
@@ -75,7 +86,7 @@ class PLAKDAReplayCommitContext:
                 spec_query_len=spec_query_len,
                 max_num_reqs=max_num_reqs,
                 conv_state_layout=conv_state_layout,
-                null_block_id=null_block_id,
+                null_block_id=NULL_BLOCK_ID,
             ),
             spec_query_len,
         )

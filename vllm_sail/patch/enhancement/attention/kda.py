@@ -18,6 +18,7 @@ from vllm.config import VllmConfig
 from vllm.forward_context import get_forward_context
 from vllm.models.kimi_k3.nvidia import kda as _kda
 from vllm.models.kimi_k3.nvidia import kda_metadata as _kda_metadata
+from vllm.models.kimi_k3.nvidia.ops import recoverssm as _recoverssm
 from vllm.platforms import current_platform
 from vllm.transformers_utils.configs.kimi_linear import KimiLinearConfig
 
@@ -31,7 +32,7 @@ _META = dict(
     affected_versions=">=0.32.0,<0.33.0",
     remove_when="Kimi KDA supports platform kernel registration for prefill and decode.",
 )
-_METADATA_MODULE = "vllm.models.kimi_k3.nvidia.kda_metadata"
+_RECOVERSSM_MODULE = "vllm.models.kimi_k3.nvidia.ops.recoverssm"
 _REPLAY_META = dict(
     reason="Kimi KDA RecoverSSM must run PLA replay verify/commit on PPU instead of "
     "Triton RecoverSSM.",
@@ -53,9 +54,7 @@ _upstream_forward = _kda.KimiK3DeltaAttention._forward
 _upstream_init = _kda.KimiK3DeltaAttention.__init__
 _upstream_get_kv_cache_spec = _kda.KimiK3DeltaAttention.get_kv_cache_spec
 _upstream_recoverssm_verify = _kda.KimiK3DeltaAttention._recoverssm_verify
-_upstream_get_recoverssm_context = (
-    _kda_metadata.KimiK3KDAMetadataBuilder._get_recoverssm_context
-)
+_upstream_recoverssm_create = _recoverssm.KDARecoverSSMCommitContext.create
 
 
 def _replay_conv_state_layout() -> str:
@@ -400,47 +399,54 @@ patch(_MODULE, "KimiK3DeltaAttention._recoverssm_verify", **_REPLAY_META)(
 
 
 @patch(
-    _METADATA_MODULE,
-    "KimiK3KDAMetadataBuilder._get_recoverssm_context",
+    _RECOVERSSM_MODULE,
+    "KDARecoverSSMCommitContext.create",
     **_REPLAY_META,
 )
-def _get_recoverssm_context(self):
-    if self.recoverssm_context is not None:
-        return self.recoverssm_context
-    if torch.cuda.is_current_stream_capturing():
-        # PLA's create() copies descriptors host-to-device, which is illegal
-        # during capture, and the captured step's commit metadata is discarded
-        # by record_step(for_capture=True) anyway. Do not cache the miss: the
-        # first eager spec step still creates the real context.
-        return None
-    forward_context = self.vllm_config.compilation_config.static_forward_context
-    layers = [forward_context[layer_name] for layer_name in self.layer_names]
+def _create_recoverssm_context(
+    cls,
+    layers,
+    *,
+    spec_query_len: int,
+    max_num_reqs: int,
+    backend: str = "triton",
+):
     replay = [
         getattr(layer, "_pla_replay_records", None) is not None for layer in layers
     ]
     if not any(replay):
-        return _upstream_get_recoverssm_context(self)
+        return _upstream_recoverssm_create(
+            layers,
+            spec_query_len=spec_query_len,
+            max_num_reqs=max_num_reqs,
+            backend=backend,
+        )
     if not all(replay):
         # One commit serves the whole group, and the two record formats differ.
         raise ValueError(
             "KDA RecoverSSM layers must all use PLA replay or none of them"
         )
-    # The records were allocated with each layer's own spec_query_len; one
-    # commit context serves the group, so the layers must agree on it.
+    if torch.cuda.is_current_stream_capturing():
+        # PLA's create() copies descriptors host-to-device, which is illegal
+        # during capture, and the captured step's commit metadata is discarded
+        # by record_step(for_capture=True) anyway. Upstream's
+        # _get_recoverssm_context does not cache a None, so the first eager
+        # spec step still builds the real context.
+        return None
+    # The records were allocated with each layer's own spec_query_len, and PLA
+    # bounds commit's token_capacity by it, so use that (not upstream's
+    # 1 + num_speculative_tokens) and require the group to agree on it.
     spec_query_len = layers[0].spec_query_len
     if any(layer.spec_query_len != spec_query_len for layer in layers):
         raise ValueError("KDA RecoverSSM layers must share one spec_query_len")
     from vllm_sail.attention.pla_kda import PLAKDAReplayCommitContext
 
     logger.info_once("Using PLA KDA kernel: KDAReplayCommitContext")
-    self.recoverssm_context = PLAKDAReplayCommitContext.create(
+    return PLAKDAReplayCommitContext.create(
         layers,
         spec_query_len=spec_query_len,
-        max_num_reqs=self.vllm_config.scheduler_config.max_num_seqs,
-        conv_state_layout=_replay_conv_state_layout(),
-        null_block_id=_kda_metadata.NULL_BLOCK_ID,
+        max_num_reqs=max_num_reqs,
     )
-    return self.recoverssm_context
 
 
 @patch(_MODULE, "KimiK3DeltaAttention.get_kv_cache_spec", **_META)

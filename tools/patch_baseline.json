@@ -224,7 +224,6 @@
   "vllm.models.kimi_k3.nvidia.kda._flashkda_prefill": "0cac9f4c22af6a5a3c7dd62f18634dfda46f852b799c8abe97a8a0dfb8aff285",
   "vllm.models.kimi_k3.nvidia.kda.is_flashkda_supported": "97938d2048d1b9e0a81ecda533065564fdb1df9e9ab2cee0fee90ba7b67af38f",
   "vllm.models.kimi_k3.nvidia.kda.is_fused_kda_decode_supported": "374f44f058331df8574d16989ab4f76c35eb9fd2910de226584f56556e81287c",
-  "vllm.models.kimi_k3.nvidia.kda_metadata.KimiK3KDAMetadataBuilder._get_recoverssm_context": "d10ac54a36c9528361dee4f941b29dca114068eeb99c355233288d20485a3d33",
   "vllm.models.kimi_k3.nvidia.latent_moe_runner.LatentMoERunner.__init__": "563df306ab3188de259e86ce0e3023022d95b0318856f5a26938ebea69d22cf5",
   "vllm.models.kimi_k3.nvidia.latent_moe_runner.LatentMoERunner._overlap_allreduce_tail": "4ccda077fd52a9bc8324dcd2a51c7e8023d13a2ad6d6f8d89e6a6f3df121becb",
   "vllm.models.kimi_k3.nvidia.latent_moe_runner.LatentMoERunner._select_tail_tier": "a1e3f86b22ba9bb6b1cf34c95664590cff4b5cb3d5589a8e864128ba8cd20537",

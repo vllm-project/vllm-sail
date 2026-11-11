@@ -160,9 +160,9 @@ def test_device_predicate_calls_bind_all_required_arguments(name):
         ),
         (
             "attention/kda",
-            "_get_recoverssm_context",
-            "models/kimi_k3/nvidia/kda_metadata",
-            "KimiK3KDAMetadataBuilder._get_recoverssm_context",
+            "_create_recoverssm_context",
+            "models/kimi_k3/nvidia/ops/recoverssm",
+            "KDARecoverSSMCommitContext.create",
         ),
     ],
 )

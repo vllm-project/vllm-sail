@@ -100,14 +100,15 @@ def kda_constructor(modules):
             def _recoverssm_verify(self, *args):
                 raise AssertionError("verify is not part of constructor test")
 
-        class MetadataBuilder:
-            def _get_recoverssm_context(self):
+        class CommitContext:
+            @classmethod
+            def create(cls, layers, **kwargs):
                 raise AssertionError("commit is not part of constructor test")
 
+        modules("vllm.models.kimi_k3.nvidia.kda_metadata", NULL_BLOCK_ID=0)
         modules(
-            "vllm.models.kimi_k3.nvidia.kda_metadata",
-            KimiK3KDAMetadataBuilder=MetadataBuilder,
-            NULL_BLOCK_ID=0,
+            "vllm.models.kimi_k3.nvidia.ops.recoverssm",
+            KDARecoverSSMCommitContext=CommitContext,
         )
         provider = modules(
             "vllm.models.kimi_k3.nvidia.kda",

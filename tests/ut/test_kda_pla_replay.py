@@ -172,23 +172,11 @@ def test_replay_names_the_raw_conv_state_layout(dim_first, layout):
     assert fn() == layout
 
 
-def commit_builder(layers, context=None):
-    return NS(
-        recoverssm_context=context,
-        layer_names=list(layers),
-        vllm_config=NS(
-            compilation_config=NS(static_forward_context=dict(layers)),
-            num_speculative_tokens=3,
-            scheduler_config=NS(max_num_seqs=8),
-        ),
-    )
-
-
 def NOT_CAPTURING():
     return NS(cuda=NS(is_current_stream_capturing=lambda: False))
 
 
-def commit_context(monkeypatch, created, upstream_calls, torch=None):
+def create_context(monkeypatch, created, upstream_calls, torch=None):
     class Context:
         @classmethod
         def create(cls, layers, **kwargs):
@@ -200,101 +188,77 @@ def commit_context(monkeypatch, created, upstream_calls, torch=None):
     monkeypatch.setitem(sys.modules, SDK, sdk)
     return function(
         KDA,
-        "_get_recoverssm_context",
+        "_create_recoverssm_context",
         {
-            "_upstream_get_recoverssm_context": lambda self: (
-                upstream_calls.append(self) or "upstream-context"
+            "_upstream_recoverssm_create": lambda layers, **kwargs: (
+                upstream_calls.append((layers, kwargs)) or "upstream-context"
             ),
             "logger": LOGGER,
-            "_replay_conv_state_layout": lambda: "SD",
-            "_kda_metadata": NS(NULL_BLOCK_ID=0),
             "torch": torch or NOT_CAPTURING(),
         },
     )
 
 
-def test_commit_context_runs_pla_replay_for_pla_layers(monkeypatch):
+def test_create_returns_pla_for_pla_layers(monkeypatch):
     created, upstream_calls = [], []
-    fn = commit_context(monkeypatch, created, upstream_calls)
-    layers = {
-        "a": NS(_pla_replay_records="ra", spec_query_len=4),
-        "b": NS(_pla_replay_records="rb", spec_query_len=4),
-    }
-    builder = commit_builder(layers)
-
-    assert fn(builder) == "pla-context"
-    assert fn(builder) == "pla-context"
-    assert builder.recoverssm_context == "pla-context"
-    assert upstream_calls == []
-    assert created == [
-        (
-            [layers["a"], layers["b"]],
-            dict(
-                spec_query_len=4,
-                max_num_reqs=8,
-                conv_state_layout="SD",
-                null_block_id=0,
-            ),
-        )
+    fn = create_context(monkeypatch, created, upstream_calls)
+    layers = [
+        NS(_pla_replay_records="ra", spec_query_len=4),
+        NS(_pla_replay_records="rb", spec_query_len=4),
     ]
 
+    # Upstream passes 1 + num_speculative_tokens, but PLA bounds commit by the
+    # records' own spec_query_len, so create must use the layers' value.
+    assert fn("cls", layers, spec_query_len=9, max_num_reqs=8) == "pla-context"
+    assert upstream_calls == []
+    assert created == [(layers, dict(spec_query_len=4, max_num_reqs=8))]
 
-def test_commit_context_keeps_upstream_for_triton_layers(monkeypatch):
+
+def test_create_delegates_for_triton_layers(monkeypatch):
     created, upstream_calls = [], []
-    fn = commit_context(monkeypatch, created, upstream_calls)
-    builder = commit_builder({"a": NS(), "b": NS(_pla_replay_records=None)})
+    fn = create_context(monkeypatch, created, upstream_calls)
+    layers = [NS(), NS(_pla_replay_records=None)]
 
-    assert fn(builder) == "upstream-context"
-    assert upstream_calls == [builder]
+    assert fn("cls", layers, spec_query_len=9, max_num_reqs=8) == "upstream-context"
+    assert upstream_calls == [
+        (layers, dict(spec_query_len=9, max_num_reqs=8, backend="triton"))
+    ]
     assert created == []
 
 
-def test_commit_context_returns_the_cached_context(monkeypatch):
+def test_create_rejects_mixed_record_formats(monkeypatch):
     created, upstream_calls = [], []
-    fn = commit_context(monkeypatch, created, upstream_calls)
-    builder = commit_builder({"a": NS(_pla_replay_records="ra")}, context="cached")
-
-    assert fn(builder) == "cached"
-    assert created == upstream_calls == []
-
-
-def test_commit_context_rejects_mixed_record_formats(monkeypatch):
-    created, upstream_calls = [], []
-    fn = commit_context(monkeypatch, created, upstream_calls)
-    builder = commit_builder(
-        {"a": NS(_pla_replay_records="ra", spec_query_len=4), "b": NS()}
-    )
+    fn = create_context(monkeypatch, created, upstream_calls)
+    layers = [NS(_pla_replay_records="ra", spec_query_len=4), NS()]
 
     with pytest.raises(ValueError, match="all use PLA replay"):
-        fn(builder)
+        fn("cls", layers, spec_query_len=4, max_num_reqs=8)
     assert created == upstream_calls == []
 
 
-def test_commit_context_rejects_mismatched_spec_query_len(monkeypatch):
+def test_create_rejects_mismatched_spec_query_len(monkeypatch):
     created, upstream_calls = [], []
-    fn = commit_context(monkeypatch, created, upstream_calls)
-    builder = commit_builder(
-        {
-            "a": NS(_pla_replay_records="ra", spec_query_len=4),
-            "b": NS(_pla_replay_records="rb", spec_query_len=2),
-        }
-    )
+    fn = create_context(monkeypatch, created, upstream_calls)
+    layers = [
+        NS(_pla_replay_records="ra", spec_query_len=4),
+        NS(_pla_replay_records="rb", spec_query_len=2),
+    ]
 
     with pytest.raises(ValueError, match="share one spec_query_len"):
-        fn(builder)
+        fn("cls", layers, spec_query_len=4, max_num_reqs=8)
     assert created == upstream_calls == []
 
 
-def test_commit_context_skips_creation_during_graph_capture(monkeypatch):
+def test_create_skips_creation_during_graph_capture(monkeypatch):
     created, upstream_calls = [], []
     capturing = NS(cuda=NS(is_current_stream_capturing=lambda: True))
-    fn = commit_context(monkeypatch, created, upstream_calls, torch=capturing)
-    builder = commit_builder({"a": NS(_pla_replay_records="ra", spec_query_len=4)})
+    fn = create_context(monkeypatch, created, upstream_calls, torch=capturing)
+    layers = [NS(_pla_replay_records="ra", spec_query_len=4)]
 
     # The captured step's commit metadata is discarded, so no context is
-    # needed; the miss must not be cached, so eager steps still create one.
-    assert fn(builder) is None
-    assert builder.recoverssm_context is None
+    # needed; upstream's _get_recoverssm_context does not cache a None, so the
+    # first eager spec step still builds the real context.
+    assert fn("cls", layers, spec_query_len=4, max_num_reqs=8) is None
     assert created == upstream_calls == []
 
 
@@ -430,6 +394,14 @@ def test_commit_context_hands_pla_the_layer_view_it_reads(pla_sdk, modules):
             return "pla-context"
 
     modules(REPLAY, KDAReplayCommitContext=Context)
+    # create derives the conv layout and null block id itself for signature
+    # parity with upstream, so stub the two module facts it reads. dim-first
+    # maps to the "DS" layout upstream names.
+    modules(
+        "vllm.model_executor.layers.mamba.mamba_utils",
+        is_conv_state_dim_first=lambda: True,
+    )
+    modules("vllm.models.kimi_k3.nvidia.kda_metadata", NULL_BLOCK_ID=0)
     layer = NS(
         kv_cache=("conv", "state", "workspace"),
         _pla_replay_records="records",
@@ -439,8 +411,6 @@ def test_commit_context_hands_pla_the_layer_view_it_reads(pla_sdk, modules):
         [layer],
         spec_query_len=4,
         max_num_reqs=8,
-        conv_state_layout="DS",
-        null_block_id=0,
     )
 
     assert context._context == "pla-context"
@@ -539,17 +509,15 @@ def test_registered_replay_patches_delegate_without_pla_records(kda_constructor)
     c = kda_constructor()
     config, cfg = constructor_configs("triton")
     layer = c.provider.KimiK3DeltaAttention(config, cfg, "model.kda", None, False)
-    builder_cls = sys.modules[
-        "vllm.models.kimi_k3.nvidia.kda_metadata"
-    ].KimiK3KDAMetadataBuilder
-    builder = builder_cls()
-    builder.__dict__.update(vars(commit_builder({"model.kda": layer})))
+    create = sys.modules[
+        "vllm.models.kimi_k3.nvidia.ops.recoverssm"
+    ].KDARecoverSSMCommitContext.create
 
     assert layer._pla_replay_records is None
     with pytest.raises(AssertionError, match="verify is not part"):
         layer._recoverssm_verify(*(object() for _ in range(7)))
     with pytest.raises(AssertionError, match="commit is not part"):
-        builder._get_recoverssm_context()
+        create([layer], spec_query_len=2, max_num_reqs=8)
 
 
 @pytest.mark.upstream_source
