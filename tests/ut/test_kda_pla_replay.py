@@ -13,10 +13,8 @@ from tests.support.source import ROOT, definition, function
 from tests.ut.test_kda_workspace_reservation import configs as constructor_configs
 from tests.ut.test_kda_workspace_reservation import kda_constructor as _kda_constructor
 from tests.ut.test_ppu_kernel_capabilities import load_patch
-from tests.ut.test_ppu_kernel_capabilities import modules as _modules
 
 kda_constructor = _kda_constructor
-modules = _modules
 
 KDA = "vllm_sail/patch/enhancement/attention/kda.py"
 REPLAY = "pla.decode.kda_replayssm_vllm"
