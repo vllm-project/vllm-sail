@@ -44,6 +44,7 @@ EXPECTED_MODULES = {
     "deepseek_v41_indexer",
     "deepseek_v41_int8",
     "glm5_next",
+    "glm5_next_mtp",
     "kimi_k3",
     "llama4",
     "moe_marlin_gate",
