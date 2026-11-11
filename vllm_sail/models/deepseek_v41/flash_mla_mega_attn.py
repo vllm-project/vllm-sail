@@ -71,6 +71,41 @@ output slots (TP8: 8 local heads zero-padded to 64); under TP8
 weight-shape assertion below fails loudly printing n_local_groups /
 n_wv_group / weight.shape / data.shape — never a silent 1-group slice.
 
+v1.2 (decode regression stage-1 fixes F1+F2, per
+decode_regression_rootcause_fixplan_20261111): the FUSED=1 decode path paid
++78.3k us/window in six per-call layout-copy kernels and +5.7k us/window in
+two D2D memcpys relative to the unfused baseline, because the PPU API
+allocates its own outputs and ``_o_proj`` dequantizes through a 6-step ATen
+chain. v1.2 removes both, purely on the vllm_sail side:
+
+* F1 zero-copy output (env ``VLLM_SAIL_FUSED_ZERO_COPY_OUT``, default on):
+  on decode-only steps (``num_prefills == 0``) stash the kernel-owned
+  ``(out_fp8, out_sf)`` and let ``_o_proj`` consume them directly instead of
+  ``copy_``-ing into the shared step buffer. Mixed steps and warmup dummy
+  runs keep the copy path; ``forward_mqa`` clears the stash on entry so a
+  stale segment can never leak into the next step. Under CUDA-graph capture
+  the stash references are pinned at capture time and the fork op rewrites
+  the same graph-pool addresses on replay, so semantics are unchanged
+  (fixplan §二.F1; piecewise-graph segmentation check listed in §四.7).
+* F2 fused dequant (env ``VLLM_SAIL_FUSED_DEQUANT_MODE``, default
+  ``triton``): replace the e8m0->f32 / repeat_interleave / fp8->f32 / mul /
+  bf16 ATen chain with a single Triton kernel that extracts the four UE8M0
+  bytes per int32 word by bit arithmetic and writes BF16 directly. The
+  result is bit-identical to the legacy chain for exponent bytes 1..254
+  (e4m3 x power-of-two is exact in f32/bf16; byte 0 -> 2^-127 and byte 255
+  -> NaN are special-cased to match the e8m0 semantics). If the Triton path
+  raises (e.g. fp8e4m3 load unsupported on this Triton/PPU build — fixplan
+  §四.4 lists it as needs-measurement), the module logs a loud warning and
+  degrades to ``torch`` mode (broadcast-view, 4 kernels, no
+  repeat_interleave) for the rest of the process; ``legacy`` restores the
+  pre-v1.2 chain for A/B attribution.
+* F3 (positions int32 cache) is intentionally NOT implemented: the fixplan
+  marks it conditional on the per-layer ``positions.to(torch.int32)``
+  proving to be a standalone kernel (needs-measurement item §四.1/§七.B.4).
+
+Stage-2 fixes F4 (metadata plan reuse) and F5 (clamp sinking) live in the
+FlashMLA-for-sail fork wheel, not in vllm_sail, and are out of scope here.
+
 Selection is gated by ``fused_gate`` (env switch, KV-record switch, platform,
 capability, wheel capability probe, V4.1 head/group topology); the selector
 patch in ``vllm_sail/patch/enhancement/models/deepseek_v41.py`` logs which
@@ -120,6 +155,14 @@ _PPU_EINSUM_RECIPE = (1, 1, 32)
 
 _API = None  # lazy flash_mla.fused_norm_rope_attn_rope_cast module handle
 
+#: v1.2 F2: set True after the Triton dequant path raised once; the process
+#: then stays on the broadcast fallback (loud warning, no silent retry).
+_DEQUANT_TRITON_BROKEN = False
+
+#: lazily built @triton.jit kernel handle (import stays lazy: CPU-only
+#: environments and the baseline wheel must never touch triton at import).
+_DEQUANT_KERNEL = None
+
 
 def _fused_api():
     """Lazily fetch the PR#54 Python API; never called unless fused_gate passed."""
@@ -131,23 +174,22 @@ def _fused_api():
     return _API
 
 
-def _dequant_fused_output(
+def _check_dequant_contract(
     data: torch.Tensor, scale: torch.Tensor
-) -> torch.Tensor:
-    """Exact BF16 dequantization of the fused kernel's packed-MXFP8 output.
-
-    ``data``: ``[T, G, D]`` float8_e4m3fn. ``scale``: ``[T, G, D // 128]``
-    int32, each word holding four UE8M0 bytes, one per 32-dim block, in
-    little-endian byte order (byte j covers dims ``[128*i + 32*j, +32)``).
-    e4m3 (3-bit mantissa) times a power of two is exact in fp32 and in bf16,
-    so this dequantization introduces no rounding of its own.
-    """
+) -> tuple[int, int, int]:
     tokens, groups, dim = data.shape
     if scale.shape != (tokens, groups, dim // 128):
         raise AssertionError(
             f"fused output scale shape {tuple(scale.shape)} != expected "
             f"{(tokens, groups, dim // 128)} for data shape {tuple(data.shape)}"
         )
+    return tokens, groups, dim
+
+
+def _dequant_fused_output_legacy(
+    data: torch.Tensor, scale: torch.Tensor
+) -> torch.Tensor:
+    """Pre-v1.2 6-kernel ATen chain, kept verbatim for A/B attribution."""
     # int32 -> 4 UE8M0 bytes -> float (2^exponent), per 32 dims.
     # Byte order (self-check item 4): ``Tensor.view(torch.uint8)`` reinterprets
     # each int32 word in the platform's native byte order, which is
@@ -160,6 +202,174 @@ def _dequant_fused_output(
     scale_f32 = scale_bytes.view(torch.float8_e8m0fnu).to(torch.float32)
     scale_expanded = scale_f32.repeat_interleave(_QUANT_GROUP, dim=-1)  # [T,G,D]
     return (data.to(torch.float32) * scale_expanded).to(torch.bfloat16)
+
+
+def _dequant_fused_output_torch(
+    data: torch.Tensor, scale: torch.Tensor
+) -> torch.Tensor:
+    """v1.2 degrade tier: broadcast-view dequant, 4 kernels instead of 6.
+
+    Same exact arithmetic as the legacy chain, but the per-32 scale is
+    broadcast over a [T, G, D//32, 32] view of the data instead of being
+    materialized at [T, G, D] by ``repeat_interleave`` (fixplan §二.F2
+    fallback: drops the 32MB f32 intermediate write and two kernels).
+    """
+    tokens, groups, dim = _check_dequant_contract(data, scale)
+    scale_bytes = scale.contiguous().view(torch.uint8)  # [T, G, D//32]
+    scale_f32 = scale_bytes.view(torch.float8_e8m0fnu).to(torch.float32)
+    x = data.reshape(tokens, groups, dim // 32, _QUANT_GROUP).to(torch.float32)
+    y = x * scale_f32.unsqueeze(-1)
+    return y.to(torch.bfloat16).reshape(tokens, groups, dim)
+
+
+def _dequant_kernel():
+    """Build (once) the Triton kernel for the fused exact dequant."""
+    global _DEQUANT_KERNEL
+    if _DEQUANT_KERNEL is None:
+        import triton
+        import triton.language as tl
+
+        @triton.jit
+        def _dequant_mxfp8_packed_ue8m0_kernel(
+            data_ptr,
+            scale_ptr,
+            out_ptr,
+            n_groups,
+            stride_dt,
+            stride_dg,
+            stride_dd,
+            stride_st,
+            stride_sg,
+            stride_sd,
+            stride_ot,
+            stride_og,
+            stride_od,
+            BLOCK_D: tl.constexpr,
+        ):
+            # One program per (token, group) row: BLOCK_D fp8e4m3 values and
+            # BLOCK_D//128 int32 words (four packed UE8M0 bytes each).
+            pid = tl.program_id(0)
+            t = pid // n_groups
+            g = pid % n_groups
+
+            offs_w = tl.arange(0, BLOCK_D // 128)
+            words = tl.load(
+                scale_ptr + t * stride_st + g * stride_sg + offs_w * stride_sd
+            )
+            # Little-endian word -> bytes: byte j covers dims [128*i + 32*j,
+            # +32), i.e. flat per-32 block index k = 4*i + j (same convention
+            # as the legacy chain's view(torch.uint8)).
+            byte_idx = tl.arange(0, 4)
+            e = (words[:, None] >> (8 * byte_idx)[None, :]) & 0xFF  # [NW, 4]
+            e = tl.reshape(e, (BLOCK_D // 32,))
+            # UE8M0 -> f32 by exponent-field construction: bits = e << 23
+            # gives 2^(e-127) for 1 <= e <= 254; e == 0 is the denormal
+            # 2^-127 (0x00400000) and e == 255 is NaN (0x7FC00000), matching
+            # torch's float8_e8m0fnu -> float32 conversion.
+            bits = tl.where(
+                e == 0, 0x00400000, tl.where(e == 255, 0x7FC00000, e << 23)
+            )
+            scale_f32 = tl.reshape(
+                tl.broadcast_to(bits[:, None], (BLOCK_D // 32, 32)), (BLOCK_D,)
+            ).to(tl.float32, bitcast=True)
+
+            offs_d = tl.arange(0, BLOCK_D)
+            x = tl.load(
+                data_ptr + t * stride_dt + g * stride_dg + offs_d * stride_dd
+            ).to(tl.float32)
+            y = x * scale_f32
+            tl.store(
+                out_ptr + t * stride_ot + g * stride_og + offs_d * stride_od,
+                y.to(tl.bfloat16),
+            )
+
+        _DEQUANT_KERNEL = _dequant_mxfp8_packed_ue8m0_kernel
+    return _DEQUANT_KERNEL
+
+
+def _dequant_fused_output_triton(
+    data: torch.Tensor, scale: torch.Tensor
+) -> torch.Tensor:
+    """v1.2 default: single fused kernel, bit-identical to the legacy chain.
+
+    Raises (and the dispatcher degrades to the broadcast tier) when the row
+    width is not a power of two, when Triton is unavailable, or when this
+    Triton/PPU build cannot compile the fp8e4m3 load — fixplan §四.4 lists
+    PPU Triton fp8/e8m0 support as needs-measurement.
+    """
+    tokens, groups, dim = _check_dequant_contract(data, scale)
+    n_words = dim // 128
+    if tokens == 0:
+        return torch.empty(
+            (0, groups, dim), dtype=torch.bfloat16, device=data.device
+        )
+    if dim & (dim - 1) != 0 or n_words & (n_words - 1) != 0:
+        raise ValueError(
+            f"Triton fused dequant needs power-of-two D and D//128, got D={dim}"
+        )
+    if data.dtype != torch.float8_e4m3fn or scale.dtype != torch.int32:
+        raise AssertionError(
+            f"Triton fused dequant expects (float8_e4m3fn, int32), got "
+            f"({data.dtype}, {scale.dtype})"
+        )
+    out = torch.empty(
+        (tokens, groups, dim), dtype=torch.bfloat16, device=data.device
+    )
+    kernel = _dequant_kernel()
+    kernel[(tokens * groups,)](
+        data,
+        scale,
+        out,
+        groups,
+        data.stride(0),
+        data.stride(1),
+        data.stride(2),
+        scale.stride(0),
+        scale.stride(1),
+        scale.stride(2),
+        out.stride(0),
+        out.stride(1),
+        out.stride(2),
+        BLOCK_D=dim,
+        num_warps=8 if dim >= 4096 else 4,
+    )
+    return out
+
+
+def _dequant_fused_output(
+    data: torch.Tensor, scale: torch.Tensor
+) -> torch.Tensor:
+    """Exact BF16 dequantization of the fused kernel's packed-MXFP8 output.
+
+    ``data``: ``[T, G, D]`` float8_e4m3fn. ``scale``: ``[T, G, D // 128]``
+    int32, each word holding four UE8M0 bytes, one per 32-dim block, in
+    little-endian byte order (byte j covers dims ``[128*i + 32*j, +32)``).
+    e4m3 (3-bit mantissa) times a power of two is exact in fp32 and in bf16,
+    so this dequantization introduces no rounding of its own — all three
+    v1.2 tiers (triton / torch / legacy) are bit-identical for exponent
+    bytes 1..254.
+    """
+    _check_dequant_contract(data, scale)
+    mode = ppu_envs.VLLM_SAIL_FUSED_DEQUANT_MODE
+    if mode == "legacy":
+        return _dequant_fused_output_legacy(data, scale)
+    if mode == "torch":
+        return _dequant_fused_output_torch(data, scale)
+    global _DEQUANT_TRITON_BROKEN
+    if _DEQUANT_TRITON_BROKEN:
+        return _dequant_fused_output_torch(data, scale)
+    try:
+        return _dequant_fused_output_triton(data, scale)
+    except Exception as exc:  # noqa: BLE001 - degrade loudly, never crash decode
+        _DEQUANT_TRITON_BROKEN = True
+        logger.warning(
+            "[vllm_sail] fused dequant Triton path failed (%r); degrading to "
+            "the broadcast fallback (VLLM_SAIL_FUSED_DEQUANT_MODE=torch "
+            "semantics) for the rest of this process. Set "
+            "VLLM_SAIL_FUSED_DEQUANT_MODE=legacy for the pre-v1.2 chain.",
+            exc,
+        )
+        return _dequant_fused_output_torch(data, scale)
 
 
 def fused_gate(vllm_config) -> tuple[bool, str]:
@@ -247,6 +457,19 @@ class PPUDeepseekV4MegaAttnAttention(DeepseekV4MegaAttnAttention):
         # baseline V4.1 class hardcodes).
         self._einsum_recipe = _PPU_EINSUM_RECIPE
         self._tma_aligned_scales = False
+        # v1.2 F1: per-step (out_fp8, out_sf) stash handed from
+        # _forward_decode_mega to _o_proj on decode-only steps; None means
+        # "consume attn_out.data/.scale as written by the copy path".
+        self._last_decode_out = None
+
+    def forward_mqa(self, q, kv, positions, output) -> None:
+        # Stash hygiene: clear before anything else so a stale zero-copy
+        # segment can never leak into this step's _o_proj — notably the
+        # warmup dummy run (attn_metadata is None) returns inside super()
+        # without ever reaching the decode branch, and mixed prefill+decode
+        # steps must present a None stash to _o_proj.
+        self._last_decode_out = None
+        super().forward_mqa(q, kv, positions, output)
 
     @classmethod
     def is_available_for(cls, vllm_config) -> bool:
@@ -276,14 +499,37 @@ class PPUDeepseekV4MegaAttnAttention(DeepseekV4MegaAttnAttention):
         """
         weight = self.wo_a.weight
         weight_scale = getattr(self.wo_a, "weight_scale", None)
-        data, scale = attn_out.data, attn_out.scale
+        # v1.2 F1: on decode-only steps the fused kernel's own outputs were
+        # stashed instead of copied into the step buffer; consume (and clear)
+        # the stash here. A shape disagreement with attn_out is a contract
+        # violation — fail loudly, never fall back to the unwritten buffer.
+        stashed = self._last_decode_out
+        self._last_decode_out = None
+        if stashed is not None:
+            data, scale = stashed
+            zero_copy = True
+            if data.shape != attn_out.data.shape or (
+                scale.shape != attn_out.scale.shape
+            ):
+                raise AssertionError(
+                    f"zero-copy stash shapes {tuple(data.shape)}/"
+                    f"{tuple(scale.shape)} != attn_out "
+                    f"{tuple(attn_out.data.shape)}/"
+                    f"{tuple(attn_out.scale.shape)}; the stashed decode "
+                    "segment must cover exactly this step's tokens (the "
+                    "stash is only taken when num_prefills == 0)"
+                )
+        else:
+            data, scale = attn_out.data, attn_out.scale
+            zero_copy = False
         dim = data.shape[2] if data.ndim == 3 else None
         logger.info_once(
             "[vllm_sail] fused norm-rope O_PROJ first call: "
             "wo_a.weight.shape=%s dtype=%s | wo_a.weight_scale.shape=%s "
             "dtype=%s | einsum_recipe=%s o_proj_block_size=%s | "
             "attn_out.data.shape=%s dtype=%s | attn_out.scale.shape=%s "
-            "dtype=%s | n_local_groups=%s n_wv_group=%s o_lora_rank=%s D=%s",
+            "dtype=%s | n_local_groups=%s n_wv_group=%s o_lora_rank=%s D=%s "
+            "| zero_copy=%s dequant_mode=%s",
             tuple(weight.shape), weight.dtype,
             tuple(weight_scale.shape) if weight_scale is not None else None,
             weight_scale.dtype if weight_scale is not None else None,
@@ -291,6 +537,7 @@ class PPUDeepseekV4MegaAttnAttention(DeepseekV4MegaAttnAttention):
             tuple(data.shape), data.dtype,
             tuple(scale.shape), scale.dtype,
             self.n_local_groups, self.n_wv_group, self.o_lora_rank, dim,
+            zero_copy, ppu_envs.VLLM_SAIL_FUSED_DEQUANT_MODE,
         )
 
         # Batch dim of the grouped bmm is n_local_groups, per upstream's own
@@ -437,6 +684,21 @@ class PPUDeepseekV4MegaAttnAttention(DeepseekV4MegaAttnAttention):
         # The PPU API allocates its outputs; the contract with _o_proj is the
         # shared step buffer, so copy this segment in (layouts match; strides
         # may differ per alignment, copy_ handles that element-wise).
+        # v1.2 F1: on a decode-only step the segment IS the whole step buffer
+        # (forward_mqa slices output[0:num_decode_tokens] and there are no
+        # prefill tokens), so the two D2D copies can be skipped entirely by
+        # handing the kernel-owned tensors to _o_proj through the stash.
+        # Any eligibility doubt (mixed step, env off, shape disagreement)
+        # deterministically keeps the pre-v1.2 copy path — no silent change.
+        if (
+            ppu_envs.VLLM_SAIL_FUSED_ZERO_COPY_OUT
+            and swa_metadata.num_prefills == 0
+            and out_fp8.shape == out.data.shape
+            and out_sf.shape == out.scale.shape
+        ):
+            self._last_decode_out = (out_fp8, out_sf)
+            return
+        self._last_decode_out = None
         out.data.copy_(out_fp8)
         out.scale.copy_(out_sf)
 

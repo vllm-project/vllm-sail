@@ -48,6 +48,8 @@ if TYPE_CHECKING:
     VLLM_SAIL_NVTX_VFA_DUMP_SEQLEN: bool = False
     VLLM_SAIL_FUSED_NORM_ROPE_ATTN: bool = True
     VLLM_SAIL_PPU_KV_MXFP8: bool = True
+    VLLM_SAIL_FUSED_ZERO_COPY_OUT: bool = True
+    VLLM_SAIL_FUSED_DEQUANT_MODE: str = "triton"
     VLLM_DEEPEPLL_RECV_HOOK: bool = True
     VLLM_GDN_DECODE_KERNEL: str = "auto"
 
@@ -69,12 +71,20 @@ if TYPE_CHECKING:
     VLLM_PPU_NVTX_VFA_DUMP_SEQLEN: bool = False
     VLLM_PPU_FUSED_NORM_ROPE_ATTN: bool = True
     VLLM_PPU_PPU_KV_MXFP8: bool = True
+    VLLM_PPU_FUSED_ZERO_COPY_OUT: bool = True
+    VLLM_PPU_FUSED_DEQUANT_MODE: str = "triton"
 
 _TRUTHY = ("true", "1", "yes", "on")
 
 #: Backend names accepted by both MoE and dense GEMM selection.
 GEMM_BACKENDS = ("deepgemm", "acext", "triton")
 GDN_DECODE_KERNELS = ("auto", "cuda", "pla", "triton")
+
+#: Implementations of the fused-attention output dequant (v1.2 F2):
+#: "triton" = single fused kernel (default), "torch" = broadcast-view
+#: fallback (4 kernels, no repeat_interleave), "legacy" = the pre-v1.2
+#: 6-kernel ATen chain, kept for A/B attribution.
+FUSED_DEQUANT_MODES = ("triton", "torch", "legacy")
 
 
 def _env_names(name: str) -> tuple[str, ...]:
@@ -173,6 +183,20 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Read once per process by the dsv41_kv_record patch, which also prints
     # the forensic line "[VLLM_SAIL] kv_mxfp8=<bool> kv_bytes_per_token=<n>".
     "VLLM_SAIL_PPU_KV_MXFP8": _bool("VLLM_SAIL_PPU_KV_MXFP8", True),
+    # v1.2 F1: on decode-only steps hand the fused kernel's freshly allocated
+    # (out_fp8, out_sf) straight to _o_proj instead of copying them into the
+    # shared QuantizedActivation step buffer (removes 2 D2D memcpy per
+    # attention call). Mixed prefill+decode steps always keep the copy path.
+    # Set 0 to restore the pre-v1.2 copy behavior (A/B control).
+    "VLLM_SAIL_FUSED_ZERO_COPY_OUT": _bool("VLLM_SAIL_FUSED_ZERO_COPY_OUT", True),
+    # v1.2 F2: implementation of the exact MXFP8->BF16 dequant feeding the
+    # grouped wo_a bmm. "triton" fuses the whole 6-kernel ATen chain into one
+    # kernel (bit-identical result); if the Triton path raises on this
+    # platform the module logs a loud warning and degrades to "torch" for the
+    # rest of the process. "legacy" restores the pre-v1.2 chain (A/B control).
+    "VLLM_SAIL_FUSED_DEQUANT_MODE": _choice(
+        "VLLM_SAIL_FUSED_DEQUANT_MODE", "triton", FUSED_DEQUANT_MODES
+    ),
     # -- Distributed MoE ---------------------------------------------------
     # DeepEP low-latency deferred recv hook. The hook only pays off on backends
     # that can overlap the deferred receive with other compute; setting this to
