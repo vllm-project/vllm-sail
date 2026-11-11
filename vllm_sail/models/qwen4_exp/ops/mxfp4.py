@@ -7,8 +7,9 @@ one UE8M0 scale per 32 logical values. A QSA indexer head is 128 logical dims,
 so a packed row is 64 value bytes and its four block scales fit in one int32 —
 which is why the kernels take ``q_sf``/``k_sf`` as int32 rather than as bytes.
 
-The paged kernel reads each cache page planar (all value rows, then all scale
-rows) rather than per-row interleaved, so ``MXFP4_ROW_BYTES`` describes the
+One framework block of the compressed cache is one FP4 page, and the paged
+kernel reads that page planar -- all of its value rows, then all of its scale
+rows -- rather than per-row interleaved, so ``MXFP4_ROW_BYTES`` describes the
 allocation width and not the addressing stride; see ``vllm_sail.utils.deep_gemm``
 for the strides the kernel actually applies.
 """
@@ -25,7 +26,10 @@ MXFP4_NUM_SCALE_BLOCKS = MXFP4_LOGICAL_HEAD_DIM // MXFP4_BLOCK_SIZE
 MXFP4_PACKED_HEAD_DIM = MXFP4_LOGICAL_HEAD_DIM // 2
 MXFP4_SCALE_BYTES = MXFP4_NUM_SCALE_BLOCKS
 MXFP4_ROW_BYTES = MXFP4_PACKED_HEAD_DIM + MXFP4_SCALE_BYTES
-MXFP4_PAGE_ROWS = 64
+# DeepGEMM tiles KV in 64-row compute blocks and takes a page row count that is a
+# multiple of them. One framework block is one page, so the QSA block size
+# inherits this as ``MXFP4_PAGE_ROWS_GRANULARITY * compress_ratio``.
+MXFP4_PAGE_ROWS_GRANULARITY = 64
 
 # Triton resolves a @jit body's globals against the defining module and rejects
 # any that are not constexpr *instances*, so the kernels read this alias; the
@@ -157,38 +161,15 @@ def qsa_quant_q_mxfp4(
     return values.view(torch.int8), scales
 
 
-def expand_qsa_fp4_block_table(
-    block_table: torch.Tensor, pages_per_block: int
-) -> torch.Tensor:
-    """Map a framework-geometry block table onto 64-row FP4 pages.
-
-    FP4 page ``b * pages_per_block + j`` mirrors framework block ``b`` rows
-    ``[j * 64, (j + 1) * 64)``; one page per block makes this the identity.
-    """
-    if pages_per_block == 1:
-        return block_table
-    cols = block_table.shape[1]
-    expanded = block_table.repeat_interleave(pages_per_block, dim=1)
-    pattern = (
-        torch.arange(pages_per_block, device=block_table.device)
-        .repeat(cols)
-        .to(expanded.dtype)
-    )
-    return expanded * pages_per_block + pattern
-
-
-def qsa_fp4_pages_per_block(block_rows: int) -> int:
-    """FP4 pages covering one framework block of ``block_rows`` cache rows."""
-    return block_rows // MXFP4_PAGE_ROWS
-
-
 def check_qsa_fp4_cache_layout(kv_cache: torch.Tensor) -> int:
-    """Validate a bound compressed cache and return its 64-row pages per block.
+    """Validate a bound compressed cache and return its FP4 page row count.
 
-    The same geometry contract ``as_qsa_fp4_pages`` enforces, without building the
-    paged view. DeepGEMM's paged kernel splits a framework block into pages itself
-    (see ``block_stride_bytes``/``pages_per_block``), so the decode path hands the
-    cache over exactly as ``bind_kv_cache`` produced it and only needs the checks.
+    One framework block is one page, so this is the block's own row count -- the
+    ``page_kv`` DeepGEMM's paged kernel is launched with, and the row count its
+    planar scale plane sits behind. The decode path hands the cache over exactly
+    as ``bind_kv_cache`` produced it, a strided slice of the combined hybrid KV
+    block whose ``stride(0)`` spans the other caches sharing it, and only needs
+    these checks.
     """
     _, block_rows, num_kv_heads, row_bytes = kv_cache.shape
     if num_kv_heads != 1:
@@ -197,40 +178,15 @@ def check_qsa_fp4_cache_layout(kv_cache: torch.Tensor) -> int:
         raise ValueError(
             f"QSA MXFP4 rows are {MXFP4_ROW_BYTES} bytes wide, got {row_bytes}"
         )
-    if block_rows % MXFP4_PAGE_ROWS:
+    if block_rows % MXFP4_PAGE_ROWS_GRANULARITY:
         raise ValueError(
-            f"QSA MXFP4 pages hold {MXFP4_PAGE_ROWS} rows, which must divide the "
-            f"{block_rows} compressed rows per framework block; the QSA block "
-            f"size must be a multiple of {MXFP4_PAGE_ROWS} * compress_ratio"
+            "DeepGEMM's paged FP4 kernel takes a page row count that is a "
+            f"multiple of {MXFP4_PAGE_ROWS_GRANULARITY}, and one framework block "
+            f"is one page, so its {block_rows} compressed rows must be too; the "
+            "QSA block size must be a multiple of "
+            f"{MXFP4_PAGE_ROWS_GRANULARITY} * compress_ratio"
         )
-    return qsa_fp4_pages_per_block(block_rows)
-
-
-def as_qsa_fp4_pages(kv_cache: torch.Tensor) -> torch.Tensor:
-    """Reshape a bound compressed cache onto 64-row FP4 pages.
-
-    ``_QSAIndexerCache.bind_kv_cache`` hands the cache over as
-    ``[num_blocks, block_rows, 1, row_bytes]``; a framework block of several FP4
-    pages becomes that many pages here, and the framework block table is
-    expanded to match by ``expand_qsa_fp4_block_table``.
-
-    WARNING: this reshape copies unless the cache's block pitch is tight. In
-    serving the compressed cache is one strided slice of the combined hybrid KV
-    block, so ``stride(0)`` spans the other caches too and is far larger than
-    ``block_rows * row_bytes``. Splitting ``block_rows`` into pages then needs a
-    uniform page advance that the layout cannot express, and reshape silently
-    materializes the whole cache -- 71 MB per call at production ``num_blocks``.
-    The decode path therefore passes the cache through unreshaped; only callers
-    that genuinely need contiguous pages (or a warmup dummy) should use this.
-    """
-    num_blocks, block_rows, num_kv_heads, row_bytes = kv_cache.shape
-    pages_per_block = check_qsa_fp4_cache_layout(kv_cache)
-    return kv_cache.reshape(
-        num_blocks * pages_per_block,
-        MXFP4_PAGE_ROWS,
-        num_kv_heads,
-        row_bytes,
-    )
+    return block_rows
 
 
 def gather_qsa_fp4_keys(
@@ -248,14 +204,11 @@ def gather_qsa_fp4_keys(
     the columns it writes are already request-relative.
 
     ``kv_cache`` is the bound compressed cache and ``block_table`` the framework
-    block table, both left in framework-block geometry rather than re-paged onto
-    64-row FP4 pages -- re-paging with ``as_qsa_fp4_pages`` would copy the whole
-    cache, because the block pitch below makes it non-contiguous. A framework
-    block spans ``qsa_fp4_pages_per_block(block_rows)`` of those pages, and each
-    page is planar on its own: 64 rows of 64 value bytes, then 64 rows of 4
-    UE8M0 scale bytes. Reading a row back as 68 contiguous bytes would take its
-    scale out of the value plane, so the two planes are gathered at their own
-    page-relative offsets.
+    block table, both in framework-block geometry: one framework block is one FP4
+    page, and that page is planar -- all ``block_rows`` rows of 64 value bytes,
+    then all ``block_rows`` rows of 4 UE8M0 scale bytes. Reading a row back as 68
+    contiguous bytes would take its scale out of the value plane, so the two
+    planes are gathered at their own block-relative offsets.
 
     The cache is one slice of the combined hybrid KV block, so its block pitch
     ``stride(0)`` also spans the other caches and is much larger than the
@@ -275,11 +228,13 @@ def gather_qsa_fp4_keys(
             "QSA MXFP4 gather needs the bound compressed cache as "
             f"[blocks, rows, 1, {MXFP4_ROW_BYTES}], got {tuple(kv_cache.shape)}"
         )
-    if block_rows % MXFP4_PAGE_ROWS:
+    if block_rows % MXFP4_PAGE_ROWS_GRANULARITY:
         raise ValueError(
-            f"QSA MXFP4 pages hold {MXFP4_PAGE_ROWS} rows, which must divide the "
-            f"{block_rows} compressed rows per framework block; the QSA block "
-            f"size must be a multiple of {MXFP4_PAGE_ROWS} * compress_ratio"
+            "DeepGEMM's paged FP4 kernel takes a page row count that is a "
+            f"multiple of {MXFP4_PAGE_ROWS_GRANULARITY}, and one framework block "
+            f"is one page, so its {block_rows} compressed rows must be too; the "
+            "QSA block size must be a multiple of "
+            f"{MXFP4_PAGE_ROWS_GRANULARITY} * compress_ratio"
         )
     stride_block = kv_cache.stride(0)
     block_bytes = block_rows * row_bytes
@@ -319,14 +274,13 @@ def gather_qsa_fp4_keys(
     packed_row.clamp_(0, block_table.shape[1] * block_rows - 1)
     block_ids = block_table[packed_req, packed_row // block_rows].long()
     slot = packed_row % block_rows
-    row_in_page = slot % MXFP4_PAGE_ROWS
-    page_bytes = MXFP4_PAGE_ROWS * row_bytes
-    page_base = block_ids * stride_block + (slot // MXFP4_PAGE_ROWS) * page_bytes
-    value_base = page_base + row_in_page * MXFP4_PACKED_HEAD_DIM
+    # One framework block is one page, so both planes are block-relative: the
+    # value plane starts at the block and the scale plane follows every one of
+    # the block's value rows.
+    block_base = block_ids * stride_block
+    value_base = block_base + slot * MXFP4_PACKED_HEAD_DIM
     scale_base = (
-        page_base
-        + MXFP4_PAGE_ROWS * MXFP4_PACKED_HEAD_DIM
-        + row_in_page * MXFP4_SCALE_BYTES
+        block_base + block_rows * MXFP4_PACKED_HEAD_DIM + slot * MXFP4_SCALE_BYTES
     )
     values = flat[
         value_base[:, None]
@@ -349,13 +303,10 @@ __all__ = [
     "MXFP4_LOGICAL_HEAD_DIM",
     "MXFP4_NUM_SCALE_BLOCKS",
     "MXFP4_PACKED_HEAD_DIM",
-    "MXFP4_PAGE_ROWS",
+    "MXFP4_PAGE_ROWS_GRANULARITY",
     "MXFP4_ROW_BYTES",
     "MXFP4_SCALE_BYTES",
-    "as_qsa_fp4_pages",
     "check_qsa_fp4_cache_layout",
-    "expand_qsa_fp4_block_table",
     "gather_qsa_fp4_keys",
-    "qsa_fp4_pages_per_block",
     "qsa_quant_q_mxfp4",
 ]

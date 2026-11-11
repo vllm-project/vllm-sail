@@ -43,7 +43,10 @@ def _paged_namespace(modules, *, ppu, builder=None):
         "_current_builder": [builder] if builder is not None else [],
         "_upstream_paged_metadata": upstream,
         "_ppu_deep_gemm": NS(get_paged_mqa_logits_metadata=paged),
-        "_indexer_module": NS(PPU_FP4_INDEXER_ELEMENT_SIZE=1),
+        "_indexer_module": NS(
+            PPU_FP4_INDEXER_QK_DTYPE="int8",
+            PPU_FP8_INDEXER_QK_DTYPE="float8_e4m3fn",
+        ),
     }
     modules("vllm.platforms", current_platform=NS(is_ppu=lambda: ppu))
     return namespace, calls, fallback
@@ -102,13 +105,26 @@ def test_draft_refresh_wrapper_keeps_the_builder_visible():
 
 
 def test_paged_metadata_derives_the_fp4_extra_from_the_builder(modules):
+    builder = NS(indexer_n_head=64, indexer_q_head_dim=128, indexer_uses_fp4=True)
+    namespace, calls, fallback = _paged_namespace(modules, ppu=True, builder=builder)
+
+    result = function(PATCH, "_ppu_paged_metadata", namespace)(Span(), 64, 7)
+
+    assert result == "ppu-metadata"
+    assert calls == [(ANY, 64, 7, (1, 64, 128, "int8"))]
+    assert not fallback
+
+
+def test_paged_metadata_derives_the_fp8_extra_for_the_legacy_indexer(modules):
     builder = NS(indexer_n_head=64, indexer_q_head_dim=128)
     namespace, calls, fallback = _paged_namespace(modules, ppu=True, builder=builder)
 
     result = function(PATCH, "_ppu_paged_metadata", namespace)(Span(), 64, 7)
 
     assert result == "ppu-metadata"
-    assert calls == [(ANY, 64, 7, (1, 64, 128, 1))]
+    # DeepGEMM sizes the schedule buffer from a qk_dtype, and the legacy FP8
+    # indexer needs its own rather than the MXFP4 one.
+    assert calls == [(ANY, 64, 7, (1, 64, 128, "float8_e4m3fn"))]
     assert not fallback
 
 
@@ -127,9 +143,7 @@ def test_paged_metadata_rejects_varlen_indices_on_ppu(modules):
     namespace, _, _ = _paged_namespace(modules, ppu=True, builder=builder)
 
     with pytest.raises(NotImplementedError, match="fixed-length"):
-        function(PATCH, "_ppu_paged_metadata", namespace)(
-            Span(), 64, 7, indices=Span()
-        )
+        function(PATCH, "_ppu_paged_metadata", namespace)(Span(), 64, 7, indices=Span())
 
 
 def test_paged_metadata_delegates_on_non_ppu(modules):

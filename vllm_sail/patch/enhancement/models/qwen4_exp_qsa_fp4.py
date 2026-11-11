@@ -51,7 +51,10 @@ from vllm_sail.models.qwen4_exp.ops.fp4_select import (
 from vllm_sail.models.qwen4_exp.ops.fp4_select import (
     warmup_qsa_mqa_paged_decode as _fp4_warmup_paged_decode,
 )
-from vllm_sail.models.qwen4_exp.ops.mxfp4 import MXFP4_PAGE_ROWS, MXFP4_ROW_BYTES
+from vllm_sail.models.qwen4_exp.ops.mxfp4 import (
+    MXFP4_PAGE_ROWS_GRANULARITY,
+    MXFP4_ROW_BYTES,
+)
 from vllm_sail.models.qwen4_exp.ops.qsa_prepare_fp4 import (
     qsa_prepare as _fp4_qsa_prepare,
 )
@@ -132,11 +135,12 @@ def __init__(
     "vllm.models.qwen4_exp.common.qsa_indexer",
     "QSAIndexerBackend.get_supported_kernel_block_sizes",
     reason=(
-        "The FP4 paged kernel scores whole 64-row pages, so one framework block "
-        "of the compressed cache must hold a whole number of them. With "
-        "compress_ratio groups per row that makes the block size a multiple of "
-        "64 * compress_ratio; upstream declares no constraint for this backend "
-        "and inherits MultipleOf(1)."
+        "One framework block of the compressed cache is one FP4 page, and "
+        "DeepGEMM's paged kernel tiles KV in 64-row compute blocks, so it takes a "
+        "page row count that is a multiple of 64. With compress_ratio groups per "
+        "row that makes the block size a multiple of 64 * compress_ratio; "
+        "upstream declares no constraint for this backend and inherits "
+        "MultipleOf(1)."
     ),
     affected_versions=_AFFECTED,
     remove_when=(
@@ -158,7 +162,9 @@ def get_supported_kernel_block_sizes(
     if not isinstance(kv_cache_spec, MLAAttentionSpec):
         # The raw key ring is bf16 and never reaches an FP4 kernel.
         return [MultipleOf(1)]
-    return [MultipleOf(MXFP4_PAGE_ROWS * int(kv_cache_spec.tokens_per_state))]
+    return [
+        MultipleOf(MXFP4_PAGE_ROWS_GRANULARITY * int(kv_cache_spec.tokens_per_state))
+    ]
 
 
 @patch(

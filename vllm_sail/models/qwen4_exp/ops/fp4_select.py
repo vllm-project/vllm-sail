@@ -20,9 +20,8 @@ import torch
 from vllm_sail.models.qwen4_exp.ops.mxfp4 import (
     MXFP4_LOGICAL_HEAD_DIM,
     MXFP4_PACKED_HEAD_DIM,
-    MXFP4_PAGE_ROWS,
+    MXFP4_PAGE_ROWS_GRANULARITY,
     MXFP4_ROW_BYTES,
-    as_qsa_fp4_pages,
     check_qsa_fp4_cache_layout,
     gather_qsa_fp4_keys,
     qsa_quant_q_mxfp4,
@@ -88,10 +87,10 @@ def qsa_select_paged_decode(
     ``k_cache`` is passed through exactly as ``bind_kv_cache`` produced it -- a
     strided slice of the combined hybrid KV block, whose ``stride(0)`` spans the
     other caches sharing that block -- and ``page_table`` stays in framework block
-    ids. DeepGEMM derives both the block pitch and the 64-row page pitch from that
-    layout and splits a logical page into (block, page within block) itself.
-    Re-paging into contiguous pages instead would copy the whole cache on every
-    call: 71 MB per indexer call at production ``num_blocks``, twelve times per
+    ids. One framework block is one FP4 page, so ``stride(0)`` is already the page
+    pitch DeepGEMM wants and the cache is scored in place. Re-paging it onto
+    smaller contiguous pages instead would copy the whole cache on every call:
+    71 MB per indexer call at production ``num_blocks``, twelve times per
     iteration, which is what dominated the fp4 arm's decode regression.
     """
     assert token_topk % compress_ratio == 0
@@ -106,8 +105,8 @@ def qsa_select_paged_decode(
     num_requests = q.shape[0] // decode_query_len
     num_heads = q.shape[1]
 
-    pages_per_block = check_qsa_fp4_cache_layout(k_cache)
-    columns = page_table.shape[1] * pages_per_block * MXFP4_PAGE_ROWS
+    page_rows = check_qsa_fp4_cache_layout(k_cache)
+    columns = page_table.shape[1] * page_rows
     # The kernel and its schedule never see a zero-length row; top-k still uses
     # the raw counts, so an empty row selects nothing.
     context_lens = visible_blocks.view(num_requests, decode_query_len).clamp(min=1)
@@ -125,7 +124,10 @@ def qsa_select_paged_decode(
         page_table,
         get_paged_mqa_logits_metadata(
             context_lens,
-            MXFP4_PAGE_ROWS,
+            # Not ``page_rows``: ``get_paged_mqa_logits_tile`` never reads this
+            # argument, so it only has to clear DeepGEMM's page size gate -- which
+            # the granularity does without depending on how far they lift it.
+            MXFP4_PAGE_ROWS_GRANULARITY,
             get_num_sms(),
             fp4_avg_metadata_extra(decode_query_len),
         ),
@@ -223,11 +225,12 @@ def warmup_qsa_mqa_paged_decode(
 ) -> tuple[tuple[int, int], ...]:
     """JIT-compile every FP4 kernel reachable from the QSA indexer.
 
-    DeepGEMM's schedule and logits kernels specialize on ``next_n`` alone, and
-    neither may JIT during CUDA-graph capture, so every capturable decode
-    profile launches once against a one-page dummy request. The prefill and
-    quantization kernels are not captured but compile here too, since a
-    first-call JIT inside a serving step is a visible stall.
+    DeepGEMM's schedule and logits kernels specialize on ``next_n`` and on the
+    cache's page row count, and neither may JIT during CUDA-graph capture, so
+    every capturable decode profile launches once against the bound cache's own
+    first block. The prefill and quantization kernels are not captured but
+    compile here too, since a first-call JIT inside a serving step is a visible
+    stall.
     """
     del page_table, max_num_reqs, max_num_batched_tokens
     require_fp4_mqa_avg_logits()
@@ -240,7 +243,12 @@ def warmup_qsa_mqa_paged_decode(
 
     device = k_cache.device
     num_sms = get_num_sms()
-    page = as_qsa_fp4_pages(k_cache)[:1].contiguous()
+    # Warm the bound cache's own geometry, not a re-paged stand-in: the page row
+    # count reaches the generated source as a template parameter, so a dummy that
+    # differs from it compiles a kernel the first decode step would then have to
+    # JIT inside capture. One block suffices -- the table only indexes block 0.
+    page_rows = check_qsa_fp4_cache_layout(k_cache)
+    page = k_cache[:1]
     block_table = torch.zeros((1, 1), dtype=torch.int32, device=device)
     q_values = torch.zeros(
         (_MAX_PAGED_NEXT_N, _FP4_AVG_NUM_HEADS, MXFP4_PACKED_HEAD_DIM),
@@ -265,9 +273,12 @@ def warmup_qsa_mqa_paged_decode(
             context_lens,
             block_table,
             get_paged_mqa_logits_metadata(
-                context_lens, MXFP4_PAGE_ROWS, num_sms, fp4_avg_metadata_extra(next_n)
+                context_lens,
+                MXFP4_PAGE_ROWS_GRANULARITY,
+                num_sms,
+                fp4_avg_metadata_extra(next_n),
             ),
-            MXFP4_PAGE_ROWS,
+            page_rows,
         )
         profiles.append((next_n, 1))
 
@@ -277,17 +288,21 @@ def warmup_qsa_mqa_paged_decode(
         device=device,
     )
     packed_q, packed_q_sf = qsa_quant_q_mxfp4(bf16_q)
+    # The non-paged kernel is not page-geometric; one KV compute tile of rows is
+    # simply the smallest dummy that exercises it.
     k_values = torch.zeros(
-        (MXFP4_PAGE_ROWS, MXFP4_PACKED_HEAD_DIM), dtype=torch.int8, device=device
+        (MXFP4_PAGE_ROWS_GRANULARITY, MXFP4_PACKED_HEAD_DIM),
+        dtype=torch.int8,
+        device=device,
     )
-    k_sf = torch.zeros(MXFP4_PAGE_ROWS, dtype=torch.int32, device=device)
+    k_sf = torch.zeros(MXFP4_PAGE_ROWS_GRANULARITY, dtype=torch.int32, device=device)
     row_starts = torch.zeros(1, dtype=torch.int32, device=device)
     fp4_mqa_avg_logits(
         (packed_q, packed_q_sf),
         (k_values, k_sf),
         row_starts,
         row_starts + 1,
-        MXFP4_PAGE_ROWS,
+        MXFP4_PAGE_ROWS_GRANULARITY,
     )
     return tuple(profiles)
 

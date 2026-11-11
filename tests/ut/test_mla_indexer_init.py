@@ -7,8 +7,8 @@ from types import SimpleNamespace as NS
 
 import pytest
 
-from tests.support.source import assert_accepts_upstream_keywords
 from tests.support.modules import load_patch
+from tests.support.source import assert_accepts_upstream_keywords
 
 PATCH = "vllm_sail/patch/enhancement/attention/mla_indexer.py"
 TARGET = "vllm.v1.attention.backends.mla.indexer"
@@ -56,6 +56,10 @@ def builder_factory(modules, patch_utils_module):
             bfloat16="bfloat16",
             float32="float32",
             int32="int32",
+            # The qk_dtype constants are resolved at patch-load time, so the stub
+            # has to carry every dtype either indexer can name.
+            int8="int8",
+            float8_e4m3fn="float8_e4m3fn",
         )
         modules(
             "vllm.platforms",
@@ -108,13 +112,18 @@ def test_ppu_fp4_constructor_delegates_then_adds_fork_state(builder_factory):
     assert builder.scheduler_metadata_buffer.device == "ppu:0"
 
 
-def test_ppu_fp8_constructor_keeps_upstream_buffer(builder_factory):
+def test_ppu_fp8_constructor_reads_geometry_but_keeps_upstream_buffer(
+    builder_factory,
+):
     builder_cls, _ = builder_factory(ppu=True, fp4=False)
     builder = builder_cls("config")
 
     assert builder.supports_varlen is False
-    assert builder.indexer_n_head == 0
-    assert builder.indexer_q_head_dim == 0
+    # metadata_extra is mandatory for every paged metadata call, so the legacy
+    # FP8 indexer carries its real head geometry too; only the enlarged fp4
+    # schedule buffer stays fp4-specific.
+    assert builder.indexer_n_head == 64
+    assert builder.indexer_q_head_dim == 128
     assert builder.num_sms == 7
     assert builder.scheduler_metadata_buffer.shape == ("upstream",)
 

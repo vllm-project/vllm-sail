@@ -7,8 +7,9 @@ upstream: ``__init__`` delegates to the original method and re-applies only the
 fork's PPU state, ``build`` delegates untouched, so upstream drift (new
 helpers, new parameters, refactors) cannot break this plugin.
 
-* Two module-level constants added by the fork (``PPU_DEEP_GEMM_TB_PER_CU``,
-  ``PPU_FP4_INDEXER_ELEMENT_SIZE``) — installed with ``patch_value``.
+* Module-level constants added by the fork (``PPU_DEEP_GEMM_TB_PER_CU``,
+  ``PPU_FP4_INDEXER_QK_DTYPE``, ``PPU_FP8_INDEXER_QK_DTYPE``) — installed with
+  ``patch_value``.
 * The fork's import switch (``vllm.utils.ppu_deep_gemm`` instead of
   ``vllm.utils.deep_gemm`` under ``is_ppu()``): ``has_deep_gemm`` is an
   identity (same object); ``get_paged_mqa_logits_metadata`` is rebound on the
@@ -75,12 +76,28 @@ patch_value(
 
 patch_value(
     _MODULE,
-    "PPU_FP4_INDEXER_ELEMENT_SIZE",
-    1,
+    "PPU_FP4_INDEXER_QK_DTYPE",
+    torch.int8,
     allow_missing=True,
     reason=(
-        "Fork constant: element size (bytes) of the PPU fp4 indexer cache, "
-        "passed to the PPU paged MQA logits metadata builder via metadata_extra."
+        "Fork constant: qk_dtype entry of the metadata_extra tuple the PPU "
+        "paged MQA logits metadata builder requires. On M890 torch.int8 denotes "
+        "packed MXFP4, not integer arithmetic; DeepGEMM reads it together with "
+        "the device arch and rejects an integer byte size here."
+    ),
+    affected_versions=_AFFECTED,
+    remove_when="upstream defines the constant itself (patch_value becomes a no-op).",
+)
+
+patch_value(
+    _MODULE,
+    "PPU_FP8_INDEXER_QK_DTYPE",
+    torch.float8_e4m3fn,
+    allow_missing=True,
+    reason=(
+        "Fork constant: qk_dtype entry of the metadata_extra tuple for the "
+        "legacy FP8 DSA indexer on M890, which DeepGEMM documents as "
+        "torch.float8_e4m3fn rather than the MXFP4 torch.int8."
     ),
     affected_versions=_AFFECTED,
     remove_when="upstream defines the constant itself (patch_value becomes a no-op).",
@@ -114,10 +131,11 @@ def _ppu_paged_metadata(
         # PPU declares PlatformEnum.CUDA, so upstream's decode build does reach
         # its is_cuda() block and calls this helper without metadata_extra.
         # Derive the fork's tuple from the builder inside build, so upstream's
-        # own fill already uses the fp4 layout (instead of a redundant second
-        # pass over the decode scheduler metadata). Every PPU-reachable call
-        # site (build and update_draft_decode_metadata) runs behind a wrapper
-        # that puts its builder on the stack.
+        # own fill already uses the fork's layout (instead of a redundant second
+        # pass over the decode scheduler metadata). The builder reads its head
+        # geometry for both indexers, so this covers the legacy FP8 one too.
+        # Every PPU-reachable call site (build and update_draft_decode_metadata)
+        # runs behind a wrapper that puts its builder on the stack.
         builder = _current_builder[-1] if _current_builder else None
         n_head = getattr(builder, "indexer_n_head", 0) if builder else 0
         if n_head > 0:
@@ -128,7 +146,11 @@ def _ppu_paged_metadata(
                 heads_per_token,
                 n_head,
                 builder.indexer_q_head_dim,
-                _indexer_module.PPU_FP4_INDEXER_ELEMENT_SIZE,
+                # DeepGEMM sizes the schedule buffer from a qk_dtype rather than
+                # an element size, and the legacy FP8 indexer needs its own.
+                _indexer_module.PPU_FP4_INDEXER_QK_DTYPE
+                if getattr(builder, "indexer_uses_fp4", False)
+                else _indexer_module.PPU_FP8_INDEXER_QK_DTYPE,
             )
     return _ppu_deep_gemm.get_paged_mqa_logits_metadata(
         context_lens, block_size, num_sms, metadata_extra
@@ -326,15 +348,13 @@ def _builder_init_wrapper(self, *args, **kwargs) -> None:
     # its is_cuda() gate and only fail on the capability check. Pin it off:
     # SAIL's paged logits API uses the existing fixed-length metadata layout.
     self.supports_varlen = False
-    self.indexer_n_head = (
-        getattr(self.kv_cache_spec, "indexer_n_head", 0) or 0
-        if self.indexer_uses_fp4
-        else 0
-    )
+    # DeepGEMM's metadata_extra is mandatory for every paged metadata call and
+    # carries the indexer's real head geometry, so it is read for the legacy FP8
+    # indexer as well as the MXFP4 one; zeroing it here would leave
+    # _ppu_paged_metadata with no tuple to build.
+    self.indexer_n_head = getattr(self.kv_cache_spec, "indexer_n_head", 0) or 0
     self.indexer_q_head_dim = (
         getattr(self.kv_cache_spec, "indexer_q_head_dim", 0) or 0
-        if self.indexer_uses_fp4
-        else 0
     )
     from vllm_sail.utils.deep_gemm import get_num_sms
 

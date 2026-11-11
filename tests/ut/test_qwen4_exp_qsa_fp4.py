@@ -103,34 +103,30 @@ def test_mxfp4_row_geometry(mxfp4):
     [
         ((1, 64, 2, 68), "one kv head"),
         ((1, 64, 1, 128), "68 bytes wide"),
-        ((1, 100, 1, 68), "must divide"),
+        ((1, 100, 1, 68), "multiple of 64"),
     ],
 )
-def test_as_qsa_fp4_pages_rejects_a_layout_it_cannot_address(mxfp4, shape, match):
+def test_check_qsa_fp4_cache_layout_rejects_a_layout_it_cannot_address(
+    mxfp4, shape, match
+):
     import torch
 
     cache = torch.zeros(shape, dtype=torch.uint8)
     with pytest.raises(ValueError, match=match):
-        mxfp4.as_qsa_fp4_pages(cache)
+        mxfp4.check_qsa_fp4_cache_layout(cache)
 
 
-def test_as_qsa_fp4_pages_splits_a_block_into_pages(mxfp4):
+@pytest.mark.parametrize("block_rows", [64, 448])
+def test_check_qsa_fp4_cache_layout_returns_the_block_as_the_page(mxfp4, block_rows):
+    """One framework block is one page, so the page row count is the block's own.
+
+    448 is production's decode geometry: ``--block-size 1792`` at a
+    ``compress_ratio`` of 4.
+    """
     import torch
 
-    cache = torch.zeros((3, 128, 1, 68), dtype=torch.uint8)
-    assert mxfp4.qsa_fp4_pages_per_block(128) == 2
-    assert mxfp4.as_qsa_fp4_pages(cache).shape == (6, 64, 1, 68)
-
-
-def test_expand_qsa_fp4_block_table(mxfp4):
-    import torch
-
-    table = torch.tensor([[1, 2], [3, 4]], dtype=torch.int32)
-    assert mxfp4.expand_qsa_fp4_block_table(table, 1) is table
-    assert mxfp4.expand_qsa_fp4_block_table(table, 2).tolist() == [
-        [2, 3, 4, 5],
-        [6, 7, 8, 9],
-    ]
+    cache = torch.zeros((3, block_rows, 1, 68), dtype=torch.uint8)
+    assert mxfp4.check_qsa_fp4_cache_layout(cache) == block_rows
 
 
 @pytest.mark.parametrize("block_rows", [64, 256])
@@ -141,18 +137,22 @@ def test_expand_qsa_fp4_block_table(mxfp4):
 def test_gather_qsa_fp4_keys_reads_the_planar_block(
     mxfp4, block_rows, bound_view, pitch_pad, offset
 ):
-    """Split planar FP4 pages back into per-row values and scales.
+    """Split planar FP4 blocks back into per-row values and scales.
 
-    ``_qsa_prepare_kernel`` stores each 64-row page planar -- the page's value
-    rows, then its scale rows -- because DeepGEMM's paged kernel reads scales at
-    ``page_base + page_kv * head_dim``. ``--block-size 1024`` binds 256 compressed
-    rows per block, i.e. four such pages, where reading 68 contiguous bytes per
-    row shifts every row past the first and takes the scales out of the value
-    plane. The requests below are long enough to cross page boundaries, which is
-    what distinguishes page granularity from block granularity.
+    ``_qsa_prepare_kernel`` stores each framework block planar -- all of the
+    block's value rows, then all of its scale rows -- because DeepGEMM's paged
+    kernel reads scales at ``block_base + page_kv * head_dim`` with ``page_kv``
+    the block's own row count. Reading 68 contiguous bytes per row instead would
+    shift every row past the first and take the scales out of the value plane,
+    and a plane per 64 rows would put a 256-row block's scales 12288 bytes too
+    early -- both silently, since the shape still validates. ``block_rows=256``
+    (``--block-size 1024``) is what distinguishes the two.
+
+    Request lengths scale with ``block_rows`` so both parametrizations walk more
+    than one block of their table.
 
     The compressed cache is one slice of the combined hybrid KV block, so its
-    block pitch also spans the other caches: production binds 256 rows with
+    block pitch also spans the other caches: production binds 448 rows with
     ``stride(0)`` in the millions. ``pitch_pad`` covers that, and ``offset`` a
     nonzero ``storage_offset``, both of which the writer shares because it steps
     blocks by ``stride(0)`` from ``data_ptr()``.
@@ -163,8 +163,6 @@ def test_gather_qsa_fp4_keys_reads_the_planar_block(
     import torch
 
     packed, row_bytes = mxfp4.MXFP4_PACKED_HEAD_DIM, mxfp4.MXFP4_ROW_BYTES
-    page_rows = mxfp4.MXFP4_PAGE_ROWS
-    pages_per_block = mxfp4.qsa_fp4_pages_per_block(block_rows)
     num_blocks = 8
     rows = num_blocks * block_rows
     block_bytes = block_rows * row_bytes
@@ -174,12 +172,10 @@ def test_gather_qsa_fp4_keys_reads_the_planar_block(
         torch.uint8
     )
     scale_bytes = logical.view(torch.uint8).view(rows, mxfp4.MXFP4_SCALE_BYTES)
-    # Per (block, page): every value row of the page, then every scale row.
-    values = value_bytes.reshape(num_blocks, pages_per_block, page_rows * packed)
-    scales = scale_bytes.reshape(
-        num_blocks, pages_per_block, page_rows * mxfp4.MXFP4_SCALE_BYTES
-    )
-    blocks = torch.cat([values, scales], dim=2).reshape(num_blocks, block_bytes)
+    # Per block: every value row of the block, then every scale row.
+    values = value_bytes.reshape(num_blocks, block_rows * packed)
+    scales = scale_bytes.reshape(num_blocks, block_rows * mxfp4.MXFP4_SCALE_BYTES)
+    blocks = torch.cat([values, scales], dim=1)
 
     span = (num_blocks - 1) * pitch + block_bytes
     backing = torch.full((span + offset,), 0xA5, dtype=torch.uint8)
@@ -192,7 +188,7 @@ def test_gather_qsa_fp4_keys_reads_the_planar_block(
     )
 
     block_table = torch.tensor([[7, 2, 0], [5, 1, 3]], dtype=torch.int32)
-    lengths = (70, 60)
+    lengths = (block_rows + 6, block_rows - 4)
     cu_seqlens = torch.tensor([0, lengths[0], sum(lengths)], dtype=torch.int64)
     capacity = int(cu_seqlens[-1])
     k_values, k_sf = mxfp4.gather_qsa_fp4_keys(cache, block_table, cu_seqlens, capacity)
@@ -226,19 +222,21 @@ def test_gather_qsa_fp4_keys_rejects_a_shape_it_cannot_address(mxfp4, shape):
         mxfp4.gather_qsa_fp4_keys(cache, block_table, cu_seqlens, 1)
 
 
-def test_gather_qsa_fp4_keys_rejects_a_partial_trailing_page(mxfp4):
-    """A block whose rows do not fill whole pages has no valid scale plane.
+def test_gather_qsa_fp4_keys_rejects_a_block_that_is_not_whole_tiles(mxfp4):
+    """A block DeepGEMM cannot take as a page has no valid scale plane.
 
-    Both planes of the last partial page would land inside the next page, and
-    ``as_qsa_fp4_pages`` rejects the same geometry, so the paged path could never
-    read what the gather would write.
+    ``page_kv`` must be a multiple of its 64-row KV compute tile, and the scale
+    plane sits behind all of the block's value rows, so a 100-row block would
+    place that plane where the kernel reads values -- and
+    ``check_qsa_fp4_cache_layout`` rejects the same geometry, so the paged path
+    could never read what the gather would write.
     """
     import torch
 
     cache = torch.zeros((2, 100, 1, mxfp4.MXFP4_ROW_BYTES), dtype=torch.uint8)
     block_table = torch.zeros((1, 2), dtype=torch.int32)
     cu_seqlens = torch.tensor([0, 1], dtype=torch.int64)
-    with pytest.raises(ValueError, match="must divide"):
+    with pytest.raises(ValueError, match="multiple of 64"):
         mxfp4.gather_qsa_fp4_keys(cache, block_table, cu_seqlens, 1)
 
 
@@ -266,9 +264,10 @@ def test_gather_qsa_fp4_keys_rejects_a_pitch_smaller_than_a_block(mxfp4):
 def test_fp4_avg_logits_call_shape(monkeypatch):
     """The prefill scorer's contract with DeepGEMM, without a device.
 
-    ``clean_logits`` cannot be set with compression, ``max_seqlen_k`` must be
-    the caller's real bound rather than DeepGEMM's 0 default, and the logits
-    must not come back bf16, which is the FP4 entry points' own default.
+    ``clean_logits`` is not a parameter of the FP4 average entry points, so it
+    must not be forwarded; ``max_seqlen_k`` is mandatory and must be the caller's
+    real bound; and the logits must not come back bf16, which is the FP4 entry
+    points' own default.
     """
     torch = pytest.importorskip("torch")
     pytest.importorskip("vllm", reason="requires vLLM")
@@ -287,7 +286,7 @@ def test_fp4_avg_logits_call_shape(monkeypatch):
     assert deep_gemm.fp4_mqa_avg_logits(q, kv, ks, ke, 96) == "logits"
     args, kwargs = calls[0]
     assert args == (q, kv, ks, ke)
-    assert kwargs["clean_logits"] is False
+    assert "clean_logits" not in kwargs
     assert kwargs["max_seqlen_k"] == 96
     assert kwargs["logits_dtype"] is torch.float32
     assert "q_scale" not in kwargs
@@ -298,15 +297,17 @@ def test_fp4_avg_logits_call_shape(monkeypatch):
 
 
 def test_fp4_avg_metadata_extra_matches_the_schedule_assert():
+    """DeepGEMM sizes the FP4 paged AVG schedule buffer from this exact tuple.
+
+    The head dimension is the logical 128, not the packed 64 the Q/K tensors
+    carry: DeepGEMM halves it internally for MXFP4 and rejects a D32 tile. The
+    fourth entry is a dtype, since an integer byte size is not accepted.
+    """
+    torch = pytest.importorskip("torch")
     pytest.importorskip("vllm", reason="requires vLLM")
     from vllm_sail.utils import deep_gemm
 
-    assert deep_gemm.fp4_avg_metadata_extra(3) == (
-        3,
-        deep_gemm.FP4_AVG_NUM_HEADS,
-        deep_gemm.FP4_AVG_HEAD_DIM,
-        1,
-    )
+    assert deep_gemm.fp4_avg_metadata_extra(3) == (3, 4, 128, torch.int8)
 
 
 def test_require_fp4_mqa_avg_logits_needs_both_kernels(monkeypatch):
@@ -450,7 +451,7 @@ def test_compressed_cache_init_publishes_an_mxfp4_row(qsa_fp4_patch, monkeypatch
     # The FP4 cache has no fp8 fallback: --indexer-kv-dtype fp8 must fail at
     # model load rather than bind a cache no scorer can read.
     with _is_ppu(True), pytest.raises(NotImplementedError, match="indexer-kv-dtype"):
-        init(object(), **kwargs, dtype=torch.float8_e4m3fn)
+        init(object(), **{**kwargs, "dtype": torch.float8_e4m3fn})
 
 
 def test_kernel_block_sizes_follow_the_fp4_page(qsa_fp4_patch):
@@ -475,8 +476,9 @@ def test_kernel_block_sizes_follow_the_fp4_page(qsa_fp4_patch):
     )
 
     with _is_ppu(True):
-        # One framework block must hold whole 64-row FP4 pages, so a
-        # compress_ratio of 4 pushes the block size to a multiple of 256.
+        # One framework block is one FP4 page and DeepGEMM tiles KV in 64-row
+        # compute blocks, so a compress_ratio of 4 pushes the block size to a
+        # multiple of 256.
         assert block_sizes(compressed) == [MultipleOf(64 * 4)]
         # The raw key ring is bf16 and never reaches an FP4 kernel.
         assert block_sizes(raw) == [MultipleOf(1)]
