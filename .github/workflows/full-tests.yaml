@@ -1,0 +1,280 @@
+name: Full CPU test sweep
+# Purpose: one run that shows the state of every suite which can execute without
+# PPU hardware. This is a view, not a gate: ut.yaml stays the merge gate for
+# tests/ut and the control contracts, and the nightly preview workflows keep the
+# device verification. Delete the push trigger if it becomes noisy after merge.
+on:
+  workflow_dispatch:
+  pull_request:
+  push:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: full-tests-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PYTHONUNBUFFERED: "1"
+  PYTHONDONTWRITEBYTECODE: "1"
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
+
+jobs:
+  control-static:
+    name: Control contracts and static checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements/dev.txt
+      - name: Install test tooling
+        run: python -m pip install -r requirements/dev.txt
+      - name: Run the control contract suites
+        run: |
+          python3 -B -m unittest discover -s tests -p 'test_nightly_assets.py' -q
+          python3 -B -m unittest discover -s tests -p 'test_deployment.py' -q
+          python3 -B -m unittest discover -s tests -p 'test_verify_installed.py' -q
+          python3 -B -m unittest discover -s tests -p 'test_workflow_contracts.py' -q
+      - name: Validate the pinned test source and shell entry points
+        run: |
+          python3 -B scripts/ci/deployment.py validate-test-source --source .
+          for script in $(git ls-files '*.sh'); do bash -n "$script"; done
+      - name: Lint (informational)
+        continue-on-error: true
+        run: ruff check .
+
+  unit-cpu:
+    name: Unit tests (tests/ut)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          # test_packaging.py builds a real wheel and needs tags for setuptools-scm.
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements/dev.txt
+      - name: Install test tooling
+        run: python -m pip install -r requirements/dev.txt
+      - name: Run unit tests without vLLM, torch, or hardware
+        run: |
+          mkdir -p reports
+          python -m pytest tests/ut -q --junitxml=reports/ut.xml
+      - name: Upload the JUnit report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: full-tests-unit
+          path: reports/
+          if-no-files-found: ignore
+          retention-days: 7
+
+  tensor-integration:
+    name: Tensor and integration suites
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements/dev.txt
+      - name: Install test tooling and CPU torch
+        run: |
+          python -m pip install -r requirements/dev.txt
+          python -m pip install --index-url https://download.pytorch.org/whl/cpu torch
+      - name: Run tensor and integration tests
+        run: |
+          mkdir -p reports
+          python -m pytest tests/tensor tests/integration -q -rs \
+            --junitxml=reports/tensor-integration.xml
+      - name: Upload the JUnit report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: full-tests-tensor-integration
+          path: reports/
+          if-no-files-found: ignore
+          retention-days: 7
+
+  upstream-reuse:
+    name: Upstream reuse entries
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements/dev.txt
+      - name: Install test tooling
+        run: python -m pip install -r requirements/dev.txt
+      - name: Run the upstream reuse entries
+        # Without an installed vLLM every entry skips at collection time, which is
+        # the documented host behaviour: "all skipped, 0 errors".
+        run: |
+          mkdir -p reports
+          python -m pytest tests/upstream_reuse -q -rs --junitxml=reports/reuse.xml
+      - name: Upload the JUnit report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: full-tests-reuse
+          path: reports/
+          if-no-files-found: ignore
+          retention-days: 7
+
+  device-inventory:
+    name: Device suite inventory (CPU)
+    # Device suites need a real PPU, so this job never executes them. It keeps the
+    # CPU sweep honest instead: both catalogs are validated, the modules must still
+    # collect, and the chip/board matrix is printed so a reviewer can see what the
+    # self-hosted device jobs will run after merge.
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements/dev.txt
+      - name: Install test tooling
+        run: python -m pip install -r requirements/dev.txt
+      - name: Validate the device catalogs and write the matrix
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          root = Path.cwd()
+          ops = json.loads((root / "scripts/ci/ppu_ops_tests.json").read_text())
+          models = json.loads((root / "scripts/ci/ppu_e2e_models.json").read_text())
+          catalog = ops["test_catalog"]
+          profiles = ops["execution_profiles"]
+          errors = []
+
+          ids = [entry["id"] for entry in catalog]
+          if len(ids) != len(set(ids)):
+              errors.append("duplicate operator ids in ppu_ops_tests.json")
+          for entry in catalog:
+              if not (root / entry["test"]).is_file():
+                  errors.append(f"missing test file: {entry['test']}")
+              unknown = set(entry["boards"]) - set(profiles)
+              if unknown:
+                  errors.append(f"{entry['id']}: unknown boards {sorted(unknown)}")
+
+          keys = [entry["key"] for entry in models]
+          if len(keys) != len(set(keys)):
+              errors.append("duplicate model keys in ppu_e2e_models.json")
+          for entry in models:
+              if entry["category"] not in ("smoke", "accuracy"):
+                  errors.append(f"{entry['key']}: bad category")
+              if type(entry["ppu_count"]) is not int or entry["ppu_count"] < 1:
+                  errors.append(f"{entry['key']}: bad ppu_count")
+
+          lines = [
+              "## Device suites (declared, not executed here)",
+              "",
+              f"Operator catalog: **{len(catalog)}** entries, "
+              f"{len(profiles)} execution profiles.",
+              "",
+              "| profile | runner | board | operator tests |",
+              "| --- | --- | --- | --- |",
+          ]
+          for name, profile in sorted(profiles.items()):
+              count = sum(name in entry["boards"] for entry in catalog)
+              lines.append(
+                  f"| {name} | {profile['runner_group']} | "
+                  f"{profile['node_selector']['board-type']} | {count} |"
+              )
+          smoke = sum(entry["category"] == "smoke" for entry in models)
+          lines += [
+              "",
+              f"Model configs: **{len(models)}** ({smoke} smoke, "
+              f"{len(models) - smoke} accuracy).",
+              "",
+              "| board | models |",
+              "| --- | --- |",
+          ]
+          for board in sorted({entry["board"] for entry in models}):
+              lines.append(
+                  f"| {board} | {sum(e['board'] == board for e in models)} |"
+              )
+          text = "\n".join(lines) + "\n"
+          print(text)
+          step_summary = os.environ.get("GITHUB_STEP_SUMMARY")
+          if step_summary:
+              Path(step_summary).write_text(text)
+
+          if errors:
+              for error in errors:
+                  print(f"::error::{error}")
+              raise SystemExit(1)
+          PY
+
+      - name: Collect the device suites without executing them
+        # Informational: without the PPU runtime modules collection may fail on
+        # imports, which is the same reason the suites are not run here.
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          python -m pytest tests/e2e --collect-only -q 2>&1 | tail -40
+
+  summary:
+    name: Summary
+    needs:
+      - control-static
+      - unit-cpu
+      - tensor-integration
+      - upstream-reuse
+      - device-inventory
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Report every job result
+        env:
+          # Hyphenated job ids need bracket syntax; "a-b.result" parses as a subtraction.
+          CONTROL: ${{ needs['control-static'].result }}
+          UNIT: ${{ needs['unit-cpu'].result }}
+          TENSOR: ${{ needs['tensor-integration'].result }}
+          REUSE: ${{ needs['upstream-reuse'].result }}
+          INVENTORY: ${{ needs['device-inventory'].result }}
+        run: |
+          set -euo pipefail
+          failed=0
+          for entry in "control-static=$CONTROL" "unit-cpu=$UNIT" \
+            "tensor-integration=$TENSOR" "upstream-reuse=$REUSE" \
+            "device-inventory=$INVENTORY"; do
+            name="${entry%%=*}"
+            result="${entry#*=}"
+            printf '%-22s %s\n' "$name" "$result"
+            if [ "$result" != "success" ]; then
+              failed=1
+            fi
+          done
+          if [ "$failed" -ne 0 ]; then
+            echo "::error::At least one suite did not pass; open the failing job above."
+          fi
+          exit "$failed"
