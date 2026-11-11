@@ -50,7 +50,9 @@ Baselines are maintained by hand. When hardware, firmware, or SDK changes
 shift the performance envelope, a developer must:
 
 1. Run the perf suite on the target chip (via `ppu-debug.yaml` with
-   `target=kernel-perf` or the weekly `perf-regression.yaml` schedule).
+   `run_kernel_perf=true` and `run_accuracy=false`, or the weekly
+   `perf-regression.yaml` schedule). The debug sweep also builds wheels and
+   runs the PR lanes; it no longer accepts `target=kernel-perf`.
 2. Download the `perf_report.md` and the emitted baseline JSON from the CI
    artifacts.
 3. Review the numbers against the hardware spec and prior baseline.
