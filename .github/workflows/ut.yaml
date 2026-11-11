@@ -1,7 +1,20 @@
-name: Unit tests
+name: CPU unit tests
 
 on:
-  pull_request:
+  workflow_call:
+    inputs:
+      pr_head_sha:
+        description: Exact PR head SHA under test
+        type: string
+        default: ""
+      pr_number:
+        description: PR number for coverage attribution
+        type: string
+        default: ""
+      pr_head_ref:
+        description: PR head branch for coverage attribution
+        type: string
+        default: ""
   push:
     branches: [main, master]
   workflow_dispatch:
@@ -10,7 +23,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: ut-${{ github.event.pull_request.number || github.ref }}
+  group: ut-${{ inputs.pr_head_sha && github.run_id || github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -25,58 +38,35 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
+          ref: ${{ inputs.pr_head_sha || github.sha }}
           persist-credentials: false
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
-          cache: pip
       - name: Install CPU-only test tooling
-        run: python -m pip install -r requirements/dev.txt
-      - name: Run unit tests without vLLM, torch, or hardware
+        run: python -m pip install --no-cache-dir -r requirements/dev.txt
+      - name: Require CPU test toolchain
+        run: |
+          python - <<'PY'
+          import subprocess
+
+          for tool in ("cmake", "c++"):
+              subprocess.run([tool, "--version"], check=True)
+          version = subprocess.check_output(["cmake", "--version"], text=True).split()[2]
+          assert tuple(map(int, version.split(".")[:2])) >= (3, 26), version
+          PY
+      - name: Run bare CPU unit tests
         run: >-
-          python -m pytest tests/ut -q
+          python -m pytest tests/ut -q -rs
+          -m "not upstream_source and not requires_runtime and not ppu and not cap80 and not cap89"
           --cov=vllm_sail --cov-branch --cov-report=term-missing
           --cov-report=xml
       - name: Upload coverage
         uses: codecov/codecov-action@v5
         with:
           files: coverage.xml
+          override_commit: ${{ inputs.pr_head_sha || github.sha }}
+          override_branch: ${{ inputs.pr_head_ref || github.ref_name }}
+          override_pr: ${{ inputs.pr_number }}
           flags: python-${{ matrix.python-version }}
           fail_ci_if_error: false
-
-  vllm-source-contracts:
-    name: vLLM source (main-verified)
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          persist-credentials: false
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-      - name: Resolve the selected upstream ref
-        id: upstream
-        run: |
-          pin="$(tr -d '[:space:]' < .github/vllm-main-verified.commit)"
-          [[ "${pin}" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::Invalid upstream ref: ${pin}"; exit 1; }
-          echo "ref=${pin}" >> "$GITHUB_OUTPUT"
-      - name: Check out upstream source without installing vLLM
-        uses: actions/checkout@v4
-        with:
-          repository: vllm-project/vllm
-          ref: ${{ steps.upstream.outputs.ref }}
-          path: .upstream/vllm
-          persist-credentials: false
-      - name: Record the tested upstream revision
-        run: git -C .upstream/vllm rev-parse HEAD
-      - name: Purge pip cache (prevent cache-poisoning vector)
-        run: rm -rf ~/.cache/pip
-      - name: Install CPU-only test tooling
-        run: python -m pip install --no-cache-dir -r requirements/dev.txt
-      - name: Check feature and interface contracts against the selected source
-        env:
-          VLLM_SOURCE_ROOT: ${{ github.workspace }}/.upstream/vllm
-        run: >-
-          python -m pytest tests/ut -q -rs
-          -m upstream_source --require-upstream-source

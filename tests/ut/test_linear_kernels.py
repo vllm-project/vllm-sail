@@ -133,6 +133,7 @@ def test_registry_package_is_importable_without_vllm() -> None:
 
 
 @pytest.mark.parametrize("loader_error", ["OSError", "ImportError"])
+@pytest.mark.requires_runtime
 def test_registration_precedes_general_patches_and_optional_sdk_loading(
     tmp_path,
     loader_error,
@@ -192,6 +193,7 @@ def test_registration_precedes_general_patches_and_optional_sdk_loading(
     assert result.returncode == 0, result.stdout + result.stderr
 
 
+@pytest.mark.requires_runtime
 def test_register_is_idempotent(kernels) -> None:
     linear_module, linear_kernels = kernels
     from vllm.platforms.interface import PlatformEnum
@@ -206,6 +208,7 @@ def test_register_is_idempotent(kernels) -> None:
         assert getattr(linear_module, attribute)[PlatformEnum.CUDA] == candidates
 
 
+@pytest.mark.requires_runtime
 def test_every_ppu_kernel_is_first_in_its_candidate_list(kernels) -> None:
     """register_linear_kernel appends; PPU kernels must win selection instead."""
     linear_module, _ = kernels
@@ -222,6 +225,7 @@ def test_every_ppu_kernel_is_first_in_its_candidate_list(kernels) -> None:
 
 
 @pytest.mark.parametrize("class_name", _KERNEL_CLASSES)
+@pytest.mark.requires_runtime
 def test_is_supported_is_false_off_ppu(monkeypatch, kernels, class_name) -> None:
     from vllm.platforms import current_platform
 
@@ -250,6 +254,7 @@ def test_is_supported_is_false_off_ppu(monkeypatch, kernels, class_name) -> None
         ("PPUDeepGemmFp8BlockScaledMMKernel", False, True, True),
     ],
 )
+@pytest.mark.requires_runtime
 def test_is_supported_on_ppu_matrix(
     monkeypatch, kernels, class_name, sm80, deep_gemm, expected
 ) -> None:
@@ -271,6 +276,7 @@ def test_is_supported_on_ppu_matrix(
         assert reason
 
 
+@pytest.mark.requires_runtime
 def test_int8_and_cutlass_can_implement_accept_every_config(kernels) -> None:
     from vllm_sail.model_executor.kernels.linear.scaled_mm import ppu as ppu_kernels
 
@@ -316,6 +322,7 @@ def test_int8_and_cutlass_can_implement_accept_every_config(kernels) -> None:
         ),
     ],
 )
+@pytest.mark.requires_runtime
 def test_fp8_registry_selects_kernel_for_scale_granularity(
     monkeypatch, kernels, activation_key, weight_key, expected
 ) -> None:
@@ -361,6 +368,7 @@ def test_fp8_registry_selects_kernel_for_scale_granularity(
     "class_name",
     ["PPUCutlassFp8BlockScaledMMKernel", "PPUDeepGemmFp8BlockScaledMMKernel"],
 )
+@pytest.mark.requires_runtime
 def test_fp8_block_can_implement_requires_128_group_activations(
     monkeypatch, kernels, class_name
 ) -> None:

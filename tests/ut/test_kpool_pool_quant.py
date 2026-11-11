@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import pytest
 
+pytestmark = pytest.mark.requires_runtime
+
 torch = pytest.importorskip("torch")
 
 from vllm_sail.attention.ops import mla_sparse_kpool as kpool  # noqa: E402

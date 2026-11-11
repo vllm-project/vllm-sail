@@ -9,6 +9,7 @@ import pytest
 
 
 @pytest.mark.parametrize("dtype_name", ["float16", "bfloat16"])
+@pytest.mark.requires_runtime
 def test_installed_mlp_keeps_unfused_cpu_tensor_identity(monkeypatch, dtype_name):
     torch = pytest.importorskip("torch")
     pytest.importorskip("vllm")

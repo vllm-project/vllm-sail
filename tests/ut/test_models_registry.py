@@ -152,6 +152,7 @@ def test_register_model_is_idempotent(
     assert len(fake_vllm.calls) == len(EXPECTED_ARCHITECTURES)
 
 
+@pytest.mark.requires_runtime
 def test_dspark_override_exposes_quant_mappings() -> None:
     pytest.importorskip("vllm", reason="requires vLLM model interfaces")
     from vllm.model_executor.models.interfaces import SupportsQuant
@@ -167,6 +168,7 @@ def test_dspark_override_exposes_quant_mappings() -> None:
     assert DSparkDeepseekV4ForCausalLM.hf_to_vllm_mapper is not None
 
 
+@pytest.mark.requires_runtime
 def test_deepseek_mapper_selection_is_instance_local() -> None:
     """Building one quant variant must not mutate later model instances."""
     pytest.importorskip("vllm", reason="requires the vLLM DeepSeek V4 base")
@@ -213,6 +215,7 @@ def test_deepseek_mapper_selection_is_instance_local() -> None:
         ("int4", None),
     ],
 )
+@pytest.mark.requires_runtime
 def test_deepseek_target_loader_filters_mtp_weights(
     monkeypatch, expert_dtype, channelwise_layers, tp_rank
 ) -> None:
@@ -271,6 +274,7 @@ def test_deepseek_target_loader_filters_mtp_weights(
     assert torch.isneginf(layer.attn.attn_sink[1:]).all()
 
 
+@pytest.mark.requires_runtime
 def test_dspark_draft_keeps_mtp_names_for_its_own_loader() -> None:
     pytest.importorskip("vllm")
     from vllm_sail.models.deepseek_v4.dspark import DSparkDeepseekV4ForCausalLM
@@ -332,6 +336,7 @@ def real_registry():
     return vllm.ModelRegistry
 
 
+@pytest.mark.requires_runtime
 def test_registration_lands_in_real_registry(real_registry) -> None:
     models_pkg._registered = False
     previous = {arch: real_registry.models.get(arch) for arch in EXPECTED_ARCHITECTURES}

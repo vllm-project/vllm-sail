@@ -444,46 +444,29 @@ def test_ci_uses_separate_pinned_build_and_runtime_stacks():
             assert "image" not in trigger["inputs"]
 
 
-def test_unit_test_workflow_covers_all_contract_tests():
+def test_cpu_and_pin_ut_use_complementary_full_directory_selections():
+    import shlex
+
     import yaml
 
     unit_tests = yaml.safe_load((WORKFLOW.parent / "ut.yaml").read_text())
-    cpu = next(
-        step["run"].split()
-        for step in unit_tests["jobs"]["cpu-unit-tests"]["steps"]
+    assert set(unit_tests["jobs"]) == {"cpu-unit-tests"}
+    cpu = unit_tests["jobs"]["cpu-unit-tests"]
+    command = next(
+        shlex.split(step["run"])
+        for step in cpu["steps"]
         if "pytest" in step.get("run", "")
     )
-    assert cpu[:4] == ["python", "-m", "pytest", "tests/ut"]
+    assert command[:7] == ["python", "-m", "pytest", "tests/ut", "-q", "-rs", "-m"]
+    assert command[7] == (
+        "not upstream_source and not requires_runtime and not ppu "
+        "and not cap80 and not cap89"
+    )
     narrowing = {"-m", "-k", "--deselect", "--ignore", "--ignore-glob"}
-    assert not [arg for arg in cpu[4:] if arg.split("=")[0] in narrowing]
-    source = unit_tests["jobs"]["vllm-source-contracts"]
-    assert source["name"] == "vLLM source (main-verified)"
-    upstream = next(
-        step for step in source["steps"] if "repository" in step.get("with", {})
-    )
-    assert upstream["with"] == {
-        "repository": "vllm-project/vllm",
-        "ref": "${{ steps.upstream.outputs.ref }}",
-        "path": ".upstream/vllm",
-        "persist-credentials": False,
-    }
-    contracts = next(
-        step for step in source["steps"] if "VLLM_SOURCE_ROOT" in step.get("env", {})
-    )
-    assert contracts["env"]["VLLM_SOURCE_ROOT"] == (
-        "${{ github.workspace }}/.upstream/vllm"
-    )
-    assert contracts["run"].split() == [
-        "python",
-        "-m",
-        "pytest",
-        "tests/ut",
-        "-q",
-        "-rs",
-        "-m",
-        "upstream_source",
-        "--require-upstream-source",
-    ]
+    assert not [arg for arg in command[8:] if arg.split("=")[0] in narrowing]
+    pin = (ROOT / "scripts/ci/ppu_pin_ut.sh").read_text()
+    assert '-m "upstream_source or requires_runtime or ppu or cap80 or cap89"' in pin
+    assert "--require-upstream-source" in pin
 
 
 @pytest.fixture

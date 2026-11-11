@@ -88,6 +88,7 @@ def installed_patches():
     return patch_pkg.PATCH_REGISTRY
 
 
+@pytest.mark.requires_runtime
 def test_install_is_idempotent(installed_patches) -> None:
     """register_out_of_tree runs in every process and may run twice.
 
@@ -101,6 +102,7 @@ def test_install_is_idempotent(installed_patches) -> None:
     assert patch_pkg.installed()
 
 
+@pytest.mark.requires_runtime
 def test_performance_category_imports_with_vllm(installed_patches) -> None:
     """performance holds the Phase-4 FLA patches and needs vLLM to import.
 
@@ -113,6 +115,7 @@ def test_performance_category_imports_with_vllm(installed_patches) -> None:
     importlib.import_module("vllm_sail.patch.performance")
 
 
+@pytest.mark.requires_runtime
 def test_patches_actually_land(installed_patches) -> None:
     """Assert each Phase-2 patch is present on its real upstream target."""
     from vllm.model_executor.custom_op import CustomOp
@@ -131,6 +134,7 @@ def test_patches_actually_land(installed_patches) -> None:
     assert getattr(CustomOp.dispatch_forward, PATCH_MARKER, None) is not None
 
 
+@pytest.mark.requires_runtime
 def test_every_patch_has_metadata(installed_patches) -> None:
     for record in installed_patches:
         assert record.reason.strip(), record.target
@@ -140,6 +144,7 @@ def test_every_patch_has_metadata(installed_patches) -> None:
         assert record.remove_when.strip().lower() != "todo", record.target
 
 
+@pytest.mark.requires_runtime
 def test_is_ppu_false_for_non_ppu_platforms(installed_patches) -> None:
     """The additive predicate must be safe for every platform, not just PPU."""
     from vllm.platforms.interface import Platform
@@ -150,6 +155,7 @@ def test_is_ppu_false_for_non_ppu_platforms(installed_patches) -> None:
     assert Platform.is_ppu(_NotPPU()) is False
 
 
+@pytest.mark.requires_runtime
 def test_is_ppu_true_for_the_ppu_platform(installed_patches) -> None:
     """PPUPlatform's identity predicates -- the core of decision D1.
 

@@ -293,6 +293,7 @@ def test_ignored_kv_scale_preserves_string_name_for_layer_validation(install_loa
 @pytest.mark.parametrize(
     "layout", ["tensor", "row-vector", "row-matrix", "block", "e8m0"]
 )
+@pytest.mark.requires_runtime
 def test_real_fp8_helper_pairs_split_calls_and_preserves_fused_padding(
     install_loader, reverse, layout
 ):

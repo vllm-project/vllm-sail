@@ -93,7 +93,7 @@ Post one of these exact commands as a new PR comment:
 
 | Command | Behavior |
 | --- | --- |
-| `/ci run` | Build wheels, run pin unit tests and model smoke tests for the current head. |
+| `/ci run` | Run the bare CPU UT matrix, build wheels, and run the remaining runtime/source UT and model smoke tests for the current head. |
 | `/ci run --allow-stale` | Run even when the PR is behind its base branch; no automatic merge is performed. |
 | `/ci retry` | Retry failed jobs in the latest run for the current head, falling back to a full rerun if GitHub rejects the partial rerun. |
 | `/ci cancel` | Request cancellation of active PPU CI runs for this PR, including older heads. |
@@ -113,8 +113,13 @@ code runs with read-only permissions, no inherited secrets, disabled cache
 access and an explicitly verified checkout SHA. Authorization and reporting
 run separately on GitHub-hosted runners using default-branch code.
 
-CPU checks still run automatically. The formal `PPU CI` check for PRs is requested
-through the commands above; opening a PR or pushing a commit does not start it.
+The Python 3.10–3.13 CPU matrix and PPU pin-UT lane run through the same
+authorized `/ci run`; opening or updating a PR does not start them. CPU UT
+selects every test that needs no torch, vLLM, upstream checkout or device.
+Source-marked, runtime-dependent and device-marked UT run only in pin-UT with
+the exact upstream source prepared. The two selections do not overlap and
+jointly cover the UT directory. CPU tests still run when non-impacting changes
+skip the PPU stages, and also support main/master pushes and manual dispatch.
 Manually dispatch PPU ops tests (`ppu-ops-tests.yaml`) in GitHub Actions for
 operator tests. Dispatch PPU debug (`ppu-debug.yaml`) to rerun pin UT and/or
 model tests on existing builds.
@@ -143,9 +148,10 @@ under that resource trust model.
 
 
 Repository administrators must require the `PPU CI` commit status from GitHub
-Actions instead of the individual PPU build, pin UT, smoke and gate job checks.
-Keep the CPU and vLLM source checks required. Coordinate this ruleset change with
-the switch to on-demand PPU CI, after verifying the commands on the default branch.
+Actions instead of the individual source, PPU build, pin UT, smoke and gate
+job checks. The unified status requires every source and PPU stage
+to succeed. Coordinate this ruleset change with the switch to on-demand CI,
+after verifying the commands on the default branch.
 
 ## Reporting issues
 

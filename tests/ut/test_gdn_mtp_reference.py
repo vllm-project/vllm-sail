@@ -5,6 +5,8 @@ import math
 
 import pytest
 
+pytestmark = pytest.mark.requires_runtime
+
 torch = pytest.importorskip("torch")
 
 from tests.e2e.gdn._gdn_mtp_reference import gdn_mtp_reference  # noqa: E402

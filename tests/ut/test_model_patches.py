@@ -151,6 +151,7 @@ def test_subpackage_wiring_is_present() -> None:
     )
 
 
+@pytest.mark.requires_runtime
 def test_full_package_chain_on_clean_upstream() -> None:
     """The full enhancement chain installs on a clean upstream vLLM.
 
@@ -253,6 +254,7 @@ _EXPECTED_TARGETS = {
 }
 
 
+@pytest.mark.requires_runtime
 def test_all_model_patches_land(installed_model_patches) -> None:
     from vllm_sail.patch.utils import PATCH_MARKER
 
@@ -277,6 +279,7 @@ def test_all_model_patches_land(installed_model_patches) -> None:
         assert marker_source is not None or record.was_missing, record.target
 
 
+@pytest.mark.requires_runtime
 def test_kimi_k3_quantized_up_proj_forces_tier_one(
     installed_model_patches,
 ) -> None:
@@ -299,6 +302,7 @@ def test_kimi_k3_quantized_up_proj_forces_tier_one(
     )
 
 
+@pytest.mark.requires_runtime
 def test_deepseek_v4_selector_uses_ppu_flashmla(installed_model_patches) -> None:
     from types import SimpleNamespace
     from unittest import mock
@@ -352,6 +356,7 @@ def test_deepseek_v4_selector_uses_ppu_flashmla(installed_model_patches) -> None
         )
 
 
+@pytest.mark.requires_runtime
 def test_ppu_flashmla_inherits_upstream_attention_flow(
     installed_model_patches,
 ) -> None:
@@ -378,6 +383,7 @@ def test_ppu_flashmla_inherits_upstream_attention_flow(
     )
 
 
+@pytest.mark.requires_runtime
 def test_deepseek_v4_mapper_remains_unpatched(installed_model_patches) -> None:
     """Installing the PPU model selector must not alter CUDA weight mapping."""
     from vllm.models.deepseek_v4.nvidia import model as nvidia_model
@@ -387,6 +393,7 @@ def test_deepseek_v4_mapper_remains_unpatched(installed_model_patches) -> None:
     assert not hasattr(nvidia_model._make_deepseek_v4_weights_mapper, PATCH_MARKER)
 
 
+@pytest.mark.requires_runtime
 def test_marlin_gate_defaults_off_on_ppu(installed_model_patches) -> None:
     """Decision D2(c): MoE Marlin stays disabled on PPU unless opted in.
 
@@ -404,6 +411,7 @@ def test_marlin_gate_defaults_off_on_ppu(installed_model_patches) -> None:
         assert marlin_utils.check_moe_marlin_supports_config(object()) is False
 
 
+@pytest.mark.requires_runtime
 def test_reapplication_raises(installed_model_patches) -> None:
     """The double-patch guard must still fire for these targets."""
     from vllm_sail.patch.utils import patch

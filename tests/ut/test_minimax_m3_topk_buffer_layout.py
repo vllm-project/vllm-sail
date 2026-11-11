@@ -29,6 +29,8 @@ pytest.importorskip("torch", reason="requires torch")
 pytest.importorskip("vllm", reason="requires vLLM")
 import torch
 
+pytestmark = pytest.mark.requires_runtime
+
 MAX_NUM_BATCHED_TOKENS = 130  # not a multiple of 4: exercises the padding
 NUM_INDEX_HEADS = 4
 TOPK_BLOCKS = 16

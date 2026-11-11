@@ -29,6 +29,8 @@ Backend = Enum(
             "XPU",
             "PPU_DEEPGEMM_MXFP4",
             "BATCHED_PPU_DEEPGEMM_MXFP4",
+            "PPU_DEEPGEMM_MXFP4_FP8",
+            "BATCHED_PPU_DEEPGEMM_MXFP4_FP8",
             "PPU_DEEPGEMM_MXFP4_BF16",
             "BATCHED_PPU_DEEPGEMM_MXFP4_BF16",
             "PPU_DEEPGEMM_MXFP4_BF16_MMA",
@@ -161,6 +163,7 @@ def test_plugin_does_not_copy_the_selector_body() -> None:
     assert "select_mxfp4_moe_backend" not in defined
 
 
+@pytest.mark.upstream_source
 def test_automatic_bf16_candidate_uses_own_activation_key(real_oracle_source):
     (backend, _), calls, warnings, format = selection(
         [Backend.MARLIN],
@@ -173,6 +176,7 @@ def test_automatic_bf16_candidate_uses_own_activation_key(real_oracle_source):
 
 
 @pytest.mark.parametrize("explicit", [False, True])
+@pytest.mark.upstream_source
 def test_successful_bf16_fallback_warns(real_oracle_source, explicit):
     (backend, _), _, warnings, _ = selection(
         [Backend.MARLIN], explicit=explicit, upstream=real_oracle_source
@@ -182,6 +186,7 @@ def test_successful_bf16_fallback_warns(real_oracle_source, explicit):
 
 
 @pytest.mark.parametrize("explicit", [False, True])
+@pytest.mark.upstream_source
 def test_emulation_uses_checkpoint_activation_without_bf16_warning(
     real_oracle_source, explicit
 ):
@@ -194,6 +199,7 @@ def test_emulation_uses_checkpoint_activation_without_bf16_warning(
 
 
 @pytest.mark.parametrize("lora", [False, True])
+@pytest.mark.upstream_source
 def test_requested_kernel_helper_retains_the_ppu_candidate(real_oracle_source, lora):
     (backend, _), calls, warnings, format = selection(
         [Backend.PPU_DEEPGEMM_MXFP4_BF16],
@@ -216,6 +222,7 @@ def test_requested_kernel_helper_retains_the_ppu_candidate(real_oracle_source, l
     ],
 )
 @pytest.mark.parametrize("batched", [False, True])
+@pytest.mark.upstream_source
 def test_explicit_ppu_variant_resolves_its_activation_format(
     real_oracle_source, name, batched
 ):
@@ -240,6 +247,7 @@ def test_explicit_ppu_variant_resolves_its_activation_format(
 
 
 @pytest.mark.parametrize("explicit", [False, True])
+@pytest.mark.upstream_source
 def test_failed_candidate_does_not_warn_before_successful_fallback(
     real_oracle_source, explicit
 ):
@@ -257,6 +265,7 @@ def test_failed_candidate_does_not_warn_before_successful_fallback(
     assert warnings == [Backend.TRITON]
 
 
+@pytest.mark.upstream_source
 def test_w4a4_candidate_rejection_warns_for_bf16_fallback(real_oracle_source):
     (backend, _), calls, warnings, format = selection(
         [Backend.PPU_DEEPGEMM_MXFP4, Backend.MARLIN],

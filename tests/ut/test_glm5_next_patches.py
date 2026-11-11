@@ -20,6 +20,8 @@ import types
 
 import pytest
 
+pytestmark = pytest.mark.requires_runtime
+
 pytest.importorskip("torch", reason="requires torch")
 pytest.importorskip("vllm", reason="requires vLLM")
 

@@ -98,6 +98,7 @@ def _set_platform(monkeypatch: pytest.MonkeyPatch, oracles, *, ppu: bool) -> Non
         ),
     ],
 )
+@pytest.mark.requires_runtime
 def test_enum_members_cover_all_lookup_paths(oracles, oracle_name, members) -> None:
     plugin = getattr(oracles, oracle_name)
     enum_cls = getattr(
@@ -118,6 +119,7 @@ def test_enum_members_cover_all_lookup_paths(oracles, oracle_name, members) -> N
         assert member in list(enum_cls)
 
 
+@pytest.mark.requires_runtime
 def test_extend_enum_stays_idempotent_after_helper_reimport(oracles) -> None:
     member = oracles.fp8.Fp8MoeBackend.PPU_DEEPGEMM
     extend_module = importlib.reload(
@@ -130,6 +132,7 @@ def test_extend_enum_stays_idempotent_after_helper_reimport(oracles) -> None:
 
 
 @pytest.mark.parametrize("oracle_name", ["unquantized", "fp8", "int8", "mxfp4"])
+@pytest.mark.requires_runtime
 def test_backend_to_kernel_cls_delegates_upstream(
     monkeypatch: pytest.MonkeyPatch, oracles, oracle_name
 ) -> None:
@@ -191,6 +194,7 @@ def test_backend_to_kernel_cls_delegates_upstream(
         ),
     ],
 )
+@pytest.mark.requires_runtime
 def test_backend_to_kernel_cls_returns_ppu_expert(
     oracles, oracle_name, member_name, module_name, class_name
 ) -> None:
@@ -214,6 +218,7 @@ def test_backend_to_kernel_cls_returns_ppu_expert(
 
 
 @pytest.mark.parametrize("oracle_name", ["unquantized", "int8"])
+@pytest.mark.requires_runtime
 def test_backend_to_kernel_cls_returns_acext_expert(oracles, oracle_name) -> None:
     from vllm_sail.model_executor.layers.fused_moe.experts.acext import AcextExperts
 
@@ -227,6 +232,7 @@ def test_backend_to_kernel_cls_returns_acext_expert(oracles, oracle_name) -> Non
     ) == [AcextExperts]
 
 
+@pytest.mark.requires_runtime
 def test_map_functions_add_ppu_names_and_delegate_upstream_names(oracles) -> None:
     unquantized, fp8, int8, mxfp4 = (
         oracles.unquantized,
@@ -256,6 +262,7 @@ def test_map_functions_add_ppu_names_and_delegate_upstream_names(oracles) -> Non
     )
 
 
+@pytest.mark.requires_runtime
 def test_priority_lists_include_ppu_members(
     monkeypatch: pytest.MonkeyPatch, oracles
 ) -> None:
@@ -286,6 +293,7 @@ def test_priority_lists_include_ppu_members(
     )
 
 
+@pytest.mark.requires_runtime
 def test_priority_lists_are_unchanged_off_ppu(
     monkeypatch: pytest.MonkeyPatch, oracles
 ) -> None:
@@ -309,6 +317,7 @@ def test_priority_lists_are_unchanged_off_ppu(
     )
 
 
+@pytest.mark.requires_runtime
 def test_every_oracle_patch_records_original_and_rejects_reapplication(
     oracles,
 ) -> None:
@@ -360,6 +369,7 @@ def _select_config(oracles, *, backend: str, batched: bool):
     )
 
 
+@pytest.mark.requires_runtime
 def test_select_unquantized_batched_ppu_deep_gemm(
     monkeypatch: pytest.MonkeyPatch, oracles
 ) -> None:
@@ -372,6 +382,7 @@ def test_select_unquantized_batched_ppu_deep_gemm(
     assert kernel_cls is _FakeExperts
 
 
+@pytest.mark.requires_runtime
 def test_select_unquantized_batched_ppu_deep_gemm_raises_when_unsupported(
     monkeypatch: pytest.MonkeyPatch, oracles
 ) -> None:
@@ -390,6 +401,7 @@ def test_select_unquantized_batched_ppu_deep_gemm_raises_when_unsupported(
 
 
 @pytest.mark.parametrize("batched", [False, True])
+@pytest.mark.requires_runtime
 def test_select_unquantized_delegates_for_non_ppu_backends(
     monkeypatch: pytest.MonkeyPatch, oracles, batched
 ) -> None:
@@ -413,6 +425,7 @@ def test_select_unquantized_delegates_for_non_ppu_backends(
         (True, "BATCHED_PPU_DEEPGEMM"),
     ],
 )
+@pytest.mark.requires_runtime
 def test_select_fp8_explicit_ppu_deep_gemm(
     monkeypatch: pytest.MonkeyPatch, oracles, batched, expected_member
 ) -> None:
@@ -426,6 +439,7 @@ def test_select_fp8_explicit_ppu_deep_gemm(
 
 
 @pytest.mark.parametrize("prefix", ["VLLM_SAIL", "VLLM_PPU"])
+@pytest.mark.requires_runtime
 def test_select_fp8_env_deepgemm_selects_ppu_only_on_ppu(
     monkeypatch: pytest.MonkeyPatch, oracles, prefix: str
 ) -> None:
@@ -456,6 +470,7 @@ def test_select_fp8_env_deepgemm_selects_ppu_only_on_ppu(
 
 
 @pytest.mark.parametrize("prefix", ["VLLM_SAIL", "VLLM_PPU"])
+@pytest.mark.requires_runtime
 def test_select_fp8_env_acext_delegates_upstream(
     monkeypatch: pytest.MonkeyPatch, oracles, prefix: str
 ) -> None:
@@ -477,6 +492,7 @@ def test_select_fp8_env_acext_delegates_upstream(
     )
 
 
+@pytest.mark.requires_runtime
 def test_select_int8_batched_ppu_deep_gemm(
     monkeypatch: pytest.MonkeyPatch, oracles
 ) -> None:
@@ -493,6 +509,7 @@ def test_select_int8_batched_ppu_deep_gemm(
     "backend_name",
     ["PPU_DEEPGEMM", "BATCHED_PPU_DEEPGEMM", "ACEXT"],
 )
+@pytest.mark.requires_runtime
 def test_convert_int8_ppu_weights_preserves_canonical_layout(
     oracles, backend_name
 ) -> None:
@@ -513,6 +530,7 @@ def test_convert_int8_ppu_weights_preserves_canonical_layout(
     assert converted[1] is w2
 
 
+@pytest.mark.requires_runtime
 def test_convert_int8_upstream_backends_delegate_unchanged(
     monkeypatch: pytest.MonkeyPatch, oracles
 ) -> None:
@@ -566,6 +584,7 @@ def test_convert_int8_upstream_backends_delegate_unchanged(
         ("ppu_acext", "ACEXT MoE backend is disabled"),
     ],
 )
+@pytest.mark.requires_runtime
 def test_select_int8_batched_rejects_standard_only_backends(
     monkeypatch: pytest.MonkeyPatch, oracles, backend, match
 ) -> None:
@@ -577,6 +596,7 @@ def test_select_int8_batched_rejects_standard_only_backends(
 
 
 @pytest.mark.parametrize("batched", [False, True])
+@pytest.mark.requires_runtime
 def test_select_int8_auto_delegates_upstream(
     monkeypatch: pytest.MonkeyPatch, oracles, batched
 ) -> None:
@@ -595,6 +615,7 @@ def test_select_int8_auto_delegates_upstream(
     )
 
 
+@pytest.mark.requires_runtime
 def test_select_mxfp4_batched_ppu_deep_gemm_uses_batched_member(
     monkeypatch: pytest.MonkeyPatch, oracles
 ) -> None:
@@ -635,6 +656,7 @@ def test_select_mxfp4_batched_ppu_deep_gemm_uses_batched_member(
     )
 
 
+@pytest.mark.requires_runtime
 def test_select_mxfp4_non_batched_ppu_deep_gemm_uses_standard_member(
     monkeypatch: pytest.MonkeyPatch, oracles
 ) -> None:
@@ -672,6 +694,7 @@ def test_select_mxfp4_non_batched_ppu_deep_gemm_uses_standard_member(
     assert captured["activation_format"] is plugin.mk.FusedMoEActivationFormat.Standard
 
 
+@pytest.mark.requires_runtime
 def test_select_mxfp4_moe_backend_is_upstreams(oracles) -> None:
     """The plugin re-exports upstream's selector instead of copying its body."""
     plugin = oracles.mxfp4
@@ -731,6 +754,7 @@ def moe_config_factory():
     return _make
 
 
+@pytest.mark.requires_runtime
 def test_acext_experts_is_supported_config_matrix(
     monkeypatch: pytest.MonkeyPatch, oracles, moe_config_factory
 ) -> None:
@@ -783,6 +807,7 @@ def test_acext_experts_is_supported_config_matrix(
         ("batched_deep_gemm_moe", "PPUBatchedDeepGemmExpertsMXFP4"),
     ],
 )
+@pytest.mark.requires_runtime
 def test_deep_gemm_experts_support_gates(
     monkeypatch: pytest.MonkeyPatch, oracles, module_name, class_name
 ) -> None:
@@ -865,6 +890,7 @@ def test_deep_gemm_experts_support_gates(
         ("batched_deep_gemm_moe", "PPUBatchedDeepGemmExpertsMXFP4", "BatchedExperts"),
     ],
 )
+@pytest.mark.requires_runtime
 def test_deep_gemm_experts_is_supported_config_end_to_end(
     monkeypatch: pytest.MonkeyPatch,
     oracles,

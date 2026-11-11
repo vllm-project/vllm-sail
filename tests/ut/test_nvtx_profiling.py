@@ -544,9 +544,7 @@ def test_v2_sample_wraps_sampler_range(installed, recording_nvtx) -> None:
         hidden_states,
         "batch",
     )
-    assert recording_nvtx.pushes == [
-        "[FW_NATIVE] op:sampler,hidden_states:(7, 16)"
-    ]
+    assert recording_nvtx.pushes == ["[FW_NATIVE] op:sampler,hidden_states:(7, 16)"]
     assert len(recording_nvtx.pops) == 1
 
 
@@ -710,13 +708,26 @@ def test_annotate_fallback_is_identity(bare_nvtx_helpers) -> None:
     assert documented.__wrapped__ is not None
 
 
-def test_range_push_swallows_cpu_torch_errors(bare_nvtx_helpers) -> None:
-    # torch is installed in the test venv but has no CUDA NVTX support, so the
-    # real torch.cuda.nvtx.range_push raises; a profiler must not propagate it.
-    if not bare_nvtx_helpers.has_torch_nvtx:
-        pytest.skip("torch.cuda.nvtx not importable here")
-    bare_nvtx_helpers.range_push("probe")
-    bare_nvtx_helpers.range_pop()
+def test_range_helpers_swallow_backend_errors_and_warn_once(
+    bare_nvtx_helpers, monkeypatch
+) -> None:
+    calls = []
+    warnings = []
+
+    def unavailable(*args):
+        calls.append(args)
+        raise RuntimeError("NVTX functions not installed")
+
+    monkeypatch.setattr(bare_nvtx_helpers, "_torch_range_push", unavailable)
+    monkeypatch.setattr(bare_nvtx_helpers, "_torch_range_pop", unavailable)
+    monkeypatch.setattr(
+        bare_nvtx_helpers.logger, "warning", lambda *args: warnings.append(args)
+    )
+    for _ in range(2):
+        bare_nvtx_helpers.range_push("probe")
+        bare_nvtx_helpers.range_pop()
+    assert calls == [("probe",), (), ("probe",), ()]
+    assert len(warnings) == 1
 
 
 def test_sche_mark_format_with_nvtx(

@@ -158,11 +158,22 @@ def test_executor_uses_only_dispatch_with_a_stable_request_identity():
         "cancel-in-progress": False,
         "queue": "max",
     }
-    assert set(config["jobs"]) == {"validate", "ppu", "report"}
+    assert set(config["jobs"]) == {"validate", "cpu", "ppu", "report"}
 
 
 def test_executor_separates_read_only_pr_execution_and_always_reporting():
     jobs = workflow("ppu-pr-ci.yaml")["jobs"]
+    cpu = jobs["cpu"]
+    assert cpu["needs"] == "validate"
+    assert cpu["uses"] == "./.github/workflows/ut.yaml"
+    assert cpu["permissions"] == {"contents": "read"}
+    assert cpu["with"] == {
+        "pr_head_sha": "${{ inputs.head_sha }}",
+        "pr_number": "${{ inputs.pr_number }}",
+        "pr_head_ref": "${{ needs.validate.outputs.pr_head_ref }}",
+    }
+    assert "if" not in cpu
+    assert "secrets" not in cpu
     ppu = jobs["ppu"]
     assert ppu["needs"] == "validate"
     assert ppu["uses"] == "./.github/workflows/ppu-build-and-test.yaml"
@@ -188,6 +199,7 @@ def test_executor_separates_read_only_pr_execution_and_always_reporting():
     assert validate["outputs"] == {
         key: "${{ steps." + step["id"] + ".outputs." + key + " }}"
         for key in (
+            "pr_head_ref",
             "skip_ppu",
             "existing_build_run_id",
             "native_reuse_run_id",
@@ -196,7 +208,7 @@ def test_executor_separates_read_only_pr_execution_and_always_reporting():
     }
     report = jobs["report"]
     assert report["if"] == "always()"
-    assert report["needs"] == ["validate", "ppu"]
+    assert report["needs"] == ["validate", "cpu", "ppu"]
     assert all("always()" in step["if"] for step in report["steps"])
     step = next(step for step in report["steps"] if "run" in step)
     assert step["env"]["NEEDS"] == "${{ toJSON(needs) }}"
@@ -715,6 +727,8 @@ def test_workflow_filenames_distinguish_reusable_calls_from_entrypoints():
         triggers = workflow(path.name)[True]
         if path.name == "ppu-build-and-test.yaml":
             assert set(triggers) == {"workflow_call", "pull_request"}
+        elif path.name == "ut.yaml":
+            assert set(triggers) == {"workflow_call", "push", "workflow_dispatch"}
         elif path.name.startswith("_"):
             assert set(triggers) == {"workflow_call"}, path.name
         else:
@@ -1016,13 +1030,50 @@ def test_retry_reuses_build_artifacts_but_keeps_pin_diagnostics_per_attempt():
     )
 
 
-def test_cpu_checks_still_run_automatically_with_read_only_checkout():
+def test_bare_cpu_matrix_is_on_demand_and_uses_the_exact_pr_head():
     config = workflow("ut.yaml")
-    assert set(config[True]) == {"pull_request", "push", "workflow_dispatch"}
+    assert config["name"] == "CPU unit tests"
+    assert set(config[True]) == {"workflow_call", "push", "workflow_dispatch"}
+    assert config[True]["push"]["branches"] == ["main", "master"]
+    assert set(config[True]["workflow_call"]["inputs"]) == {
+        "pr_head_sha",
+        "pr_number",
+        "pr_head_ref",
+    }
     assert config["permissions"] == {"contents": "read"}
-    for job in config["jobs"].values():
-        for checkout in checkouts(job):
-            assert checkout["with"]["persist-credentials"] is False
+    assert config["concurrency"] == {
+        "group": "ut-${{ inputs.pr_head_sha && github.run_id || github.ref }}",
+        "cancel-in-progress": True,
+    }
+    assert set(config["jobs"]) == {"cpu-unit-tests"}
+    cpu = config["jobs"]["cpu-unit-tests"]
+    assert cpu["runs-on"] == "ubuntu-latest"
+    assert cpu["strategy"]["matrix"]["python-version"] == [
+        "3.10",
+        "3.11",
+        "3.12",
+        "3.13",
+    ]
+    assert "secrets" not in cpu
+    expected_ref = "${{ inputs.pr_head_sha || github.sha }}"
+    assert checkouts(cpu)[0]["with"] == {
+        "ref": expected_ref,
+        "persist-credentials": False,
+    }
+    for step in cpu["steps"]:
+        assert "cache" not in step.get("with", {})
+        if "pip install" in step.get("run", ""):
+            assert step["run"] == (
+                "python -m pip install --no-cache-dir -r requirements/dev.txt"
+            )
+    coverage = next(
+        step for step in cpu["steps"] if step.get("uses") == "codecov/codecov-action@v5"
+    )
+    assert coverage["with"]["override_commit"] == expected_ref
+    assert coverage["with"]["override_pr"] == "${{ inputs.pr_number }}"
+    assert coverage["with"]["override_branch"] == (
+        "${{ inputs.pr_head_ref || github.ref_name }}"
+    )
 
 
 def test_ops_partial_retry_downloads_diagnostics_from_successful_previous_attempt():

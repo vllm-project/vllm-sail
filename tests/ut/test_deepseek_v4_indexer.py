@@ -235,6 +235,7 @@ def test_rebinding_is_idempotent_and_preserves_other_overrides(installed):
     )
 
 
+@pytest.mark.upstream_source
 def test_consumer_inventory_and_signatures_match_vllm_source(installed):
     """Catch new by-value imports and upstream signature changes independently."""
     _, _, _, patched = installed
@@ -306,6 +307,7 @@ def test_consumer_inventory_and_signatures_match_vllm_source(installed):
 
 @pytest.mark.parametrize("buffered", [False, True])
 @pytest.mark.parametrize("tokens", [0, 3])
+@pytest.mark.requires_runtime
 def test_query_wrapper_returns_int8_and_preserves_output_buffers(
     monkeypatch, buffered, tokens
 ):

@@ -49,7 +49,6 @@ class TestWarmupConstant:
     """改动 2: WARMUP_ITERS should be 50."""
 
     def test_warmup_value(self):
-        pytest.importorskip("torch")
         from tests.e2e.perf._perf_harness import WARMUP_ITERS
 
         assert WARMUP_ITERS == 50
@@ -395,7 +394,6 @@ class TestSummarizeCV:
     """summarize() returns a 3-tuple including cv."""
 
     def test_three_tuple(self):
-        pytest.importorskip("torch")
         from tests.e2e.perf._perf_harness import summarize
 
         median, p90, cv = summarize([10.0, 10.0, 10.0, 10.0, 10.0])
@@ -404,7 +402,6 @@ class TestSummarizeCV:
         assert cv == pytest.approx(0.0)
 
     def test_cv_nonzero(self):
-        pytest.importorskip("torch")
         from tests.e2e.perf._perf_harness import summarize
 
         _, _, cv = summarize([100.0, 200.0])

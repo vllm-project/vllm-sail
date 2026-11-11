@@ -1,22 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Functional tests for the NVTX profiling branch of ``fused_experts_op``.
-
-When NVTX profiling is enabled (``VLLM_PPU_NVTX_PROFILE`` /
-``VLLM_SAIL_NVTX_PROFILE`` / ``SAIL_NVTX_PROFILE``), ``fused_experts_op``
-calls ``fused_experts_impl`` through its own positional-argument list.
-A stale extra argument in that branch (leftover from the removed
-``inplace`` parameter) previously crashed every MoE forward with:
-
-    TypeError: fused_experts_impl() takes from 5 to 24 positional
-    arguments but 25 were given
-
-These tests run ``torch.ops.vllm.fused_experts`` with the NVTX branch
-active and check that it executes and matches the default branch.
-
-Run:
-  pytest --import-mode=importlib --noconftest tests/ppu/test_fused_moe_nvtx_profile.py -v -s
-"""
 
 import os
 import subprocess
@@ -24,29 +7,17 @@ import sys
 
 import pytest
 
-# This test exercises real vLLM/torch code paths, so it needs both installed.
-# tests/ut must remain runnable on a bare CPU runner with neither present
-# (see tests/conftest.py), hence the module-level skip rather than an import
-# error at collection time.
-pytest.importorskip("torch", reason="requires torch")
-pytest.importorskip("vllm", reason="requires vLLM")
-import torch
-import vllm.model_executor.layers.fused_moe.fused_moe as fused_moe_module
-from vllm.model_executor.layers.fused_moe.fused_moe import fused_experts
+pytestmark = [pytest.mark.requires_runtime, pytest.mark.ppu]
 
-pytestmark = [
+torch = pytest.importorskip("torch", reason="requires torch")
+pytest.importorskip("vllm", reason="requires vLLM")
+
+pytestmark.append(
     pytest.mark.skipif(
         not torch.cuda.is_available(),
         reason="fused_moe Triton kernels require CUDA",
-    ),
-    pytest.mark.skipif(
-        not hasattr(fused_moe_module, "NVTX_PROFILE"),
-        reason=(
-            "fork-style in-module NVTX attributes absent; with the plugin, "
-            "NVTX instrumentation lives in vllm_sail.profiling patches"
-        ),
-    ),
-]
+    )
+)
 
 NUM_EXPERTS = 8
 HIDDEN = 64
@@ -55,7 +26,6 @@ TOP_K = 2
 
 
 def _make_inputs(M: int):
-    """Build a small unquantized MoE problem on CUDA."""
     torch.manual_seed(42)
     hidden_states = torch.randn(M, HIDDEN, dtype=torch.bfloat16, device="cuda")
     w1 = (
@@ -86,51 +56,55 @@ def _make_inputs(M: int):
 
 
 @pytest.mark.parametrize("M", [1, 16, 128])
-def test_nvtx_branch_runs_and_matches_default(M: int, monkeypatch):
-    """The NVTX branch must call fused_experts_impl with a valid
-    argument list and produce the same output as the default branch."""
-    inputs = _make_inputs(M)
+def test_sail_modular_moe_nvtx_matches_fused_experts(M: int, monkeypatch):
+    from vllm.model_executor.layers.fused_moe.fused_moe import fused_experts
 
-    monkeypatch.setattr(fused_moe_module, "NVTX_PROFILE", False)
-    ref_out = fused_experts(*inputs)
+    from vllm_sail.profiling import modular_moe, moe, nvtx
 
-    nvtx_pushed = []
-    monkeypatch.setattr(
-        fused_moe_module,
-        "th_nvtx_range_push",
-        lambda label: nvtx_pushed.append(label),
+    assert nvtx.has_nvtx
+    hidden_states, w1, w2, topk_weights, topk_ids = _make_inputs(M)
+    ref_out = fused_experts(hidden_states, w1, w2, topk_weights, topk_ids)
+    kernel = object()
+    events = []
+
+    def delegate(self, hidden_states, w1, w2, topk_ids, topk_weights):
+        assert self is kernel
+        events.append(("dispatch", None))
+        return fused_experts(hidden_states, w1, w2, topk_weights, topk_ids)
+
+    monkeypatch.setattr(modular_moe, "_original", delegate)
+    monkeypatch.setattr(moe, "range_push", lambda label: events.append(("push", label)))
+    monkeypatch.setattr(moe, "range_pop", lambda: events.append(("pop", None)))
+    mode = "D" if torch.cuda.is_current_stream_capturing() else "P"
+    nvtx_out = modular_moe.apply(kernel, hidden_states, w1, w2, topk_ids, topk_weights)
+
+    label = (
+        f"{mode}_MoE,M_{M}_E_{NUM_EXPERTS}_H_{HIDDEN}"
+        f"_In_{2 * INTERMEDIATE}_topk_{TOP_K}"
     )
-    monkeypatch.setattr(fused_moe_module, "th_nvtx_range_pop", lambda: None)
-    monkeypatch.setattr(fused_moe_module, "NVTX_PROFILE", True)
-    nvtx_out = fused_experts(*inputs)
-
-    # The NVTX branch of fused_experts_op must actually have run.
-    assert any(label.startswith(("P_MoE", "D_MoE")) for label in nvtx_pushed), (
-        f"NVTX branch not executed, labels={nvtx_pushed}"
-    )
-
+    assert events == [("push", label), ("dispatch", None), ("pop", None)]
+    assert nvtx_out.shape == hidden_states.shape
     torch.testing.assert_close(nvtx_out, ref_out)
 
 
 _SUBPROC_SCRIPT = """
+import os
 import sys
 
-# `python -c` prepends the current working directory ('' entry) to
-# sys.path; when pytest is invoked from the repo root the source tree
-# would shadow the installed vllm (and lacks compiled vllm._C). Drop
-# the cwd entries so the installed package is exercised.
-sys.path[:] = [p for p in sys.path if p not in ("", ".")]
+# Drop cwd entries so the installed packages are not shadowed by the source tree.
+sys.path[:] = [p for p in sys.path if p not in ("", ".", os.getcwd())]
 
 import torch
-
-import vllm.model_executor.layers.fused_moe.fused_moe as fm
-
-if not fm.NVTX_PROFILE:
-    # torch.cuda.nvtx import failed; nothing to validate.
-    print("NVTX_DISABLED")
-    raise SystemExit(0)
-
 from vllm.model_executor.layers.fused_moe.fused_moe import fused_experts
+import vllm_sail.profiling as profiling
+
+profiling.install()
+assert profiling.is_enabled()
+assert profiling._installed
+
+from vllm_sail.profiling import modular_moe, moe
+
+assert modular_moe._modular.FusedMoEKernelModularImpl.apply == modular_moe.apply
 
 torch.manual_seed(42)
 hs = torch.randn(16, 64, dtype=torch.bfloat16, device="cuda")
@@ -138,17 +112,45 @@ w1 = torch.randn(8, 128, 64, dtype=torch.bfloat16, device="cuda") * 0.1
 w2 = torch.randn(8, 64, 64, dtype=torch.bfloat16, device="cuda") * 0.1
 ids = torch.randint(0, 8, (16, 2), dtype=torch.int32, device="cuda")
 w = torch.softmax(torch.randn(16, 2, device="cuda"), dim=-1)
-out = fused_experts(hs, w1, w2, w, ids)
+ref_out = fused_experts(hs, w1, w2, w, ids)
+kernel = object()
+events = []
+
+
+def delegate(self, hidden_states, w1, w2, topk_ids, topk_weights):
+    assert self is kernel
+    events.append(("dispatch", None))
+    return fused_experts(hidden_states, w1, w2, topk_weights, topk_ids)
+
+
+modular_moe._original = delegate
+moe.range_push = lambda label: events.append(("push", label))
+moe.range_pop = lambda: events.append(("pop", None))
+mode = "D" if torch.cuda.is_current_stream_capturing() else "P"
+out = modular_moe._modular.FusedMoEKernelModularImpl.apply(
+    kernel, hs, w1, w2, ids, w
+)
+assert events == [
+    ("push", f"{mode}_MoE,M_16_E_8_H_64_In_128_topk_2"),
+    ("dispatch", None),
+    ("pop", None),
+]
 assert out.shape == (16, 64)
+torch.testing.assert_close(out, ref_out)
 print("NVTX_OK")
 """
 
 
-def test_nvtx_enabled_via_env_end_to_end():
-    """Production enablement path: env var set at import time must not
-    break torch.ops.vllm.fused_experts (regression: stale positional
-    arg in the NVTX branch raised TypeError)."""
-    env = dict(os.environ, VLLM_PPU_NVTX_PROFILE="1")
+@pytest.mark.parametrize("env_var", ["VLLM_SAIL_NVTX_PROFILE", "VLLM_PPU_NVTX_PROFILE"])
+def test_nvtx_enabled_via_env_end_to_end(env_var):
+    env = dict(os.environ)
+    for name in (
+        "VLLM_SAIL_NVTX_PROFILE",
+        "VLLM_PPU_NVTX_PROFILE",
+        "SAIL_NVTX_PROFILE",
+    ):
+        env.pop(name, None)
+    env[env_var] = "1"
     proc = subprocess.run(
         [sys.executable, "-c", _SUBPROC_SCRIPT],
         env=env,
@@ -156,7 +158,5 @@ def test_nvtx_enabled_via_env_end_to_end():
         text=True,
         timeout=600,
     )
-    if "NVTX_DISABLED" in proc.stdout:
-        pytest.skip("torch.cuda.nvtx not importable in this environment")
+    assert proc.returncode == 0, f"stdout={proc.stdout}\nstderr={proc.stderr}"
     assert "NVTX_OK" in proc.stdout, f"stdout={proc.stdout}\nstderr={proc.stderr}"
-    assert proc.returncode == 0, proc.stderr

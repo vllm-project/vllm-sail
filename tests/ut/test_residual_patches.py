@@ -313,7 +313,6 @@ def test_compilation_registers_ppu_indexer_splitting_op(
 
 
 def test_kernel_literal_widening(monkeypatch: pytest.MonkeyPatch) -> None:
-    pytest.importorskip("pydantic", reason="the widening mechanism needs pydantic")
     import pydantic
     from pydantic.dataclasses import dataclass
 

@@ -30,6 +30,7 @@ def test_weight_layout_permutation_is_bijective(bits, activation8):
 
 @pytest.mark.parametrize("bits", [4, 8])
 @pytest.mark.parametrize("activation8", [False, True])
+@pytest.mark.requires_runtime
 def test_packed_weights_match_upstream_independent_reference(bits, activation8):
     torch = pytest.importorskip("torch")
     np = pytest.importorskip("numpy")

@@ -716,6 +716,7 @@ def test_ct_moe_redirect_and_int8_swiglu(monkeypatch: pytest.MonkeyPatch) -> Non
     _Platform.ppu = True
 
 
+@pytest.mark.requires_runtime
 def test_ct_kv_cache_params_not_trainable(monkeypatch: pytest.MonkeyPatch) -> None:
     module = _leaf("compressed_tensors_ppu")
     state = _build_ct_stubs(monkeypatch)

@@ -1,8 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Tests for the Phase-4 attention and FLA patch modules.
 
-Everything here needs an importable vLLM; on a bare CPU runner the whole
-module skips. Two vLLM targets are allowed to be unimportable in some test
+Runtime cases load vLLM through a fixture; the environment contract runs on CPU. Two vLLM targets are allowed to be unimportable in some test
 environments (``mla.prefill.flash_attn`` needs a GPU platform to pick an FA
 version; ``qwen_gdn_linear_attn`` needs ``compressed_tensors``). The patch
 modules skip themselves with a warning in that case, and
@@ -19,23 +18,16 @@ from pathlib import Path
 
 import pytest
 
+import vllm_sail.patch as patch_pkg
 from tests.support.upstream import SUPPORTED_RANGE
-
-pytest.importorskip("torch", reason="requires torch")
-pytest.importorskip("vllm", reason="requires vLLM")
-
-import vllm_sail.patch as patch_pkg  # noqa: E402
-from vllm_sail.patch.utils import PATCH_MARKER, PATCH_REGISTRY  # noqa: E402
-
-# Reproduce vLLM's real plugin timing: the backend may already be imported
-# before the general-plugin hook installs the PPU FlashMLA provider patches.
-_PRELOADED_FLASHMLA_BACKEND = importlib.import_module(
-    "vllm.v1.attention.backends.mla.flashmla"
-)
+from vllm_sail.patch.utils import PATCH_MARKER, PATCH_REGISTRY
 
 
 @pytest.fixture(scope="module")
 def installed():
+    pytest.importorskip("torch", reason="requires torch")
+    pytest.importorskip("vllm", reason="requires vLLM")
+    importlib.import_module("vllm.v1.attention.backends.mla.flashmla")
     # The platform entry point installs the FA shim before the general hook.
     # Direct patch.install() alone does not reproduce that startup sequence.
     import vllm_sail
@@ -152,6 +144,7 @@ _FORWARD_PPU_CLASSES = (
 )
 
 
+@pytest.mark.requires_runtime
 def test_patch_metadata_is_complete(installed) -> None:
     """Every installed patch must carry non-empty mandatory metadata."""
     assert installed, "no patches installed despite vLLM being importable"
@@ -161,6 +154,7 @@ def test_patch_metadata_is_complete(installed) -> None:
         assert record.remove_when.strip(), record.target
 
 
+@pytest.mark.requires_runtime
 def test_attention_patch_markers_land(installed) -> None:
     """Each Group-1 target carries the patch marker for its full target name."""
     registry_targets = {record.target for record in installed}
@@ -176,6 +170,7 @@ def test_attention_patch_markers_land(installed) -> None:
         assert full_target in markers, full_target
 
 
+@pytest.mark.requires_runtime
 def test_flashmla_backend_uses_patched_ppu_support_gate(
     monkeypatch: pytest.MonkeyPatch, installed
 ) -> None:
@@ -199,6 +194,7 @@ def test_flashmla_backend_uses_patched_ppu_support_gate(
     assert backend.is_flashmla_dense_supported() == (True, None)
 
 
+@pytest.mark.requires_runtime
 def test_flashmla_consumers_use_every_patched_op_alias(installed) -> None:
     """By-value imports must follow the patched PPU FlashMLA implementations."""
     from vllm.v1.attention.ops import flashmla as ops
@@ -216,6 +212,7 @@ def test_flashmla_consumers_use_every_patched_op_alias(installed) -> None:
             )
 
 
+@pytest.mark.requires_runtime
 def test_flashmla_alias_inventory_matches_vllm_source(installed) -> None:
     """Discover by-value imports from the installed patch surface independently."""
     import vllm
@@ -253,6 +250,7 @@ def test_flashmla_alias_inventory_matches_vllm_source(installed) -> None:
 
 
 @pytest.mark.parametrize("module_path,attr_path", _ATTENTION_TARGETS)
+@pytest.mark.requires_runtime
 def test_attention_targets_installed_or_unimportable(
     installed, module_path, attr_path
 ) -> None:
@@ -265,6 +263,7 @@ def test_attention_targets_installed_or_unimportable(
         importlib.import_module(module_path)
 
 
+@pytest.mark.requires_runtime
 def test_forward_ppu_overrides_exist_and_differ_from_default(installed) -> None:
     """The five forward_ppu overrides exist and are not the CustomOp default."""
     from vllm.model_executor.custom_op import CustomOp
@@ -282,6 +281,7 @@ def test_forward_ppu_overrides_exist_and_differ_from_default(installed) -> None:
         )
 
 
+@pytest.mark.requires_runtime
 def test_fla_ops_package_exports_current_decode(installed) -> None:
     """GDN consumers see the same packed-decode and MTP entry points."""
     ops = importlib.import_module("vllm.third_party.flash_linear_attention.ops")
@@ -302,6 +302,7 @@ def test_fla_ops_package_exports_current_decode(installed) -> None:
         assert getattr(wrapper, PATCH_MARKER, None)
 
 
+@pytest.mark.requires_runtime
 def test_fla_autotune_cache_results_follows_triton_availability(installed) -> None:
     """cache_results rebuilds land iff real triton is present.
 
@@ -338,6 +339,7 @@ def test_gdn_fused_decode_env_gate_both_ways(monkeypatch) -> None:
     assert ppu_envs.VLLM_PPU_FUSED_GDN_DECODE is True
 
 
+@pytest.mark.requires_runtime
 def test_gdn_chunk_backend_patched_when_target_importable(installed) -> None:
     """ChunkGatedDeltaRule selects the current PLA/Triton prefill route."""
     module_path = "vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn"
@@ -354,6 +356,7 @@ def test_gdn_chunk_backend_patched_when_target_importable(installed) -> None:
     assert f"{module_path}.ChunkGatedDeltaRule.__init__" in markers
 
 
+@pytest.mark.requires_runtime
 def test_unimportable_targets_are_skipped_not_faked(installed) -> None:
     """A patch absent from the registry must correspond to a real ImportError.
 
@@ -396,6 +399,7 @@ def _make_mla_spec(**extra):
     )
 
 
+@pytest.mark.requires_runtime
 def test_mla_attention_spec_accepts_indexer_geometry(installed) -> None:
     """The wrapped dataclass init takes the fork's two indexer kwargs."""
     spec = _make_mla_spec(indexer_n_head=64, indexer_q_head_dim=128)
@@ -403,6 +407,7 @@ def test_mla_attention_spec_accepts_indexer_geometry(installed) -> None:
     assert spec.indexer_q_head_dim == 128
 
 
+@pytest.mark.requires_runtime
 def test_mla_attention_spec_indexer_geometry_defaults_none(installed) -> None:
     """Non-DeepseekV4 MLA models leave the geometry at None, like the fork."""
     spec = _make_mla_spec()
@@ -410,6 +415,7 @@ def test_mla_attention_spec_indexer_geometry_defaults_none(installed) -> None:
     assert spec.indexer_q_head_dim is None
 
 
+@pytest.mark.requires_runtime
 def test_mla_attention_spec_merge_forwards_indexer_geometry(installed) -> None:
     """merge() must carry the geometry from specs[0] onto the merged spec.
 
@@ -424,6 +430,7 @@ def test_mla_attention_spec_merge_forwards_indexer_geometry(installed) -> None:
     assert merged.indexer_q_head_dim == 128
 
 
+@pytest.mark.requires_runtime
 def test_mla_spec_dataclass_operations_preserve_indexer_geometry(installed):
     from dataclasses import fields, replace
 
@@ -450,6 +457,7 @@ def test_mla_spec_dataclass_operations_preserve_indexer_geometry(installed):
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.requires_runtime
 def test_mhc_launchers_use_shared_prenorm_helper(installed) -> None:
     tilelang = importlib.import_module("vllm.model_executor.kernels.mhc.tilelang")
     assert getattr(tilelang._hc_prenorm_gemm_outputs, PATCH_MARKER, None)
@@ -468,6 +476,7 @@ def test_mhc_launchers_use_shared_prenorm_helper(installed) -> None:
         )
 
 
+@pytest.mark.requires_runtime
 def test_phase4_metadata_shape(installed) -> None:
     """Phase-4 records pin the supported range and carry verifiable metadata."""
     phase4_prefixes = (
@@ -491,6 +500,7 @@ def test_phase4_metadata_shape(installed) -> None:
         assert record.remove_when.strip().lower() != "todo", record.target
 
 
+@pytest.mark.requires_runtime
 def test_phase4_plugin_modules_import_without_hardware(installed) -> None:
     """No-hardware import test for every Phase-4 plugin-side module.
 
@@ -522,6 +532,7 @@ def test_phase4_plugin_modules_import_without_hardware(installed) -> None:
         assert module is not None, module_name
 
 
+@pytest.mark.requires_runtime
 def test_flash_attn_package_exports_the_ppu_api(installed) -> None:
     """Both upstream import styles must use the same PPU callables."""
     package = importlib.import_module("vllm.vllm_flash_attn")

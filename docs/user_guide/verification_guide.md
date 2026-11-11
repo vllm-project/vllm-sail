@@ -42,11 +42,12 @@ From the plugin checkout, using its test environment:
 python -m pytest tests/ut -q
 ```
 
-The merge gate runs with only `requirements/dev.txt` installed, without torch,
-vLLM or a device. Additional integration tests become available in a PPU
-environment with their dependencies installed. Investigate failures and report
-skip reasons; do not compare test counts from different environments as if they
-cover the same paths.
+The Python 3.10–3.13 CPU matrix uses only `requirements/dev.txt` and selects UT
+that need no torch, vLLM, upstream checkout or device. The PPU pin-UT lane runs
+the remaining source, installed-runtime and device UT with the exact upstream
+checkout prepared. The selections are complementary: each UT belongs to one
+runner tier, though CPU tests repeat across Python versions. Investigate failures
+and report skips; skips are not passing runtime evidence.
 
 Compatibility UT may intentionally import the plugin checkout beside installed
 vLLM and torch. Record those import paths and set `VLLM_SOURCE_ROOT` to the same
@@ -75,21 +76,27 @@ not establish that module imports, patch installation or device inference work.
 
 ### CI jobs
 
-The [unit-test workflow](../../.github/workflows/ut.yaml) runs for pull requests,
-pushes to `main` or `master`, and manual dispatch. Its jobs run independently:
+The [CPU matrix](../../.github/workflows/ut.yaml) runs for PRs through an
+authorized `/ci run`, as well as pushes to `main` or `master` and manual dispatch.
+Opening or updating a PR does not start it. CPU UT runs independently of the
+PPU build, and both tiers contribute to the tested head's `PPU CI` status:
 
 | Job | Environment and checks | Failure handling |
 | --- | --- | --- |
-| CPU UT | Python 3.10–3.13; only `requirements/dev.txt`; UT and branch coverage | Test failure fails the workflow; coverage-upload failure does not |
-| vLLM source (main-verified) | Python 3.12; checks out the exact verified main commit; runs `upstream_source` tests with a required source path | Checkout or test failure fails the workflow |
+| CPU UT | Python 3.10–3.13; only `requirements/dev.txt`; excludes `upstream_source`, `requires_runtime`, `ppu`, `cap80` and `cap89`; branch coverage | Test failure fails the workflow; coverage-upload failure does not |
+| PPU pin UT | Installed vLLM, SAIL PyTorch, profiling tooling and PPU runtime; runs the complementary source/runtime/device UT selection | Missing source or test failure fails the PPU gate |
 
-The source job reads the full SHA in
-[verified main commit](../../.github/vllm-main-verified.commit) and logs the
-resolved commit. Update this pin only after qualifying that exact revision.
-Keep feature tests named after their behavior. The workflow does not install
-vLLM or run PPU workloads; installed compatibility and device checks require
-the prepared environment below. Repository branch protection determines which
-job results are required for merging.
+The selections are disjoint and cover all collected UT. Runtime requirements
+must be marked on each mixed-file test, not on its fixture; fully runtime-only
+modules can carry a module mark. No-vLLM-only contracts and pure Python logic
+remain in the CPU lane. Dependency or platform skips are not passing evidence.
+
+Pin-UT reads the full SHA in
+[verified main commit](../../.github/vllm-main-verified.commit), verifies the
+upstream checkout and mounts it read-only as `VLLM_SOURCE_ROOT`. It requires
+that source path, so source contracts and independent packing references cannot
+silently fall back to an absent checkout. Update the pin only after qualifying
+that exact revision. Repository branch protection determines the merge gate.
 
 The separate [upstream canary](../../.github/workflows/upstream-canary.yaml) runs
 weekly on Tuesday at 03:17 UTC and on manual dispatch. It installs upstream

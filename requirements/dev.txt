@@ -8,7 +8,7 @@ setuptools>=77.0.3,<81.0.0
 # Match build.txt so CPU tests exercise the full-hash vLLM version contract.
 setuptools-scm>=8,<9
 wheel
+pydantic>=2
 tomli; python_version < "3.11"
-# Same range as requirements/ppu.txt: the upstream glm5next model imports
-# Glm5NextTextConfig, and the pin-UT CI lane installs only this file.
+# Match the runtime's Glm5NextTextConfig requirement.
 transformers>=5.16.1,<5.20.0
