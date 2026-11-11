@@ -224,7 +224,8 @@ path-filtered check should not be made a required status for every PR.
 The publisher maintains only these Preview namespaces:
 
 - Image tag: `preview-<upstream_run_id>-test-<local_test_run_id>`, without
-  rebuilding the tested image.
+  rebuilding the tested image. A registered tag is never moved: a retry reuses it
+  only when it already names the tested digest and stops otherwise.
 - Immutable prerelease:
   `preview-nightly-<upstream_run_id>-test-<local_test_run_id>`.
 - Fixed prerelease: `preview-baseline`, holding `preview-wheels.zip` and
@@ -239,12 +240,16 @@ retesting old wheels after changing only the Dockerfile does not advance it
 either.
 
 The two assets of the fixed Release are not updated atomically. The publisher
-runs serially: it uploads the wheels and then writes the JSON marker; readers
-refuse a missing asset or a hash mismatch. An interruption is recovered from the
-verified immutable Preview assets, and the old assets are kept under an archived
-name. Do not run another publisher against the same pointer concurrently. To roll
-back, a maintainer pauses the publisher and selects the wheels and digest of a
-historical immutable Preview.
+runs serially: it publishes the immutable Preview first, then uploads the wheels
+and writes the JSON marker. Readers never consume a missing asset or a hash
+mismatch: `fetch-preview` then reads the highest published immutable Preview
+instead and logs a warning, and the nightly, which retests published runs, does
+not read the pointer at all. An interruption is recovered from the verified
+immutable Preview assets, and the old assets are kept under an archived name. Do
+not run another publisher against the same pointer concurrently. Recovery and the
+reader fallback both select the highest published immutable Preview, so to roll
+back, a maintainer pauses the publisher, turns the faulty immutable Preview back
+into a draft, and selects the wheels and digest of a historical immutable Preview.
 
 Actions artifacts are retained for 14 days; nothing cleans the Registry, the
 Releases or the persistent work directories automatically. Configure a separate

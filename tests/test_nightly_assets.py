@@ -1395,8 +1395,12 @@ class TestNightlyAssets(unittest.TestCase):
         self.assertEqual(assets.load_baseline(self.api, FORK), (None, None, []))
         with self.assertRaisesRegex(assets.AssetError, "no source-build fallback"):
             assets.fetch_preview(self.api, args)
+        # The reader may look for a published immutable Preview to fall back on,
+        # but a draft fixed release is never one, so the original error stands.
         self.assertEqual(
-            self.api.reads, [f"/repos/{FORK}/releases/tags/preview-baseline"] * 2
+            self.api.reads,
+            [f"/repos/{FORK}/releases/tags/preview-baseline"] * 2
+            + [f"/repos/{FORK}/releases"],
         )
         # Even a broken tag endpoint must not make a draft a readable baseline.
         draft = copy.deepcopy(self.api.releases[(FORK, "preview-baseline")])
@@ -2098,7 +2102,9 @@ class TestNightlyAssets(unittest.TestCase):
                             consumer_repository=FORK, bundle=retry, test_run_id=500
                         ),
                     )
-                expected = 99 if retry_id == 98 else retry_id
+                # Run 100's immutable release exists, so even an older retry must
+                # restore that published identity instead of the stale marker.
+                expected = max(retry_id, 100)
                 baseline = assets.load_baseline(self.api, FORK)[0]
                 self.assertEqual(baseline["source"]["upstream_run_id"], expected)
                 out = self.root / f"ci-read-after-retry-{retry_id}"
@@ -2356,6 +2362,230 @@ class TestNightlyAssets(unittest.TestCase):
             make_baseline(older, older_evidence),
         )
 
+    def test_published_immutable_newer_than_fixed_blocks_a_rebuilt_digest(self):
+        # The immutable release for run 100 landed, but the fixed pointer still
+        # describes run 99. A retry of the same test run rebuilds the candidate
+        # with a different digest, which must not retag that published identity.
+        self.previous_release(99)
+        bundle, candidate, evidence = self.bundle(100)
+        archive = bundle / "preview-wheels.zip"
+        assets.pack_wheels(
+            bundle / "wheelhouse",
+            archive,
+            assets.validate_wheels(bundle / "wheelhouse"),
+            candidate["source"],
+        )
+        unique = self.api.install_release(
+            "preview-nightly-100-test-500",
+            make_baseline(candidate, evidence),
+            archive.read_bytes(),
+        )
+        ids = {r["id"] for r in assets.release_assets(self.api, FORK, unique)}
+        retry, retry_candidate, _ = self.retry_bundle(100, "sha256:" + "9" * 64)
+        self.assertNotEqual(retry_candidate["image_digest"], candidate["image_digest"])
+        self.api.mutations.clear()
+        with (
+            mock.patch.object(assets, "GitHub", return_value=self.api),
+            redirect_stdout(io.StringIO()) as out,
+        ):
+            self.assertEqual(
+                assets.main(
+                    [
+                        "check-preview",
+                        "--consumer-repository",
+                        FORK,
+                        "--bundle",
+                        str(retry),
+                        "--test-run-id",
+                        "500",
+                    ]
+                ),
+                0,
+            )
+        self.assertEqual(out.getvalue(), "promote=false\n")
+        self.assertEqual(
+            assets.load_baseline(self.api, FORK)[0], make_baseline(candidate, evidence)
+        )
+        self.assertEqual(
+            ids, {r["id"] for r in assets.release_assets(self.api, FORK, unique)}
+        )
+        self.assertFalse(
+            any(
+                p.startswith(f"uploads/{unique['id']}/")
+                for _, p, _ in self.api.mutations
+            )
+        )
+
+    def test_include_published_fetch_survives_a_half_updated_fixed_pointer(self):
+        baseline, _ = self.previous_release(100)
+        fixed = self.api.releases[(FORK, "preview-baseline")]
+        wheels = assets.named_asset(
+            assets.release_assets(self.api, FORK, fixed), "preview-wheels.zip"
+        )
+        # Model "publishing stopped after archiving the wheel ZIP": the fixed
+        # pointer is unreadable, which must not block the retry from finding the
+        # upstream wheels it is going to test.
+        self.api.mutate(
+            "PATCH",
+            f"/repos/{FORK}/releases/assets/{wheels['id']}",
+            {"name": "archive-interrupted-preview-wheels.zip"},
+        )
+        with self.assertRaises(assets.AssetError):
+            assets.load_baseline(self.api, FORK)
+        archive = self.root / "upstream.zip"
+        wheelhouse = self.root / "bundle-100" / "wheelhouse"
+        assets.pack_wheels(
+            wheelhouse, archive, assets.validate_wheels(wheelhouse), baseline["source"]
+        )
+        self.api.artifact_zip = archive.read_bytes()
+        with redirect_stdout(io.StringIO()) as out:
+            assets.fetch_nightly(self.api, self.nightly_args(include_published=True))
+        self.assertIn("available=true\n", out.getvalue())
+        self.assertIn("upstream_run_id=100\n", out.getvalue())
+
+    def torn_preview(self):
+        """Publish run 100's immutable release while the fixed pointer says 99."""
+        self.previous_release(99)
+        bundle, candidate, evidence = self.bundle(100, wheel_bytes=b"new wheel payload")
+        archive = bundle / "preview-wheels.zip"
+        assets.pack_wheels(
+            bundle / "wheelhouse",
+            archive,
+            assets.validate_wheels(bundle / "wheelhouse"),
+            candidate["source"],
+        )
+        newer = make_baseline(candidate, evidence)
+        self.api.install_release(
+            newer["immutable_release_tag"], newer, archive.read_bytes()
+        )
+        self.api.mutations.clear()
+        return newer, archive
+
+    def archive_fixed_asset(self, name):
+        """Rename a fixed asset as the publisher does before replacing it."""
+        fixed = self.api.releases[(FORK, "preview-baseline")]
+        record = assets.named_asset(assets.release_assets(self.api, FORK, fixed), name)
+        self.api.mutate(
+            "PATCH",
+            f"/repos/{FORK}/releases/assets/{record['id']}",
+            {"name": f"archive-interrupted-{name}"},
+        )
+        return record
+
+    def test_fetch_preview_reads_the_published_immutable_when_fixed_is_torn(self):
+        newer, archive = self.torn_preview()
+        self.api.reads.clear()
+        flow = self.root / "flow-intact"
+        with (
+            redirect_stdout(io.StringIO()) as out,
+            redirect_stderr(io.StringIO()) as err,
+        ):
+            assets.fetch_preview(
+                self.api, argparse.Namespace(consumer_repository=FORK, output=flow)
+            )
+        # An intact pointer wins over a newer immutable release and is the only read.
+        self.assertIn("upstream_run_id=99\n", out.getvalue())
+        self.assertEqual(err.getvalue(), "")
+        self.assertNotIn(f"/repos/{FORK}/releases", self.api.reads)
+
+        def new_wheels():
+            self.archive_fixed_asset("preview-wheels.zip")
+            fixed = self.api.releases[(FORK, "preview-baseline")]
+            self.api.upload(
+                FORK, fixed["id"], "preview-wheels.zip", archive, "application/zip"
+            )
+
+        def new_wheels_without_marker():
+            new_wheels()
+            self.archive_fixed_asset("preview-baseline.json")
+
+        intact = copy.deepcopy(self.api)
+        for index, (stage, tear) in enumerate(
+            (
+                (
+                    "wheels archived",
+                    lambda: self.archive_fixed_asset("preview-wheels.zip"),
+                ),
+                ("new wheels, old marker", new_wheels),
+                ("marker archived", new_wheels_without_marker),
+                (
+                    "pointer missing",
+                    lambda: self.api.releases.pop((FORK, "preview-baseline")),
+                ),
+            )
+        ):
+            with self.subTest(stage=stage):
+                self.api = copy.deepcopy(intact)
+                tear()
+                self.api.mutations.clear()
+                flow = self.root / f"flow-torn-{index}"
+                with (
+                    redirect_stdout(io.StringIO()) as out,
+                    redirect_stderr(io.StringIO()) as err,
+                ):
+                    assets.fetch_preview(
+                        self.api,
+                        argparse.Namespace(consumer_repository=FORK, output=flow),
+                    )
+                self.assertIn("upstream_run_id=100\n", out.getvalue())
+                self.assertIn(
+                    "::warning::preview-baseline is not readable", err.getvalue()
+                )
+                self.assertIn(newer["immutable_release_tag"], err.getvalue())
+                self.assertEqual(assets.read_json(flow / "baseline.json"), newer)
+                self.assertEqual(
+                    assets.read_json(flow / "selection.json"), newer["source"]
+                )
+                assets.validate_wheels(flow / "wheelhouse", newer["source"])
+                self.assertTrue((flow / "preview-wheels.zip").is_file())
+                self.assertEqual(self.api.mutations, [])
+
+    def test_fetch_preview_fallback_fails_closed(self):
+        newer, _ = self.torn_preview()
+        old_wheels = self.archive_fixed_asset("preview-wheels.zip")
+        self.api.mutations.clear()
+        unique = self.api.releases[(FORK, newer["immutable_release_tag"])]
+        wheels = assets.named_asset(
+            assets.release_assets(self.api, FORK, unique), "preview-wheels.zip"
+        )
+        intact = copy.deepcopy(self.api)
+        # The newest immutable ZIP no longer matches its own marker.
+        self.api.payloads[wheels["id"]] = self.api.payloads[old_wheels["id"]]
+        flow = self.root / "flow-corrupt"
+        with redirect_stderr(io.StringIO()):
+            with self.assertRaisesRegex(assets.AssetError, "mismatch"):
+                assets.fetch_preview(
+                    self.api, argparse.Namespace(consumer_repository=FORK, output=flow)
+                )
+        # Rejected bytes stay staged; nothing a consumer reads was written.
+        for name in ("preview-wheels.zip", "wheelhouse", "selection.json"):
+            self.assertFalse((flow / name).exists(), name)
+        self.assertFalse((flow / "baseline.json").exists())
+        # A transport error is not a torn pointer: never fall back on it.
+        self.api = copy.deepcopy(intact)
+        self.api.reads.clear()
+        with mock.patch.object(self.api, "optional", side_effect=assets.APIError(503)):
+            with self.assertRaises(assets.APIError):
+                assets.fetch_preview(
+                    self.api,
+                    argparse.Namespace(
+                        consumer_repository=FORK, output=self.root / "flow-503"
+                    ),
+                )
+        self.assertNotIn(f"/repos/{FORK}/releases", self.api.reads)
+        # Without a published immutable release the original error stands.
+        for (_, tag), release in self.api.releases.items():
+            if tag.startswith("preview-nightly-"):
+                release["draft"] = True
+        with self.assertRaisesRegex(assets.AssetError, "required release asset"):
+            assets.fetch_preview(
+                self.api,
+                argparse.Namespace(
+                    consumer_repository=FORK, output=self.root / "flow-none"
+                ),
+            )
+        self.assertEqual(self.api.mutations, [])
+
     def test_markerless_draft_recovers_original_run_not_retry_candidate(self):
         bundle, candidate, evidence = self.bundle()
         args = argparse.Namespace(
@@ -2480,10 +2710,15 @@ class TestNightlyAssets(unittest.TestCase):
                 ),
                 0,
             )
-        self.assertIn("promote=true\n", out.getvalue())
-        self.assertEqual(assets.load_baseline(self.api, FORK)[0], previous)
-        with redirect_stdout(io.StringIO()):
+        # The immutable release already landed, so this gate repairs the pointer and
+        # reports a no-op rather than retagging that identity a second time.
+        self.assertEqual(out.getvalue(), "promote=false\n")
+        self.assertEqual(
+            assets.load_baseline(self.api, FORK)[0], make_baseline(candidate, evidence)
+        )
+        with redirect_stdout(io.StringIO()) as repeat:
             assets.publish(self.api, args)
+        self.assertEqual(repeat.getvalue(), "promote=false\n")
         self.assertEqual(
             assets.load_baseline(self.api, FORK)[0], make_baseline(candidate, evidence)
         )

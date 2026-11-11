@@ -6,12 +6,40 @@ import fnmatch
 import json
 import os
 import re
+import shutil
+import subprocess
+import sys
+import tempfile
+import textwrap
 import unittest
 from pathlib import Path
 
 DEFAULT_ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW_ROOT = Path(os.environ.get("CI_WORKFLOW_ROOT", str(DEFAULT_ROOT)))
 SOURCE_ROOT = DEFAULT_ROOT
+# Stand-in for `docker buildx imagetools`: one tag whose digest lives in a file.
+FAKE_DOCKER = """\
+import os
+import sys
+from pathlib import Path
+
+state = Path(os.environ["FAKE_REGISTRY"])
+args = sys.argv[1:]
+with (state / "calls").open("a") as log:
+    log.write(" ".join(args) + "\\n")
+tag = state / "tag"
+if args[:3] == ["buildx", "imagetools", "inspect"]:
+    if os.environ.get("FAKE_LOOKUP_ERROR"):
+        sys.exit(os.environ["FAKE_LOOKUP_ERROR"])
+    if tag.exists():
+        print(tag.read_text())
+        sys.exit(0)
+    sys.exit(f"ERROR: {args[3]}: not found")
+if args[:3] == ["buildx", "imagetools", "create"]:
+    tag.write_text(args[-1].split("@", 1)[1])
+    sys.exit(0)
+sys.exit(f"unexpected docker call: {args}")
+"""
 
 
 def workflow(name):
@@ -25,6 +53,20 @@ def jobs(text):
     return {
         sections[index]: sections[index + 1] for index in range(1, len(sections), 2)
     }
+
+
+def step_script(text, name):
+    """Return the dedented ``run: |`` block of the step called ``name``."""
+    lines = text.split("\n")
+    start = next(i for i, line in enumerate(lines) if line.strip() == f"- name: {name}")
+    run = next(i for i in range(start + 1, len(lines)) if lines[i].strip() == "run: |")
+    indent = len(lines[run]) - len(lines[run].lstrip())
+    script = []
+    for line in lines[run + 1 :]:
+        if line.strip() and len(line) - len(line.lstrip()) <= indent:
+            break
+        script.append(line)
+    return textwrap.dedent("\n".join(script))
 
 
 class TestWorkflowContracts(unittest.TestCase):
@@ -102,6 +144,70 @@ class TestWorkflowContracts(unittest.TestCase):
         self.assertNotIn("nightly_assets.py publish \\", text)
         self.assertNotIn("nightly_assets.py check-promotion", text)
         self.assertNotIn(":ci-${", text)
+
+    def test_preview_retag_never_moves_an_existing_tag(self):
+        bash = shutil.which("bash")
+        if bash is None:
+            self.skipTest("bash is required to execute the retag step")
+        script = step_script(
+            workflow("promote-nightly.yaml"),
+            "Register the same digest under an immutable preview tag",
+        )
+        repository = "registry.example.com/team/vllm-sail"
+        tested = "sha256:" + "1" * 64
+        other = "sha256:" + "2" * 64
+        # A buildx read failure on a tag that exists must not look like a missing tag.
+        unreadable = (
+            "ERROR: httpReadSeeker: failed open: content at https://registry"
+            f".example.com/v2/team/vllm-sail/manifests/{other} not found: not found"
+        )
+        for existing, error, passes, final in (
+            (None, None, True, tested),
+            (tested, None, True, tested),
+            (other, None, False, other),
+            (None, "ERROR: unauthorized: authentication required", False, None),
+            (None, unreadable, False, None),
+        ):
+            with (
+                self.subTest(existing=existing, error=error),
+                tempfile.TemporaryDirectory() as temp,
+            ):
+                root = Path(temp)
+                (root / "bin").mkdir()
+                docker = root / "bin" / "docker"
+                docker.write_text(f"#!{sys.executable}\n{FAKE_DOCKER}")
+                docker.chmod(0o755)
+                if existing:
+                    (root / "tag").write_text(existing)
+                env = {
+                    "PATH": f"{root / 'bin'}{os.pathsep}{os.environ.get('PATH', '')}",
+                    "RUNNER_TEMP": temp,
+                    "FAKE_REGISTRY": temp,
+                    "SOURCE_IMAGE": f"{repository}@{tested}",
+                    "IMAGE_REPOSITORY": repository,
+                    "CONFIGURED_REPOSITORY": repository,
+                    "EXPECTED_DIGEST": tested,
+                    "UPSTREAM_RUN_ID": "100",
+                    "TEST_RUN_ID": "500",
+                }
+                if error:
+                    env["FAKE_LOOKUP_ERROR"] = error
+                result = subprocess.run(
+                    [bash, "-e", "-c", script],
+                    env=env,
+                    capture_output=True,
+                    text=True,
+                    timeout=60,
+                )
+                self.assertEqual(result.returncode == 0, passes, result.stderr)
+                calls = (root / "calls").read_text().splitlines()
+                creates = [c for c in calls if c.startswith("buildx imagetools create")]
+                # Only a tag that does not exist yet may be created, exactly once.
+                self.assertEqual(len(creates), int(existing is None and error is None))
+                tag = root / "tag"
+                self.assertEqual(tag.read_text() if tag.exists() else None, final)
+                if existing == other:
+                    self.assertIn("refusing to move a Preview tag", result.stderr)
 
     def test_catalog_describes_only_the_frozen_minimum_cases(self):
         value = json.loads(

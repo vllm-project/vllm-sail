@@ -121,7 +121,22 @@ jobs:
           set -Eeuo pipefail
           test "$IMAGE_REPOSITORY" = "$CONFIGURED_REPOSITORY"
           destination="${IMAGE_REPOSITORY}:preview-${UPSTREAM_RUN_ID}-test-${TEST_RUN_ID}"
-          docker buildx imagetools create --prefer-index=false -t "$destination" "$SOURCE_IMAGE"
+          # An earlier attempt may already have registered this tag, possibly for a
+          # rebuilt candidate. Never move a Preview tag: reuse it only when it names
+          # the tested digest, and fail on any lookup error except a missing tag.
+          lookup="${RUNNER_TEMP}/preview-tag-lookup.err"
+          if existing="$(docker buildx imagetools inspect "$destination" \
+            --format '{{.Manifest.Digest}}' 2>"$lookup")"; then
+            if [[ "$existing" != "$EXPECTED_DIGEST" ]]; then
+              echo "::error::${destination} already names ${existing}, not the tested ${EXPECTED_DIGEST}; refusing to move a Preview tag" >&2
+              exit 1
+            fi
+          elif grep -qF -- "${destination}: not found" "$lookup"; then
+            docker buildx imagetools create --prefer-index=false -t "$destination" "$SOURCE_IMAGE"
+          else
+            cat "$lookup" >&2
+            exit 1
+          fi
           actual="$(docker buildx imagetools inspect "$destination" --format '{{.Manifest.Digest}}')"
           test "$actual" = "$EXPECTED_DIGEST"
       - name: Publish prerelease wheels and preview pointer only

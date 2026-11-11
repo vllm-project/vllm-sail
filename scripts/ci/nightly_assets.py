@@ -985,15 +985,19 @@ def load_baseline(api, repo):
     return baseline, release, assets
 
 
-def latest_published_immutable(api, repo):
+def latest_published_immutable(api, repo, exclude=None):
     """Return the highest published immutable baseline, or None when none exists.
 
     The fixed preview-baseline is a mutable pointer that can be missing while an
     immutable publication already completed. Only the immutable record is a
-    durable statement that a preview was distributed.
+    durable statement that a preview was distributed. ``exclude`` hides the tag a
+    publisher has just created, so its own release is not mistaken for a
+    competing one.
     """
     releases = []
     for release in api.pages(f"/repos/{repo}/releases"):
+        if exclude is not None and release.get("tag_name") == exclude:
+            continue
         identity = re.fullmatch(
             r"preview-nightly-([1-9][0-9]*)-test-([1-9][0-9]*)",
             str(release.get("tag_name", "")),
@@ -1015,17 +1019,27 @@ def latest_published_immutable(api, repo):
     return restore
 
 
-def fixed_restore_point(api, repo, fixed, candidate):
+def fixed_restore_point(api, repo, fixed, candidate, exclude=None):
     """Choose what a fixed release must be restored to, or None on a fresh start.
 
     A marker (or an archived marker) is a non-downgrade fence and always wins
-    over the retry's incoming bundle. Without a fence only a first draft, or a
-    missing fixed release, may fall back to the highest published immutable
-    identity. This function only reads: creating a missing fixed release is
-    deferred until that immutable record verifies.
+    over the retry's incoming bundle. The highest published immutable record is
+    a fence too, because it can legitimately be newer than the fixed pointer.
+    Without any fence only a first draft, or a missing fixed release, may fall
+    back to that immutable identity. This function only reads: creating a missing
+    fixed release is deferred until that immutable record verifies.
     """
+    published = latest_published_immutable(api, repo, exclude)
+    if published is not None:
+        require(
+            published["source"]["upstream_repository"].casefold()
+            == candidate["source"]["upstream_repository"].casefold()
+            and published["source"]["upstream_workflow"]
+            == candidate["source"]["upstream_workflow"],
+            "recovery upstream identity mismatch",
+        )
     if fixed is None:
-        return latest_published_immutable(api, repo)
+        return published
     records = release_assets(api, repo, fixed)
     marker = asset_record(records, "preview-baseline.json", optional=True)
     asset_record(records, "preview-wheels.zip", optional=True)
@@ -1057,6 +1071,12 @@ def fixed_restore_point(api, repo, fixed, candidate):
                             api.bytes(f"/repos/{repo}/releases/assets/{record['id']}")
                         )
                     )
+    if published is not None:
+        # A published immutable record can outrun the fixed pointer: the publisher
+        # may stop after releasing the tag and before rewriting preview-baseline.
+        # Fencing on it keeps a retry of that identity a publication no-op instead
+        # of retagging a digest its immutable release would never describe.
+        fences.append(published)
     for fence in fences:
         validate_baseline(fence)
         require(
@@ -1072,9 +1092,10 @@ def fixed_restore_point(api, repo, fixed, candidate):
         )
         # A first draft may have no marker at all. The caller's bundle is NOT a
         # fence: a later retry may carry an older or newer run.
-        restore = latest_published_immutable(api, repo)
-        require(restore is not None, "recovery requires a published immutable release")
-        return restore
+        require(
+            published is not None, "recovery requires a published immutable release"
+        )
+        return published
     restore = max(
         fences, key=lambda b: (b["source"]["upstream_run_id"], b["test_run_id"])
     )
@@ -1090,7 +1111,7 @@ def fixed_restore_point(api, repo, fixed, candidate):
     return restore
 
 
-def recover_baseline(api, repo, bundle, candidate, evidence):
+def recover_baseline(api, repo, bundle, candidate, evidence, exclude=None):
     """Publisher-only recovery; never reinterpret an incomplete fixed release as absent.
 
     An archived marker is a non-downgrade fence. Verify its published immutable
@@ -1102,7 +1123,7 @@ def recover_baseline(api, repo, bundle, candidate, evidence):
     This repair is itself non-atomic and safely repeatable by serialized publishers.
     """
     fixed = publisher_lookup_release(api, repo, "preview-baseline")
-    restore = fixed_restore_point(api, repo, fixed, candidate)
+    restore = fixed_restore_point(api, repo, fixed, candidate, exclude)
     if restore is None:
         return None, None, []
     validate_baseline(restore)
@@ -1243,7 +1264,13 @@ def fetch_nightly(api, args):
     repo = repository(args.source_repository)
     consumer = repository(args.consumer_repository)
     workflow = workflow_name(args.workflow)
-    baseline, _, _ = load_baseline(api, consumer)
+    # --include-published disables dedup, so the mutable fixed pointer is not
+    # needed. Reading it anyway would fail whenever a publisher stopped between
+    # renaming the previous wheel ZIP and uploading the next one, which would
+    # block the retry before it could even look for upstream wheels.
+    baseline = None
+    if not args.include_published:
+        baseline, _, _ = load_baseline(api, consumer)
     current = baseline["source"] if baseline else None
     if current:
         require(
@@ -1370,18 +1397,66 @@ def fetch_nightly(api, args):
     )
 
 
+def stage_preview(api, repo, baseline, records, work: Path) -> Path:
+    """Download one Preview wheel ZIP into ``work`` and verify it against its marker."""
+    asset = named_asset(records, "preview-wheels.zip")
+    archive = work / "preview-wheels.zip"
+    api.download(f"/repos/{repo}/releases/assets/{asset['id']}", archive)
+    safe_extract(archive, work / "wheelhouse")
+    validate_wheels(work / "wheelhouse", baseline["source"])
+    return work
+
+
 def fetch_preview(api, args):
     repo = repository(args.consumer_repository)
-    baseline, _, assets = load_baseline(api, repo)
-    require(
-        baseline is not None,
-        "published preview-baseline is required; no source-build fallback",
-    )
-    asset = named_asset(assets, "preview-wheels.zip")
-    archive = args.output / "preview-wheels.zip"
-    api.download(f"/repos/{repo}/releases/assets/{asset['id']}", archive)
-    safe_extract(archive, args.output / "wheelhouse")
-    validate_wheels(args.output / "wheelhouse", baseline["source"])
+    staging = args.output / f"preview-fetch-{time.time_ns()}"
+    try:
+        baseline, _, records = load_baseline(api, repo)
+        require(
+            baseline is not None,
+            "published preview-baseline is required; no source-build fallback",
+        )
+        work = stage_preview(api, repo, baseline, records, staging / "fixed")
+    except APIError:
+        raise
+    except AssetError as error:
+        # preview-baseline is not atomic: a publisher can stop after archiving an
+        # asset and before uploading its replacement, or between the wheel ZIP and
+        # the marker. It only rewrites the pointer after the immutable release is
+        # published, so the highest published one is what its recovery restores.
+        # Transport errors are not torn pointers and are re-raised above.
+        baseline = latest_published_immutable(api, repo)
+        if baseline is None:
+            raise
+        tag = baseline["immutable_release_tag"]
+        print(
+            f"::warning::preview-baseline is not readable ({error}); "
+            f"using the published {tag} release",
+            file=sys.stderr,
+        )
+        release = api.optional(f"/repos/{repo}/releases/tags/{tag}")
+        require(
+            release is not None
+            and release.get("draft") is False
+            and release.get("published_at"),
+            "published immutable Preview is missing",
+        )
+        validate_preview_release(release)
+        work = stage_preview(
+            api,
+            repo,
+            baseline,
+            release_assets(api, repo, release),
+            staging / "immutable",
+        )
+    # Only verified bytes reach the paths consumers read; rejected ones stay staged.
+    for name in ("preview-wheels.zip", "wheelhouse"):
+        target = args.output / name
+        require(
+            not target.exists() and not target.is_symlink(),
+            "fetch would overwrite existing path",
+        )
+        (work / name).rename(target)
     write_json(args.output / "selection.json", baseline["source"])
     write_json(args.output / "baseline.json", baseline)
     outputs(
@@ -1455,7 +1530,9 @@ def check_bundle(bundle: Path, test_run_id: int):
     return candidate, evidence, manifest
 
 
-def promotion_check(api, repo, bundle: Path, test_run_id: int, *, publisher=False):
+def promotion_check(
+    api, repo, bundle: Path, test_run_id: int, *, publisher=False, exclude=None
+):
     repository(repo)
     candidate, evidence, manifest = check_bundle(bundle, test_run_id)
     run = trusted_run(api, repo, TEST_WORKFLOW, test_run_id)
@@ -1464,7 +1541,7 @@ def promotion_check(api, repo, bundle: Path, test_run_id: int, *, publisher=Fals
         "candidate control SHA differs from test run",
     )
     baseline, _, _ = (
-        recover_baseline(api, repo, bundle, candidate, evidence)
+        recover_baseline(api, repo, bundle, candidate, evidence, exclude)
         if publisher
         else load_baseline(api, repo)
     )
@@ -1746,8 +1823,9 @@ def publish(api, args):
         upload_asset(api, repo, unique, name, path, content_type, immutable=True)
     publish_release(api, repo, unique)
     # Re-read after completing the immutable release, before touching fixed assets.
+    # Hide our own tag: it is not a competing publication.
     promote, _, _, _ = promotion_check(
-        api, repo, args.bundle, args.test_run_id, publisher=True
+        api, repo, args.bundle, args.test_run_id, publisher=True, exclude=tag
     )
     if not promote:
         outputs(promote=False)
