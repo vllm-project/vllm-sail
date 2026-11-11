@@ -46,6 +46,8 @@ if TYPE_CHECKING:
     VLLM_SAIL_NVTX_PROFILE: bool = False
     VLLM_SAIL_NVTX_DUMP_TOPK: bool = False
     VLLM_SAIL_NVTX_VFA_DUMP_SEQLEN: bool = False
+    VLLM_SAIL_FUSED_NORM_ROPE_ATTN: bool = True
+    VLLM_SAIL_PPU_KV_MXFP8: bool = True
     VLLM_DEEPEPLL_RECV_HOOK: bool = True
     VLLM_GDN_DECODE_KERNEL: str = "auto"
 
@@ -65,6 +67,8 @@ if TYPE_CHECKING:
     VLLM_PPU_NVTX_PROFILE: bool = False
     VLLM_PPU_NVTX_DUMP_TOPK: bool = False
     VLLM_PPU_NVTX_VFA_DUMP_SEQLEN: bool = False
+    VLLM_PPU_FUSED_NORM_ROPE_ATTN: bool = True
+    VLLM_PPU_PPU_KV_MXFP8: bool = True
 
 _TRUTHY = ("true", "1", "yes", "on")
 
@@ -155,6 +159,20 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # -- Attention / linear attention --------------------------------------
     # Legacy getter only. Current PLA/Triton dispatch uses VLLM_SAIL_USE_PLA.
     "VLLM_SAIL_FUSED_GDN_DECODE": _bool("VLLM_SAIL_FUSED_GDN_DECODE", True),
+    # -- DeepSeek V4.1 fused norm-rope attention (FlashMLA PR#54 wheel) -----
+    # Master switch for the PPU fused norm-rope sparse-attention path. Default
+    # ON: the path still requires the PR#54 wheel (capability probe), PPU
+    # SM80/SM89, the 528B KV record switch below, and a compatible V4.1
+    # head/group topology; set 0 to force the baseline attention class even
+    # with the fused wheel installed (A-B-A control).
+    "VLLM_SAIL_FUSED_NORM_ROPE_ATTN": _bool("VLLM_SAIL_FUSED_NORM_ROPE_ATTN", True),
+    # KV record format for DeepSeek V4.1 on PPU: True -> 528B V4.1 MXFP8
+    # record (required by the fused decode kernel; both A/B sides run it so
+    # the record is never the variable under test), False -> 584B V4 record
+    # (upstream non-SM100 default; control-A self-comparison / fallback).
+    # Read once per process by the dsv41_kv_record patch, which also prints
+    # the forensic line "[VLLM_SAIL] kv_mxfp8=<bool> kv_bytes_per_token=<n>".
+    "VLLM_SAIL_PPU_KV_MXFP8": _bool("VLLM_SAIL_PPU_KV_MXFP8", True),
     # -- Distributed MoE ---------------------------------------------------
     # DeepEP low-latency deferred recv hook. The hook only pays off on backends
     # that can overlap the deferred receive with other compute; setting this to
