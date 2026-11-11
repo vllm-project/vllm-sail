@@ -1,0 +1,33 @@
+name: PPU wheels
+
+# Builds the PPU wheels exactly as the build job of ppu-accuracy-nightly.yaml
+# does and runs nothing else. It calls ppu-build-and-test.yaml with
+# skip_device_tests, so only the short runtime-image preflight touches an
+# 8-ppu-m890p host; the wheel build itself uses a hosted runner. The run uploads
+# ppu-wheels-<run_id> and ppu-build-diagnostics-<run_id> (14-day retention),
+# which PPU debug can test without rebuilding.
+#
+# Like the accuracy nightly this workflow is read-only: it uses no secrets, no
+# Environment and no write permission, and it publishes nothing.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+cache-mode: none
+
+concurrency:
+  group: ppu-wheels-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build wheels
+    uses: ./.github/workflows/ppu-build-and-test.yaml
+    with:
+      # github.sha is the commit this run was dispatched on, so the checkout
+      # and the wheel manifest describe one tree.
+      pr_head_sha: ${{ github.sha }}
+      skip_device_tests: true

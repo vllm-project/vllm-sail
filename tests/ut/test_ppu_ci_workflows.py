@@ -215,6 +215,8 @@ def test_executor_separates_read_only_pr_execution_and_always_reporting():
         "_ppu-upstream-reuse.yaml",
         "ppu-ops-tests.yaml",
         "ppu-debug.yaml",
+        "ppu-wheels.yaml",
+        "ppu-test-sweep.yaml",
         "kernel-perf-label.yaml",
         "perf-regression.yaml",
     ],
@@ -534,6 +536,46 @@ def test_gate_honours_skip_device_tests(skip_device_tests, returncode):
     assert result.returncode == returncode, result.stderr
 
 
+SWEEP_LANES = ("build", "pr-lanes", "kernel-perf", "select", "accuracy")
+
+
+@pytest.mark.parametrize(
+    "changes,run_kernel_perf,run_accuracy,returncode",
+    [
+        ({}, "true", "true", 0),
+        (
+            {"kernel-perf": "skipped", "select": "skipped", "accuracy": "skipped"},
+            "false",
+            "false",
+            0,
+        ),
+        ({"kernel-perf": "skipped"}, "true", "true", 1),
+        ({"accuracy": "failure"}, "true", "true", 1),
+        ({"pr-lanes": "failure"}, "false", "false", 1),
+        ({"build": "failure", "pr-lanes": "skipped"}, "true", "true", 1),
+    ],
+)
+def test_test_sweep_summary_only_tolerates_lanes_switched_off(
+    changes, run_kernel_perf, run_accuracy, returncode
+):
+    step = workflow("ppu-test-sweep.yaml")["jobs"]["summary"]["steps"][0]
+    script = step["run"].replace(
+        "python - <<'PYTHON'", f"{sys.executable} - <<'PYTHON'"
+    )
+    results = {job: {"result": changes.get(job, "success")} for job in SWEEP_LANES}
+    env = {
+        **os.environ,
+        "JOB_RESULTS": json.dumps(results),
+        "RUN_KERNEL_PERF": run_kernel_perf,
+        "RUN_ACCURACY": run_accuracy,
+    }
+    env.pop("GITHUB_STEP_SUMMARY", None)
+    result = subprocess.run(
+        ["bash", "-e", "-c", script], env=env, capture_output=True, text=True
+    )
+    assert result.returncode == returncode, result.stderr
+
+
 def test_ops_manual_entry_structure():
     config = workflow("ppu-ops-tests.yaml")
     assert config["name"] == "PPU ops tests (manual)"
@@ -657,6 +699,77 @@ def test_debug_structure():
             "wheel_source_sha": "${{ inputs.wheel_source_sha }}",
             **extra_inputs,
         }
+
+
+def test_wheel_build_entry_matches_the_accuracy_nightly_build():
+    config = workflow("ppu-wheels.yaml")
+    assert config["name"] == "PPU wheels"
+    assert set(config[True]) == {"workflow_dispatch"}
+    assert set(config["jobs"]) == {"build"}
+    build = config["jobs"]["build"]
+    nightly = workflow("ppu-accuracy-nightly.yaml")["jobs"]["build"]
+    # The build-only entry must keep producing exactly the nightly's wheels.
+    assert build["uses"] == nightly["uses"]
+    assert build["uses"] == "./.github/workflows/ppu-build-and-test.yaml"
+    assert build["with"] == nightly["with"]
+    assert build["with"] == {
+        "pr_head_sha": "${{ github.sha }}",
+        "skip_device_tests": True,
+    }
+
+
+def test_test_sweep_runs_each_lane_on_one_build():
+    config = workflow("ppu-test-sweep.yaml")
+    assert config["name"] == "PPU test sweep"
+    assert set(config[True]) == {"workflow_dispatch"}
+    inputs = config[True]["workflow_dispatch"]["inputs"]
+    assert set(inputs) == {"run_kernel_perf", "run_accuracy", "accuracy_models"}
+    assert inputs["run_kernel_perf"]["default"] is True
+    assert inputs["run_accuracy"]["default"] is True
+    assert inputs["accuracy_models"]["default"] == ""
+    jobs = config["jobs"]
+    assert set(jobs) == {
+        "build",
+        "pr-lanes",
+        "kernel-perf",
+        "select",
+        "accuracy",
+        "summary",
+    }
+    nightly = workflow("ppu-accuracy-nightly.yaml")["jobs"]
+    assert jobs["build"]["uses"] == nightly["build"]["uses"]
+    assert jobs["build"]["with"] == nightly["build"]["with"]
+    lanes = jobs["pr-lanes"]
+    assert lanes["needs"] == "build"
+    assert lanes["uses"] == "./.github/workflows/ppu-build-and-test.yaml"
+    # Reusing this run's wheels keeps every PR lane on, upstream reuse included.
+    assert lanes["with"] == {
+        "pr_head_sha": "${{ github.sha }}",
+        "existing_build_run_id": "${{ github.run_id }}",
+        "wheel_source_sha": "${{ github.sha }}",
+    }
+    perf = jobs["kernel-perf"]
+    assert perf["needs"] == "build"
+    assert perf["if"] == "inputs.run_kernel_perf"
+    assert perf["uses"] == "./.github/workflows/_ppu-kernel-perf.yaml"
+    assert perf["with"] == {
+        "pr_mode": False,
+        "build_run_id": "${{ github.run_id }}",
+        "wheel_source_sha": "${{ github.sha }}",
+    }
+    select = jobs["select"]
+    assert select["if"] == "inputs.run_accuracy"
+    assert select["steps"][-1]["run"] == nightly["select"]["steps"][-1]["run"]
+    assert select["steps"][-1]["env"] == {"MODELS": "${{ inputs.accuracy_models }}"}
+    accuracy = jobs["accuracy"]
+    assert accuracy["needs"] == ["build", "select"]
+    assert accuracy["if"] == "inputs.run_accuracy"
+    # The accuracy lane stays the nightly's serialized one, case by case.
+    for key in ("uses", "strategy", "with"):
+        assert accuracy[key] == nightly["accuracy"][key], key
+    summary = jobs["summary"]
+    assert summary["if"] == "always()"
+    assert set(summary["needs"]) == set(jobs) - {"summary"}
 
 
 def test_build_leaf_preserves_retry_identity_and_image_output():
