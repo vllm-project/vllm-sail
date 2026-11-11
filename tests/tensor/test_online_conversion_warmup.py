@@ -8,6 +8,8 @@ import pytest
 
 def test_moe_warmup_reads_converted_scales(monkeypatch):
     torch = pytest.importorskip("torch")
+    # The warmup module imports vLLM throughout, so torch alone is not enough.
+    pytest.importorskip("vllm")
     import vllm.utils.import_utils as vllm_import_utils
 
     # The optional Humming package in the PPU test image predates vLLM's
