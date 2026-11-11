@@ -184,7 +184,11 @@ def commit_builder(layers, context=None):
     )
 
 
-def commit_context(monkeypatch, created, upstream_calls):
+def NOT_CAPTURING():
+    return NS(cuda=NS(is_current_stream_capturing=lambda: False))
+
+
+def commit_context(monkeypatch, created, upstream_calls, torch=None):
     class Context:
         @classmethod
         def create(cls, layers, **kwargs):
@@ -204,6 +208,7 @@ def commit_context(monkeypatch, created, upstream_calls):
             "logger": LOGGER,
             "_replay_conv_state_layout": lambda: "SD",
             "_kda_metadata": NS(NULL_BLOCK_ID=0),
+            "torch": torch or NOT_CAPTURING(),
         },
     )
 
@@ -211,7 +216,10 @@ def commit_context(monkeypatch, created, upstream_calls):
 def test_commit_context_runs_pla_replay_for_pla_layers(monkeypatch):
     created, upstream_calls = [], []
     fn = commit_context(monkeypatch, created, upstream_calls)
-    layers = {"a": NS(_pla_replay_records="ra"), "b": NS(_pla_replay_records="rb")}
+    layers = {
+        "a": NS(_pla_replay_records="ra", spec_query_len=4),
+        "b": NS(_pla_replay_records="rb", spec_query_len=4),
+    }
     builder = commit_builder(layers)
 
     assert fn(builder) == "pla-context"
@@ -253,10 +261,40 @@ def test_commit_context_returns_the_cached_context(monkeypatch):
 def test_commit_context_rejects_mixed_record_formats(monkeypatch):
     created, upstream_calls = [], []
     fn = commit_context(monkeypatch, created, upstream_calls)
-    builder = commit_builder({"a": NS(_pla_replay_records="ra"), "b": NS()})
+    builder = commit_builder(
+        {"a": NS(_pla_replay_records="ra", spec_query_len=4), "b": NS()}
+    )
 
     with pytest.raises(ValueError, match="all use PLA replay"):
         fn(builder)
+    assert created == upstream_calls == []
+
+
+def test_commit_context_rejects_mismatched_spec_query_len(monkeypatch):
+    created, upstream_calls = [], []
+    fn = commit_context(monkeypatch, created, upstream_calls)
+    builder = commit_builder(
+        {
+            "a": NS(_pla_replay_records="ra", spec_query_len=4),
+            "b": NS(_pla_replay_records="rb", spec_query_len=2),
+        }
+    )
+
+    with pytest.raises(ValueError, match="share one spec_query_len"):
+        fn(builder)
+    assert created == upstream_calls == []
+
+
+def test_commit_context_skips_creation_during_graph_capture(monkeypatch):
+    created, upstream_calls = [], []
+    capturing = NS(cuda=NS(is_current_stream_capturing=lambda: True))
+    fn = commit_context(monkeypatch, created, upstream_calls, torch=capturing)
+    builder = commit_builder({"a": NS(_pla_replay_records="ra", spec_query_len=4)})
+
+    # The captured step's commit metadata is discarded, so no context is
+    # needed; the miss must not be cached, so eager steps still create one.
+    assert fn(builder) is None
+    assert builder.recoverssm_context is None
     assert created == upstream_calls == []
 
 
@@ -406,6 +444,7 @@ def test_commit_context_hands_pla_the_layer_view_it_reads(pla_sdk, modules):
     )
 
     assert context._context == "pla-context"
+    assert context._spec_query_len == 4
     [(views, kwargs)] = created
     assert [vars(view) for view in views] == [
         {"kv_cache": ("conv", "state"), "replay_records": "records"}
@@ -417,8 +456,15 @@ def test_commit_context_hands_pla_the_layer_view_it_reads(pla_sdk, modules):
 
 def test_commit_trims_the_request_mapping_to_the_batch(pla_sdk):
     commits = []
+
+    def pla_commit(*args, **kw):
+        # Mirrors PLA's real signature: token_capacity is keyword-only and
+        # mandatory, so a forwarding adapter that drops it fails here.
+        kw.pop("token_capacity")
+        commits.append((args, kw))
+
     context = pla_sdk().PLAKDAReplayCommitContext(
-        NS(commit=lambda *args, **kw: commits.append((args, kw)))
+        NS(commit=pla_commit), spec_query_len=4
     )
     states = NS(shape=(2,))
 
@@ -446,6 +492,26 @@ def test_commit_trims_the_request_mapping_to_the_batch(pla_sdk):
             ),
         ),
     ]
+
+
+def test_commit_bounds_token_capacity_by_the_committed_batch(pla_sdk):
+    capacities = []
+    context = pla_sdk().PLAKDAReplayCommitContext(
+        NS(
+            commit=lambda *args, token_capacity, **kw: capacities.append(
+                token_capacity
+            )
+        ),
+        spec_query_len=4,
+    )
+
+    context.commit("accepted", NS(shape=(2,)), "qsl")
+    context.commit("accepted", NS(shape=(3,)), "qsl")
+    context.commit("accepted", NS(shape=(0,)), "qsl")
+
+    # batch * spec_query_len is an upper bound on the verify token count, so
+    # PLA's plan never skips a committed query interval.
+    assert capacities == [8, 12]
 
 
 def enable_recoverssm(self, config):

@@ -46,8 +46,9 @@ def get_pla_kda_replay() -> ModuleType | None:
 class PLAKDAReplayCommitContext:
     """Upstream's RecoverSSM commit-context interface over PLA replay commit."""
 
-    def __init__(self, context) -> None:
+    def __init__(self, context, spec_query_len: int) -> None:
         self._context = context
+        self._spec_query_len = spec_query_len
 
     @classmethod
     def create(
@@ -75,7 +76,8 @@ class PLAKDAReplayCommitContext:
                 max_num_reqs=max_num_reqs,
                 conv_state_layout=conv_state_layout,
                 null_block_id=null_block_id,
-            )
+            ),
+            spec_query_len,
         )
 
     def commit(
@@ -96,6 +98,12 @@ class PLAKDAReplayCommitContext:
         # exactly one request row per committed query.
         if request_indices is not None:
             request_indices = request_indices[:batch]
+        # PLA requires the verify projection's token count and skips query
+        # intervals beyond it. Commit only sees device tensors, and a value
+        # stashed at verify time would be stale under CUDA-graph replay, so
+        # pass the batch * spec_query_len upper bound instead: every committed
+        # request holds at most spec_query_len rows, so the bound never skips
+        # a real interval.
         self._context.commit(
             num_accepted_tokens,
             state_indices,
@@ -104,4 +112,5 @@ class PLAKDAReplayCommitContext:
             block_table=block_table,
             num_computed_tokens=num_computed_tokens,
             mamba_block_size=mamba_block_size,
+            token_capacity=batch * self._spec_query_len,
         )
