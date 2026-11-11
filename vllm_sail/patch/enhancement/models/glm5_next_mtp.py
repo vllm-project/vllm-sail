@@ -104,13 +104,20 @@ def _enable_supports_quant() -> None:
         )
         return
 
+    # Recorded as a value install against the class rather than
+    # ``Glm5NextMTP.__bases__``: the patch inventory gate only resolves a
+    # hand-written ``PatchRecord`` whose ``kind`` is "value" and whose target is
+    # declared by the pinned source, and ``__bases__`` is a runtime attribute of
+    # every class that no source declares. Naming the class keeps the record
+    # checkable, the shape ``residual/kernel_moe_backend_literal`` already uses
+    # for a non-callable target.
     PATCH_REGISTRY.append(
         PatchRecord(
-            target=f"{_MTP_MODULE}.Glm5NextMTP.__bases__",
+            target=f"{_MTP_MODULE}.Glm5NextMTP",
             reason=_BASES_REASON,
             affected_versions=_AFFECTED,
             remove_when=_BASES_REMOVE_WHEN,
-            kind="class",
+            kind="value",
             was_missing=False,
         )
     )
@@ -136,7 +143,7 @@ def _enable_packed_modules_mapping() -> None:
             reason=_PACKED_REASON,
             affected_versions=_AFFECTED,
             remove_when=_PACKED_REMOVE_WHEN,
-            kind="class",
+            kind="value",
             was_missing=True,
         )
     )
