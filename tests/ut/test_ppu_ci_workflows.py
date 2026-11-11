@@ -215,8 +215,7 @@ def test_executor_separates_read_only_pr_execution_and_always_reporting():
         "_ppu-upstream-reuse.yaml",
         "ppu-ops-tests.yaml",
         "ppu-debug.yaml",
-        "ppu-wheels.yaml",
-        "ppu-test-sweep.yaml",
+        "ppu-accuracy-nightly.yaml",
         "kernel-perf-label.yaml",
         "perf-regression.yaml",
     ],
@@ -558,7 +557,7 @@ SWEEP_LANES = ("build", "pr-lanes", "kernel-perf", "select", "accuracy")
 def test_test_sweep_summary_only_tolerates_lanes_switched_off(
     changes, run_kernel_perf, run_accuracy, returncode
 ):
-    step = workflow("ppu-test-sweep.yaml")["jobs"]["summary"]["steps"][0]
+    step = workflow("ppu-debug.yaml")["jobs"]["summary"]["steps"][0]
     script = step["run"].replace(
         "python - <<'PYTHON'", f"{sys.executable} - <<'PYTHON'"
     )
@@ -636,90 +635,40 @@ def test_ops_manual_entry_structure():
 
 def test_debug_structure():
     config = workflow("ppu-debug.yaml")
-    assert config["name"] == "PPU debug"
+    assert config["name"] == "PPU test sweep"
     assert set(config[True]) == {"workflow_dispatch"}
     inputs = config[True]["workflow_dispatch"]["inputs"]
-    assert set(inputs) == {
-        "build_run_id",
-        "wheel_source_sha",
-        "target",
-        "models",
-        "accuracy_models",
-    }
-    assert inputs["build_run_id"]["type"] == "string"
-    assert inputs["build_run_id"]["required"] is True
-    assert inputs["wheel_source_sha"]["type"] == "string"
-    assert inputs["wheel_source_sha"]["required"] is True
-    assert inputs["target"]["type"] == "choice"
-    assert inputs["target"]["options"] == [
-        "both",
-        "pin-ut",
-        "model-tests",
-        "accuracy-tests",
-        "kernel-perf",
-    ]
-    assert inputs["target"]["default"] == "both"
-    assert inputs["models"]["type"] == "string"
-    assert inputs["models"]["default"] == "qwen3.8-27b-m890p"
+    assert set(inputs) == {"run_kernel_perf", "run_accuracy", "accuracy_models"}
+    for name in ("run_kernel_perf", "run_accuracy"):
+        assert inputs[name]["type"] == "boolean"
+        assert inputs[name]["default"] is True
     assert inputs["accuracy_models"]["type"] == "string"
-    assert inputs["accuracy_models"]["default"] == "deepseek-v4-mxfp4"
-    assert "concurrency" not in config
-    jobs = config["jobs"]
-    expected_jobs = {
-        "pin-unit-tests": (
-            "inputs.target == 'both' || inputs.target == 'pin-ut'",
-            "_ppu-pin-ut.yaml",
-            {},
-        ),
-        "model-tests": (
-            "inputs.target == 'both' || inputs.target == 'model-tests'",
-            "_ppu-model-tests.yaml",
-            {"models": "${{ inputs.models }}"},
-        ),
-        "accuracy-tests": (
-            "inputs.target == 'accuracy-tests'",
-            "_ppu-accuracy-tests.yaml",
-            {"models": "${{ inputs.accuracy_models }}"},
-        ),
-        "kernel-perf": (
-            "inputs.target == 'both' || inputs.target == 'kernel-perf'",
-            "_ppu-kernel-perf.yaml",
-            {},
-        ),
+    assert inputs["accuracy_models"]["default"] == ""
+    assert not inputs["accuracy_models"]["required"]
+    assert config["concurrency"] == {
+        "group": "ppu-test-sweep-${{ github.ref }}",
+        "cancel-in-progress": False,
     }
-    assert set(jobs) == set(expected_jobs)
-    for job_id, (condition, target, extra_inputs) in expected_jobs.items():
-        job = jobs[job_id]
-        assert job["if"] == condition
-        assert "needs" not in job
-        assert job["uses"] == f"./.github/workflows/{target}"
-        assert job["with"] == {
-            "pr_mode": False,
-            "build_run_id": "${{ inputs.build_run_id }}",
-            "wheel_source_sha": "${{ inputs.wheel_source_sha }}",
-            **extra_inputs,
-        }
 
 
-def test_wheel_build_entry_matches_the_accuracy_nightly_build():
-    config = workflow("ppu-wheels.yaml")
+def test_accuracy_entry_builds_only_wheels_under_the_existing_path():
+    config = workflow("ppu-accuracy-nightly.yaml")
     assert config["name"] == "PPU wheels"
     assert set(config[True]) == {"workflow_dispatch"}
+    assert config[True]["workflow_dispatch"] is None
     assert set(config["jobs"]) == {"build"}
     build = config["jobs"]["build"]
-    nightly = workflow("ppu-accuracy-nightly.yaml")["jobs"]["build"]
-    # The build-only entry must keep producing exactly the nightly's wheels.
-    assert build["uses"] == nightly["uses"]
     assert build["uses"] == "./.github/workflows/ppu-build-and-test.yaml"
-    assert build["with"] == nightly["with"]
     assert build["with"] == {
         "pr_head_sha": "${{ github.sha }}",
         "skip_device_tests": True,
     }
+    assert not (WORKFLOWS / "ppu-wheels.yaml").exists()
+    assert not (WORKFLOWS / "ppu-test-sweep.yaml").exists()
 
 
-def test_test_sweep_runs_each_lane_on_one_build():
-    config = workflow("ppu-test-sweep.yaml")
+def test_debug_sweep_runs_each_lane_on_one_build():
+    config = workflow("ppu-debug.yaml")
     assert config["name"] == "PPU test sweep"
     assert set(config[True]) == {"workflow_dispatch"}
     inputs = config[True]["workflow_dispatch"]["inputs"]
@@ -759,14 +708,24 @@ def test_test_sweep_runs_each_lane_on_one_build():
     }
     select = jobs["select"]
     assert select["if"] == "inputs.run_accuracy"
-    assert select["steps"][-1]["run"] == nightly["select"]["steps"][-1]["run"]
+    assert select["outputs"] == {"matrix": "${{ steps.select.outputs.matrix }}"}
     assert select["steps"][-1]["env"] == {"MODELS": "${{ inputs.accuracy_models }}"}
     accuracy = jobs["accuracy"]
     assert accuracy["needs"] == ["build", "select"]
     assert accuracy["if"] == "inputs.run_accuracy"
-    # The accuracy lane stays the nightly's serialized one, case by case.
-    for key in ("uses", "strategy", "with"):
-        assert accuracy[key] == nightly["accuracy"][key], key
+    assert accuracy["uses"] == "./.github/workflows/_ppu-accuracy-tests.yaml"
+    assert accuracy["strategy"] == {
+        "fail-fast": False,
+        "max-parallel": 1,
+        "matrix": "${{ fromJson(needs.select.outputs.matrix) }}",
+    }
+    assert accuracy["with"] == {
+        "pr_mode": False,
+        "pr_head_sha": "${{ github.sha }}",
+        "wheel_source_sha": "${{ github.sha }}",
+        "build_run_id": "${{ github.run_id }}",
+        "models": "${{ matrix.model }}",
+    }
     summary = jobs["summary"]
     assert summary["if"] == "always()"
     assert set(summary["needs"]) == set(jobs) - {"summary"}
@@ -1050,24 +1009,20 @@ def test_preview_jobs_skip_without_an_active_ci_preview_label(labels, draft):
 
 
 @pytest.mark.parametrize(
-    "target,expected",
-    [
-        ("both", (True, True, True)),
-        ("pin-ut", (True, False, False)),
-        ("model-tests", (False, True, False)),
-        ("kernel-perf", (False, False, True)),
-    ],
+    "run_kernel_perf,run_accuracy", itertools.product((False, True), repeat=2)
 )
-def test_debug_targets_select_requested_consumers(target, expected):
+def test_debug_switches_select_requested_consumers(run_kernel_perf, run_accuracy):
     jobs = workflow("ppu-debug.yaml")["jobs"]
-    context = {"inputs.target": target}
-    assert (
-        tuple(
-            bool(expression(jobs[job_id]["if"], context))
-            for job_id in ("pin-unit-tests", "model-tests", "kernel-perf")
-        )
-        == expected
-    )
+    context = {
+        "inputs.run_kernel_perf": run_kernel_perf,
+        "inputs.run_accuracy": run_accuracy,
+    }
+    assert tuple(
+        bool(expression(jobs[job_id]["if"], context))
+        for job_id in ("kernel-perf", "select", "accuracy")
+    ) == (run_kernel_perf, run_accuracy, run_accuracy)
+    assert "if" not in jobs["build"]
+    assert "if" not in jobs["pr-lanes"]
 
 
 def test_pr_wheel_verification_runs_inside_the_runtime_container():
@@ -1974,12 +1929,11 @@ def test_perf_regression_avoids_source_shadowing():
 # --- debug workflow still includes kernel-perf ---------------------------------
 
 
-def test_debug_workflow_retains_kernel_perf_target():
+def test_debug_workflow_retains_kernel_perf_lane():
     config = workflow("ppu-debug.yaml")
     assert "kernel-perf" in config["jobs"]
     kp = config["jobs"]["kernel-perf"]
     assert kp["uses"] == "./.github/workflows/_ppu-kernel-perf.yaml"
-    assert (
-        "kernel-perf"
-        in config[True]["workflow_dispatch"]["inputs"]["target"]["options"]
-    )
+    assert kp["if"] == "inputs.run_kernel_perf"
+    assert config[True]["workflow_dispatch"]["inputs"]["run_kernel_perf"]["default"]
+    assert "target" not in config[True]["workflow_dispatch"]["inputs"]

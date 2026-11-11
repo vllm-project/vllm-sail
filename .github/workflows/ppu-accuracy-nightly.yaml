@@ -1,150 +1,33 @@
-name: PPU accuracy nightly
+name: PPU wheels
 
-# Nightly GSM8K accuracy regression for the model-precision E2E gate
-# (CI plan category 3). Accuracy stays outside the per-PR gate: this entry
-# point builds wheels from the main commit it was triggered on and calls
-# _ppu-accuracy-tests.yaml once per accuracy entry in the checked-in catalog.
+# Builds the PPU wheels exactly as the build job of ppu-accuracy-nightly.yaml
+# does and runs nothing else. It calls ppu-build-and-test.yaml with
+# skip_device_tests, so only the short runtime-image preflight touches an
+# 8-ppu-m890p host; the wheel build itself uses a hosted runner. The run uploads
+# ppu-wheels-<run_id> and ppu-build-diagnostics-<run_id> (14-day retention),
+# which PPU debug can test without rebuilding.
 #
-#   build    -- reuse ppu-build-and-test.yaml for the wheel build alone. It is
-#               called with skip_device_tests so the pin-UT and model-smoke
-#               lanes stay with the per-PR gate instead of competing for the
-#               same 8-ppu-m890p hosts the accuracy lane needs.
-#               Resolving "the newest successful build" instead does not work:
-#               ppu-build-and-test.yaml exposes no workflow_dispatch entry, and
-#               the runs its workflow_call produces belong to the caller, so
-#               the only rows it lists are pull_request previews. Picking the
-#               newest of those pinned this lane to a preview from days ago,
-#               whose checkout predates every fix merged since.
-#   select   -- expand the catalog into the accuracy matrix. It depends on
-#               nothing but the repository, so it runs alongside the build.
-#   accuracy -- one reusable call per model. A single model already needs all
-#               eight devices and ppu_runtime_container.sh takes an exclusive
-#               flock on the runner, so max-parallel stays at 1; the catalog
-#               currently has eight accuracy cases, i.e. most of a day.
-#
-# What the lane gates on
-#   * the reviewed golden under tests/e2e/models/_golden when one exists
-#     (score inside the checkpoint's band);
-#   * score >= threshold (0.9) for a checkpoint that has no golden yet.
-#     ppu_e2e_accuracy.sh seeds the read-only golden directory into the
-#     writable results tree before evaluating, and a model without a golden
-#     only reports "created" and uploads a *.pending-review.json artifact for
-#     a human to promote into the repository.
-#
-# Chip coverage: the lane runs on the self-hosted 8-ppu-m890p runner and uses
-# whatever devices that host exposes, so deepseek-v4-int8 (catalog board
-# OAM-810E) exercises the ZW-M890P int8 path here and its golden is bound to
-# that chip. A true 810E lane needs the ppu-scheduler-action route the kernel
-# and perf lanes use, which the local Docker wrapper cannot provide.
-#
-# Schedule: 12:00 UTC = 20:00 CST. The serial accuracy cases are long, so the
-# window is chosen only to start ahead of the 18:30 UTC upstream-reuse and
-# 20:00 UTC perf lanes; the run does not wait for them.
+# Like the accuracy nightly this workflow is read-only: it uses no secrets, no
+# Environment and no write permission, and it publishes nothing.
 
 on:
   workflow_dispatch:
-    inputs:
-      models:
-        description: "Comma-separated accuracy catalog keys (blank = every accuracy entry)"
-        required: false
-        default: ""
-        type: string
-
-  schedule:
-    - cron: "0 12 * * *"
 
 permissions:
   contents: read
-  # Downloading the wheels the build job of this same run uploaded needs this.
   actions: read
+cache-mode: none
 
 concurrency:
-  # Cancelling would throw away a finished build and the serial model runs
-  # behind it, so a second nightly waits instead of replacing the first.
-  group: accuracy-nightly-${{ github.ref }}
+  group: ppu-wheels-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
   build:
-    name: Build nightly wheels
+    name: Build wheels
     uses: ./.github/workflows/ppu-build-and-test.yaml
     with:
-      # github.sha is the main commit this run was triggered on, and the same
-      # value goes to the accuracy calls below, so the checkout and the wheel
-      # manifest describe one tree.
+      # github.sha is the commit this run was dispatched on, so the checkout
+      # and the wheel manifest describe one tree.
       pr_head_sha: ${{ github.sha }}
       skip_device_tests: true
-
-  select:
-    name: Select accuracy models
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    outputs:
-      matrix: ${{ steps.select.outputs.matrix }}
-    steps:
-      - name: Check out vLLM SAIL
-        uses: actions/checkout@v4
-        with:
-          persist-credentials: false
-
-      - name: Select accuracy models
-        id: select
-        env:
-          MODELS: ${{ inputs.models }}
-        run: |
-          python3 - <<'PY'
-          import importlib.util
-          import json
-          import os
-          import sys
-          from pathlib import Path
-
-          spec = importlib.util.spec_from_file_location(
-              "ppu_e2e_select", Path("scripts/ci/ppu_e2e_select.py")
-          )
-          select = importlib.util.module_from_spec(spec)
-          spec.loader.exec_module(select)
-
-          catalog = json.loads(select.CATALOG.read_text())
-          requested = os.environ.get("MODELS", "")
-          try:
-              selected = select.build_accuracy_matrix(catalog, requested)["include"]
-          except ValueError as error:
-              # A typo in the dispatch input must fail the run, not crash it.
-              sys.exit(str(error))
-          # The reusable call takes catalog keys, so hand it the case id: it is
-          # the catalog key and the only label that stays unique when two cases
-          # exercise one checkpoint with different serve arguments.
-          include = [{"model": entry["case_id"]} for entry in selected]
-          if not include:
-              sys.exit(f"no accuracy model selected by MODELS={requested!r}")
-
-          matrix = json.dumps({"include": include}, separators=(",", ":"))
-          print(f"accuracy matrix: {matrix}")
-          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as handle:
-              handle.write(f"matrix={matrix}\n")
-          PY
-
-  accuracy:
-    name: Accuracy ${{ matrix.model }}
-    needs: [build, select]
-    permissions:
-      contents: read
-      actions: read
-    strategy:
-      fail-fast: false
-      # Every model needs all eight devices and the runtime wrapper holds an
-      # exclusive flock on the runner, so a second concurrent lane aborts.
-      max-parallel: 1
-      matrix: ${{ fromJson(needs.select.outputs.matrix) }}
-    uses: ./.github/workflows/_ppu-accuracy-tests.yaml
-    with:
-      pr_mode: false
-      # Reuse the exact SAIL commit the wheels were built from; the wrapper
-      # refuses a checkout that disagrees with the wheel manifest.
-      pr_head_sha: ${{ github.sha }}
-      wheel_source_sha: ${{ github.sha }}
-      # _ppu-build.yaml names the artifact after the run that uploaded it,
-      # which for a workflow_call is this nightly run.
-      build_run_id: ${{ github.run_id }}
-      models: ${{ matrix.model }}

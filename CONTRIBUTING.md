@@ -116,12 +116,17 @@ run separately on GitHub-hosted runners using default-branch code.
 CPU checks still run automatically. The formal `PPU CI` check for PRs is requested
 through the commands above; opening a PR or pushing a commit does not start it.
 Manually dispatch PPU ops tests (`ppu-ops-tests.yaml`) in GitHub Actions for
-operator tests. Dispatch PPU debug (`ppu-debug.yaml`) to rerun pin UT and/or
-model tests on existing builds. PPU wheels (`ppu-wheels.yaml`) builds the
-accuracy nightly's wheels without any device test, and PPU test sweep
-(`ppu-test-sweep.yaml`) runs every M890 lane that has a working runner (pin UT,
-model smoke, upstream reuse, kernel perf and accuracy) on one build. Operator
-tests and 810E are not part of the sweep.
+operator tests. PPU wheels (`ppu-accuracy-nightly.yaml`) now builds wheels
+without any device test; the former scheduled accuracy run is disabled.
+PPU test sweep (`ppu-debug.yaml`) builds fresh wheels and runs the M890 lanes
+(pin UT, model smoke, upstream reuse, kernel perf and accuracy) on that build.
+`run_kernel_perf` and `run_accuracy` can disable the optional lanes;
+`accuracy_models` selects accuracy catalog keys (blank means all).
+The former debug `build_run_id`, `wheel_source_sha`, `target` and `models`
+inputs are no longer used. Operator tests, 810E and uncatalogued device tests
+are not part of the sweep. The existing workflow paths are retained so a
+manual dispatch can select a branch before these changes merge; the branch
+must contain the updated workflow definitions.
 
 The formal command path intentionally loads its executor from the default
 branch, so `/ci run` tests PR source but cannot exercise workflow definitions
