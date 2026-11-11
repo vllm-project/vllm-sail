@@ -19,7 +19,8 @@ INT4-MoE/INT8-dense checkpoint: q_a 2171x, kv_a 1519x, q_b 1155x, o_proj
 1207x), the attention scores saturate and the residual stream grows from 0.008
 to ~2500 rms over the 11 DSA layers -> garbled first token.
 
-The replacement below is the upstream function with three additions:
+The replacement below is the upstream function with three additions, plus one
+installation step:
 
 * ``int8`` weights are accepted by ``is_weight`` and dequantised with their
   per-channel scale (``weight.float() * scale``) before being handed to the
@@ -30,12 +31,19 @@ The replacement below is the upstream function with three additions:
 * when the target parameter is itself quantised (``weight_scale_inv`` or
   ``weight_scale`` present), both the weight and its scale are handed back to
   the regular quantised loader instead of being dequantised.
+* :data:`_CONSUMERS` lists the modules that bind the helper by name at import
+  time (the MTP draft does ``from .model import _try_load_fp8_attn_proj``).
+  The module-level loop at the bottom imports them and rebinds only the ones
+  still holding the original, so a consumer imported before this patch
+  registered is fixed too.
 
 The FP8 block-dequant path, the NoPE kv_a padding and the loading order are
 unchanged.
 """
 
 from __future__ import annotations
+
+import importlib
 
 import torch
 from vllm.models.glm5next.common import model as _glm5next_model
@@ -49,6 +57,11 @@ logger = _glm5next_model.logger
 
 _AFFECTED = ">=0.31.0,<0.32.0"
 _MODULE = "vllm.models.glm5next.common.model"
+#: Modules that bind the helper by name at import time; the MTP draft loads
+#: through its own binding, so it needs the alias rewritten as well. The pinned
+#: 0.31 upstream has the draft only under ``common`` - ``nvidia`` and ``amd``
+#: carry no ``mtp`` module - so listing a platform copy here would be dead code.
+_CONSUMERS = ("vllm.models.glm5next.common.mtp",)
 
 _upstream_try_load_fp8_attn_proj = _glm5next_model._try_load_fp8_attn_proj
 _upstream_dequant_fp8_block = _glm5next_model._dequant_fp8_block
@@ -197,3 +210,40 @@ def _try_load_fp8_attn_proj(
         param.weight_loader(param, weight_bf16, shard_id)
     loaded_params.add(target_w)
     return True
+
+
+# The MTP draft binds this helper with ``from .model import ...``, so a consumer
+# module imported before this registration keeps the original object. That path
+# only knows the block-FP8 map, so a per-output-channel FP8 export reaches the
+# block dequant with an ``[out, 1]`` scale, derives a block size equal to the
+# input width and dies on a broadcast RuntimeError while the draft layer loads
+# -- the same checkpoint loads through the text tower without trouble. Import
+# the consumers here so the rebinding, and the patch inventory, never depend on
+# which module happened to be imported first; a runtime without the draft
+# family simply skips it.
+for _consumer_name in _CONSUMERS:
+    try:
+        _consumer = importlib.import_module(_consumer_name)
+    except ImportError:
+        continue
+    if getattr(_consumer, "_try_load_fp8_attn_proj", None) is not (
+        _upstream_try_load_fp8_attn_proj
+    ):
+        continue
+    patch(
+        _consumer_name,
+        "_try_load_fp8_attn_proj",
+        reason=(
+            "The MTP draft binds this helper by name at import time, so an "
+            "already-imported consumer keeps the block-FP8-only original "
+            "and cannot load a per-output-channel FP8 projection: the "
+            "broadcast dies on the whole-layer scale. Rebind the alias to "
+            "the same replacement the model module got."
+        ),
+        affected_versions=_AFFECTED,
+        remove_when=(
+            "upstream glm5next calls this helper through the model module "
+            "instead of an import-time alias, or handles per-channel FP8 "
+            "MLA projections natively."
+        ),
+    )(_try_load_fp8_attn_proj)
