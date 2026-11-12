@@ -42,6 +42,11 @@ def install() -> None:
     if _installed or not is_enabled():
         return
 
+    # Norm 独立安装，其他 instrumentation 漂移或缺少 PyPI nvtx 不影响它。
+    from vllm_sail.profiling.step5_norm import install as install_norm
+
+    install_norm()
+
     try:
         import nvtx  # noqa: F401
     except ImportError:

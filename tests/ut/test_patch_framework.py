@@ -22,6 +22,21 @@ def throwaway_module(monkeypatch: pytest.MonkeyPatch) -> Iterator[types.ModuleTy
     yield module
 
 
+def test_module_fixture_uses_imported_package_python(modules):
+    from pathlib import Path
+    from tests.support.modules import load_patch
+    from tests.support.source import PACKAGE_ROOT
+
+    # 模拟模块树也必须执行 wheel Python，不能只核对正常 import 的路径。
+    bodies = sys.modules["vllm_sail.patch.bodies"]
+    assert Path(bodies.bind_body.__code__.co_filename).resolve().is_relative_to(PACKAGE_ROOT)
+    package = modules("vllm_sail")
+    assert package.__path__ == [str(PACKAGE_ROOT / "vllm_sail")]
+    module = load_patch("vllm_sail/envs.py")
+    assert Path(module.__file__).resolve() == PACKAGE_ROOT / "vllm_sail/envs.py"
+    assert module.VLLM_SAIL_STEP5_DSA_PREFILL_BACKEND == "flashinfer"
+
+
 def metadata() -> dict[str, str]:
     return {
         "reason": "exercise the patch contract",

@@ -48,7 +48,14 @@ if TYPE_CHECKING:
     VLLM_SAIL_ENABLE_FP8_TO_INT8: bool = False
     VLLM_SAIL_KPOOL_DECODE_LOGITS: str = "non_paged"
     VLLM_SAIL_KPOOL_MAX_DENSE_POOLS: int = 1 << 21
+    VLLM_SAIL_STEP5_DSA_SCORES: bool = False
+    VLLM_SAIL_STEP5_DSA_SELECTOR_PPU: bool = False
+    VLLM_SAIL_STEP5_DSA_PREFILL_PPU: bool = False
+    VLLM_SAIL_STEP5_DSA_PREFILL_BACKEND: str = "flashinfer"
+    VLLM_SAIL_STEP5_DSA_PREFILL_BATCH_ATTENTION: bool = False
+    VLLM_STEP5_INDEXER_FP8_AS_FP16: bool = False
     VLLM_SAIL_NVTX_PROFILE: bool = False
+    VLLM_SAIL_NVTX_DUMP_DICT: bool = False
     VLLM_SAIL_NVTX_DUMP_TOPK: bool = False
     VLLM_SAIL_NVTX_VFA_DUMP_SEQLEN: bool = False
     VLLM_DEEPEPLL_RECV_HOOK: bool = True
@@ -70,7 +77,13 @@ if TYPE_CHECKING:
     VLLM_PPU_USE_TRITON_INT8_QUANT: bool = True
     VLLM_PPU_FP8_LOAD_POLICY: str | None = None
     VLLM_PPU_ENABLE_FP8_TO_INT8: bool = False
+    VLLM_PPU_STEP5_DSA_SCORES: bool = False
+    VLLM_PPU_STEP5_DSA_SELECTOR_PPU: bool = False
+    VLLM_PPU_STEP5_DSA_PREFILL_PPU: bool = False
+    VLLM_PPU_STEP5_DSA_PREFILL_BACKEND: str = "flashinfer"
+    VLLM_PPU_STEP5_DSA_PREFILL_BATCH_ATTENTION: bool = False
     VLLM_PPU_NVTX_PROFILE: bool = False
+    VLLM_PPU_NVTX_DUMP_DICT: bool = False
     VLLM_PPU_NVTX_DUMP_TOPK: bool = False
     VLLM_PPU_NVTX_VFA_DUMP_SEQLEN: bool = False
 
@@ -80,6 +93,7 @@ _TRUTHY = ("true", "1", "yes", "on")
 GEMM_BACKENDS = ("deepgemm", "acext", "triton")
 GDN_DECODE_KERNELS = ("auto", "cuda", "pla", "triton")
 KPOOL_DECODE_LOGITS_BACKENDS = ("non_paged",)
+STEP5_PREFILL_BACKENDS = ("flashinfer", "native")
 
 
 def _env_names(name: str) -> tuple[str, ...]:
@@ -104,6 +118,23 @@ def _bool(name: str, default: bool) -> Callable[[], bool]:
         if raw is None:
             return default
         return raw.strip().lower() in _TRUTHY
+
+    return _get
+
+
+def _int(name: str, default: int) -> Callable[[], int]:
+    """Read an integer env var, falling back to aliases only when unset."""
+
+    def _get() -> int:
+        source, raw = _read_env(name)
+        if raw is None or raw.strip() == "":
+            return default
+        try:
+            return int(raw.strip())
+        except ValueError:
+            raise ValueError(
+                f"Invalid value {raw!r} for {source}. Expected an integer."
+            ) from None
 
     return _get
 
@@ -206,6 +237,29 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_SAIL_KPOOL_MAX_DENSE_POOLS": _positive_int(
         "VLLM_SAIL_KPOOL_MAX_DENSE_POOLS", 1 << 21
     ),
+    # -- Step5 DSA ----------------------------------------------------------
+    # Route the Step5 DSA indexer scoring kernel to the resident-block Triton
+    # implementation in vllm_sail/models/step5/ops/. Read on every call. Off by
+    # default: upstream's kernel stays the reference until validated per model.
+    "VLLM_SAIL_STEP5_DSA_SCORES": _bool("VLLM_SAIL_STEP5_DSA_SCORES", False),
+    # 保留 per_row 默认；仅显式启用新的 selector。
+    "VLLM_SAIL_STEP5_DSA_SELECTOR_PPU": _bool("VLLM_SAIL_STEP5_DSA_SELECTOR_PPU", False),
+    # 在 prefill metadata planning 时选择 native paged attention。
+    "VLLM_SAIL_STEP5_DSA_PREFILL_PPU": _bool(
+        "VLLM_SAIL_STEP5_DSA_PREFILL_PPU", False
+    ),
+    # 默认仍为 FlashInfer；native 显式启用新版 prefill/decode，旧 v023 配置报错。
+    "VLLM_SAIL_STEP5_DSA_PREFILL_BACKEND": _choice(
+        "VLLM_SAIL_STEP5_DSA_PREFILL_BACKEND", "flashinfer", STEP5_PREFILL_BACKENDS
+    ),
+    # indexer 仍分块；仅显式 native 路线可在 finish 合批执行 attention。
+    "VLLM_SAIL_STEP5_DSA_PREFILL_BATCH_ATTENTION": _bool(
+        "VLLM_SAIL_STEP5_DSA_PREFILL_BATCH_ATTENTION", False
+    ),
+    # 0：E4M3 字节；1：E4M3 量化值存 FP16，使用 FP16 MMA。
+    # FP16 summary cache 容量翻倍；保留 Step5 fork 的变量名。
+    # 惰性读取，服务启动前设置且运行时不改变。
+    "VLLM_STEP5_INDEXER_FP8_AS_FP16": _bool("VLLM_STEP5_INDEXER_FP8_AS_FP16", False),
     # -- Attention / linear attention --------------------------------------
     # Legacy getter only. Current PLA/Triton dispatch uses VLLM_SAIL_USE_PLA.
     "VLLM_SAIL_FUSED_GDN_DECODE": _bool("VLLM_SAIL_FUSED_GDN_DECODE", True),
@@ -220,6 +274,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
         "VLLM_SAIL_NVTX_PROFILE",
         False,
     ),
+    # Step5 forward 字典参数仅展开张量的 shape/dtype，不读取设备值。
+    "VLLM_SAIL_NVTX_DUMP_DICT": _bool("VLLM_SAIL_NVTX_DUMP_DICT", False),
     "VLLM_SAIL_NVTX_DUMP_TOPK": _bool("VLLM_SAIL_NVTX_DUMP_TOPK", False),
     "VLLM_SAIL_NVTX_VFA_DUMP_SEQLEN": _bool(
         "VLLM_SAIL_NVTX_VFA_DUMP_SEQLEN",
@@ -228,8 +284,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
 }
 
 # All plugin variables retain the corresponding PPU spelling. The shared
-# upstream VLLM_DEEPEPLL_RECV_HOOK and VLLM_GDN_DECODE_KERNEL keep their names
-# and have no plugin aliases.
+# upstream VLLM_DEEPEPLL_RECV_HOOK and VLLM_GDN_DECODE_KERNEL, and the Step5
+# fork's VLLM_STEP5_INDEXER_FP8_AS_FP16, keep their names and have no plugin
+# aliases.
 _aliases: dict[str, tuple[str, ...]] = {
     name: (name.replace("VLLM_SAIL_", "VLLM_PPU_", 1),)
     for name in environment_variables
@@ -258,7 +315,10 @@ def is_set(name: str) -> bool:
     Backend selection distinguishes "user asked for X" from "user did not
     choose", so this is not the same as comparing against the default.
     """
-    return any(candidate in os.environ for candidate in _env_names(name))
+    canonical = _canonical_names.get(name, name)
+    return canonical in environment_variables and any(
+        candidate in os.environ for candidate in _env_names(canonical)
+    )
 
 
 def snapshot() -> dict[str, Any]:

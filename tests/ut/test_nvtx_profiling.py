@@ -250,6 +250,12 @@ def profiling_pkg(fake_vllm: SimpleNamespace, monkeypatch: pytest.MonkeyPatch):
         "moe",
     ):
         monkeypatch.delattr(module, attr, raising=False)
+    # Step5 Norm instrumentation 由 test_step5_norm_profiling 覆盖；这里替换成桩，
+    # 避免真实上游 Step5RMSNorm 被 patch 并计入 PATCH_REGISTRY。
+    norm = types.ModuleType("vllm_sail.profiling.step5_norm")
+    norm.install = lambda: False
+    monkeypatch.setitem(sys.modules, norm.__name__, norm)
+    monkeypatch.setattr(module, "step5_norm", norm, raising=False)
     monkeypatch.setattr(module, "_installed", False)
     return module
 
