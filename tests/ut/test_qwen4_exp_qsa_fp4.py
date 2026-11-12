@@ -27,6 +27,9 @@ import pytest
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 PREPARE_FP4 = ROOT / "vllm_sail" / "models" / "qwen4_exp" / "ops" / "qsa_prepare_fp4.py"
+PATCH_FILE = (
+    ROOT / "vllm_sail" / "patch" / "enhancement" / "models" / "qwen4_exp_qsa_fp4.py"
+)
 UPSTREAM_PREPARE = "vllm/models/qwen4_exp/nvidia/ops/qsa_prepare.py"
 
 _PATCH_MODULE = "vllm_sail.patch.enhancement.models.qwen4_exp_qsa_fp4"
@@ -353,10 +356,14 @@ def qsa_fp4_patch():
     return owner
 
 
-def _is_ppu(value: bool):
-    from vllm.platforms import current_platform
+def _gate(patch_module, ppu_15: bool):
+    """Pin the patch module's generation gate.
 
-    return mock.patch.object(type(current_platform), "is_ppu", return_value=value)
+    ``is_ppu_15`` is ``functools.cache``d on a static device property, so the
+    value this host resolves would leak across tests; binding the module's own
+    name keeps each case independent.
+    """
+    return mock.patch.object(patch_module, "is_ppu_15", return_value=ppu_15)
 
 
 @pytest.mark.parametrize(
@@ -380,7 +387,7 @@ def _is_ppu(value: bool):
         ),
     ],
 )
-def test_scoring_wrappers_delegate_on_platform(
+def test_scoring_wrappers_delegate_on_the_chip_generation(
     qsa_fp4_patch, wrapper, upstream, fp4, monkeypatch
 ):
     calls: list[str] = []
@@ -390,10 +397,12 @@ def test_scoring_wrappers_delegate_on_platform(
         )
     body = getattr(qsa_fp4_patch, wrapper)
 
-    with _is_ppu(False):
+    # ZW-810E and a non-PPU host are one case to this module: neither has
+    # DeepGEMM's FP4 average kernels, so both keep upstream's Triton scorer.
+    with _gate(qsa_fp4_patch, False):
         assert body() is None and calls == ["upstream"]
     calls.clear()
-    with _is_ppu(True):
+    with _gate(qsa_fp4_patch, True):
         assert body() is None and calls == ["fp4"]
 
 
@@ -434,14 +443,22 @@ def test_compressed_cache_init_publishes_an_mxfp4_row(qsa_fp4_patch, monkeypatch
         "vllm_config": object(),
     }
 
-    with _is_ppu(False):
+    # ZW-810E keeps upstream's cache verbatim, so this patch is a no-op there
+    # rather than the model-load failure a bare is_ppu() gate used to cause.
+    with _gate(qsa_fp4_patch, False):
         init(object(), **kwargs)
     assert calls[-1]["head_size"] == 128
     assert calls[-1]["dtype"] is torch.bfloat16
     assert calls[-1]["compress_ratio"] == 1
     assert probes == []
 
-    with _is_ppu(True):
+    # Off 890P the indexer dtype is upstream's business, not ours.
+    with _gate(qsa_fp4_patch, False):
+        init(object(), **{**kwargs, "dtype": torch.float8_e4m3fn})
+    assert calls[-1]["dtype"] is torch.float8_e4m3fn
+    assert probes == []
+
+    with _gate(qsa_fp4_patch, True):
         init(object(), **kwargs, compress_ratio=4)
     assert calls[-1]["head_size"] == qsa_fp4_patch.MXFP4_ROW_BYTES
     assert calls[-1]["dtype"] is torch.uint8
@@ -450,7 +467,10 @@ def test_compressed_cache_init_publishes_an_mxfp4_row(qsa_fp4_patch, monkeypatch
 
     # The FP4 cache has no fp8 fallback: --indexer-kv-dtype fp8 must fail at
     # model load rather than bind a cache no scorer can read.
-    with _is_ppu(True), pytest.raises(NotImplementedError, match="indexer-kv-dtype"):
+    with (
+        _gate(qsa_fp4_patch, True),
+        pytest.raises(NotImplementedError, match="indexer-kv-dtype"),
+    ):
         init(object(), **{**kwargs, "dtype": torch.float8_e4m3fn})
 
 
@@ -475,7 +495,7 @@ def test_kernel_block_sizes_follow_the_fp4_page(qsa_fp4_patch):
         dtype=torch.bfloat16,
     )
 
-    with _is_ppu(True):
+    with _gate(qsa_fp4_patch, True):
         # One framework block is one FP4 page and DeepGEMM tiles KV in 64-row
         # compute blocks, so a compress_ratio of 4 pushes the block size to a
         # multiple of 256.
@@ -483,5 +503,19 @@ def test_kernel_block_sizes_follow_the_fp4_page(qsa_fp4_patch):
         # The raw key ring is bf16 and never reaches an FP4 kernel.
         assert block_sizes(raw) == [MultipleOf(1)]
         assert block_sizes(None) == [MultipleOf(1)]
-    with _is_ppu(False):
+    with _gate(qsa_fp4_patch, False):
         assert block_sizes(compressed) == [MultipleOf(1)]
+
+
+def test_every_patch_point_gates_on_the_same_generation_predicate():
+    """The six patch points have to agree on one predicate.
+
+    ``test_capability_matrix.py`` already pins ``is_ppu_15()`` to ZW-M890P; this
+    guards the other half. A cache laid out for the MXFP4 scorer and read by
+    upstream's Triton one -- or the reverse -- corrupts silently instead of
+    raising, so a bare ``is_ppu()`` left at any single site is worse than no
+    gate at all.
+    """
+    source = PATCH_FILE.read_text(encoding="utf-8")
+    assert source.count("if not is_ppu_15():") == 6
+    assert "current_platform" not in source

@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Serve the Qwen4Exp QSA indexer's compressed key cache as MXFP4 on PPU.
+"""Serve the Qwen4Exp QSA indexer's compressed key cache as MXFP4 on ZW-M890P.
 
 DeepGEMM's FP4 average MQA logits kernels score the QSA indexer's compressed
 keys at roughly half the cache bandwidth of upstream's Triton kernels, but they
@@ -26,8 +26,16 @@ Queries stay bf16 and are packed inside the scoring functions, so
 
 The raw key cache is untouched: it feeds group pooling and is never scored.
 
-FP8 is not offered as a fallback. A build without DeepGEMM's FP4 average entry
-points fails at model load rather than silently serving a slower path.
+The route is gated on PPU 1.5 (ZW-M890P, capability ``(8, 9)``) rather than on
+PPU as a whole. ZW-810E is sm80-class with no native FP8, so it has no FP4
+average kernels to call; every patch point below therefore tests the same
+``is_ppu_15()`` predicate, because a cache laid out for one scorer and read by
+the other corrupts silently instead of raising. On 810E all six fall through to
+upstream, which is a bf16 compressed cache scored by Triton.
+
+FP8 is not offered as a fallback on 890P. A build there without DeepGEMM's FP4
+average entry points fails at model load rather than silently serving a slower
+path: that is a misconfigured wheel, not an unsupported chip.
 """
 
 from __future__ import annotations
@@ -59,6 +67,7 @@ from vllm_sail.models.qwen4_exp.ops.qsa_prepare_fp4 import (
     qsa_prepare as _fp4_qsa_prepare,
 )
 from vllm_sail.patch.utils import patch
+from vllm_sail.utils.deep_gemm import is_ppu_15
 
 _upstream_qsa_prepare = _qsa_prepare_ops.qsa_prepare
 _upstream_select_paged_decode = _qsa_indexer_ops.qsa_select_paged_decode
@@ -68,8 +77,8 @@ _upstream_warmup_paged_decode = _qsa_indexer_ops.warmup_qsa_mqa_paged_decode
 _AFFECTED = ">=0.32.0,<0.33.0"
 
 _FP8_REJECTED = (
-    "The Qwen4Exp QSA indexer stores its compressed key cache as MXFP4 on PPU, "
-    "so --indexer-kv-dtype fp8 has no effect here. Leave it at its bf16 "
+    "On ZW-M890P the Qwen4Exp QSA indexer stores its compressed key cache as "
+    "MXFP4, so --indexer-kv-dtype fp8 has no effect here. Leave it at its bf16 "
     "default; only the cache encoding changes, not the indexer's arithmetic."
 )
 
@@ -103,10 +112,9 @@ def __init__(
     vllm_config,
     compress_ratio: int = 1,
 ) -> None:
-    from vllm.platforms import current_platform
-
-    if not current_platform.is_ppu():
+    if not is_ppu_15():
         # Upstream defines no subclass __init__, so this is plain inheritance.
+        # ZW-810E lands here and keeps its bf16 cache and Triton scorer.
         _QSAIndexerCache.__init__(
             self,
             head_size=head_size,
@@ -155,9 +163,7 @@ def __init__(
 def get_supported_kernel_block_sizes(
     kv_cache_spec: KVCacheSpec | None = None,
 ) -> list[int | MultipleOf]:
-    from vllm.platforms import current_platform
-
-    if not current_platform.is_ppu():
+    if not is_ppu_15():
         return [MultipleOf(1)]
     if not isinstance(kv_cache_spec, MLAAttentionSpec):
         # The raw key ring is bf16 and never reaches an FP4 kernel.
@@ -196,9 +202,7 @@ def get_supported_kernel_block_sizes(
     ),
 )
 def qsa_prepare(*args, **kwargs):
-    from vllm.platforms import current_platform
-
-    if not current_platform.is_ppu():
+    if not is_ppu_15():
         return _upstream_qsa_prepare(*args, **kwargs)
     return _fp4_qsa_prepare(*args, **kwargs)
 
@@ -218,9 +222,7 @@ def qsa_prepare(*args, **kwargs):
     ),
 )
 def qsa_select_paged_decode(*args, **kwargs):
-    from vllm.platforms import current_platform
-
-    if not current_platform.is_ppu():
+    if not is_ppu_15():
         return _upstream_select_paged_decode(*args, **kwargs)
     return _fp4_select_paged_decode(*args, **kwargs)
 
@@ -241,9 +243,7 @@ def qsa_select_paged_decode(*args, **kwargs):
     ),
 )
 def qsa_select_paged_prefill(*args, **kwargs):
-    from vllm.platforms import current_platform
-
-    if not current_platform.is_ppu():
+    if not is_ppu_15():
         return _upstream_select_paged_prefill(*args, **kwargs)
     return _fp4_select_paged_prefill(*args, **kwargs)
 
@@ -252,10 +252,10 @@ def qsa_select_paged_prefill(*args, **kwargs):
     "vllm.models.qwen4_exp.nvidia.ops.qsa_indexer",
     "warmup_qsa_mqa_paged_decode",
     reason=(
-        "Upstream compiles its Triton decode specializations here. On PPU the "
-        "scoring kernels come from DeepGEMM and JIT at first call, which CUDA "
-        "graph capture cannot tolerate, so warm the FP4 paged, non-paged and "
-        "MXFP4 packing kernels for every capturable decode query length."
+        "Upstream compiles its Triton decode specializations here. On ZW-M890P "
+        "the scoring kernels come from DeepGEMM and JIT at first call, which "
+        "CUDA graph capture cannot tolerate, so warm the FP4 paged, non-paged "
+        "and MXFP4 packing kernels for every capturable decode query length."
     ),
     affected_versions=_AFFECTED,
     remove_when=(
@@ -264,8 +264,6 @@ def qsa_select_paged_prefill(*args, **kwargs):
     ),
 )
 def warmup_qsa_mqa_paged_decode(*args, **kwargs):
-    from vllm.platforms import current_platform
-
-    if not current_platform.is_ppu():
+    if not is_ppu_15():
         return _upstream_warmup_paged_decode(*args, **kwargs)
     return _fp4_warmup_paged_decode(*args, **kwargs)
