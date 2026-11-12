@@ -158,6 +158,48 @@ def test_decode_non_paged_glue(monkeypatch):
     assert ks.tolist() == [0, 5] and ke.tolist() == [5, 8]
 
 
+def test_large_decode_uses_per_request_paged_scores(monkeypatch):
+    monkeypatch.setenv("VLLM_SAIL_KPOOL_MAX_DENSE_POOLS", "1")
+    calls = {}
+    expected = object(), object(), object()
+
+    def paged(cache, q, weights, table, lengths, width):
+        calls.update(lengths=lengths.tolist(), width=width)
+        return expected
+
+    monkeypatch.setattr(kpool, "_decode_logits_paged_triton", paged)
+    monkeypatch.setattr(
+        kpool,
+        "current_workspace_manager",
+        lambda: pytest.fail("large decode must not gather all request contexts"),
+    )
+    actual = kpool._decode_logits_non_paged(
+        torch.zeros(2, 8, 132, dtype=torch.uint8),
+        torch.zeros(2, 1, 32, 128, dtype=torch.int8),
+        torch.zeros(2, 32),
+        torch.tensor([5, 3]),
+        torch.tensor([1, 1]),
+        torch.zeros(2, 4, dtype=torch.int32),
+        2,
+        1,
+        2,
+        20,
+        4,
+        128,
+    )
+    assert actual == expected
+    assert calls == {"lengths": [5, 3], "width": 5}
+
+
+def test_paged_decode_retains_logits_memory_budget(monkeypatch):
+    monkeypatch.setattr(
+        kpool, "envs", SimpleNamespace(VLLM_SPARSE_INDEXER_MAX_LOGITS_MB=512)
+    )
+    q = SimpleNamespace(shape=(513, 1, 32, 128))
+    with pytest.raises(RuntimeError, match="above VLLM_SPARSE_INDEXER_MAX_LOGITS_MB"):
+        kpool._decode_logits_paged_triton(None, q, None, None, None, 262144)
+
+
 def test_rejects_non_int8_q(monkeypatch):
     monkeypatch.setattr(
         kpool,

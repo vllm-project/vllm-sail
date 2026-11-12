@@ -18,11 +18,10 @@ on the INT8 stack already used by the DSA indexer
 * prefill pool compression and the paged tail update are plain PyTorch
   replicas of the CUDA Triton kernels' semantics (correctness first; see the
   ``TRITON-FAST-PATH`` markers for the later optimisation);
-* decode logits default to a gathered-K + non-paged ``int8_mqa_logits`` path
-  (``VLLM_SAIL_KPOOL_DECODE_LOGITS``, default ``non_paged``): PPU's
-  ``int8_paged_mqa_logits`` writes only 2 of every 64 logits (measured on
-  PPU). The paged call is kept behind the env switch for when that kernel is
-  fixed;
+* decode logits prefer gathered-K + SDK ``int8_mqa_logits`` for small contexts
+  and use per-request Triton paged scores above the gather-workspace limit.
+  This keeps the logits budget bounded without using the SDK's broken paged
+  INT8 kernel, which writes only 2 of every 64 logits (measured on PPU);
 * Q is rotated with the same Hadamard-128 matrix as the pooled K and
   quantized with ``per_token_group_quant_int8``; the model folds its scale into
   ``weights`` before calling the op;
@@ -557,6 +556,141 @@ def _decode_logits_layout(
     return cu, ks, ke
 
 
+@triton.jit
+def _paged_int8_logits_kernel(
+    Q,
+    Cache,
+    Scales,
+    Weights,
+    Table,
+    Lengths,
+    Out,
+    max_pools,
+    q_stride_b,
+    q_stride_n,
+    q_stride_h,
+    q_stride_d,
+    w_stride_r,
+    w_stride_h,
+    table_stride_b,
+    table_stride_c,
+    page_stride,
+    NEXT_N: tl.constexpr,
+    HEADS: tl.constexpr,
+    DIM: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+    NUM_BLOCKS: tl.constexpr,
+    BLOCK_H: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+):
+    tile = tl.program_id(0)
+    row = tl.program_id(1)
+    pools = tile * BLOCK_N + tl.arange(0, BLOCK_N)
+    length = tl.load(Lengths + row)
+    if tile * BLOCK_N < length:
+        request = row // NEXT_N
+        token = row % NEXT_N
+        valid = (pools < length) & (pools < max_pools)
+        pages = tl.load(
+            Table + request * table_stride_b + (pools // BLOCK_SIZE) * table_stride_c,
+            mask=valid,
+            other=0,
+        ).to(tl.int64)
+        valid = valid & (pages >= 0) & (pages < NUM_BLOCKS)
+        offsets = pools % BLOCK_SIZE
+        dims = tl.arange(0, DIM)
+        heads = tl.arange(0, BLOCK_H)
+        q = tl.load(
+            Q
+            + request * q_stride_b
+            + token * q_stride_n
+            + heads[:, None] * q_stride_h
+            + dims[None, :] * q_stride_d,
+            mask=heads[:, None] < HEADS,
+            other=0,
+        )
+        k = tl.load(
+            Cache
+            + pages[:, None] * page_stride
+            + offsets[:, None] * DIM
+            + dims[None, :],
+            mask=valid[:, None],
+            other=0,
+        ).to(tl.int8)
+        # The page contains a value plane followed by FP32 scales, rather
+        # than interleaved (value, scale) rows. page_stride can include other
+        # planes in a unified cache allocation.
+        scales = tl.load(
+            Scales + pages * (page_stride // 4) + BLOCK_SIZE * DIM // 4 + offsets,
+            mask=valid,
+            other=0.0,
+        )
+        weights = tl.load(
+            Weights + row * w_stride_r + heads * w_stride_h,
+            mask=heads < HEADS,
+            other=0.0,
+        )
+        dot = tl.dot(q, tl.trans(k), out_dtype=tl.int32)
+        scores = tl.sum(tl.maximum(dot, 0).to(tl.float32) * weights[:, None], axis=0)
+        result = tl.where(valid, scores * scales, -float("inf"))
+    else:
+        result = tl.full((BLOCK_N,), -float("inf"), tl.float32)
+    tl.store(Out + row * max_pools + pools, result, mask=pools < max_pools)
+
+
+def _decode_logits_paged_triton(
+    kv_cache: torch.Tensor,
+    q: torch.Tensor,
+    weights: torch.Tensor,
+    block_table: torch.Tensor,
+    row_lengths: torch.Tensor,
+    max_pools: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Score each query against its own paged context without a K gather.
+
+    Unlike the SDK non-paged kernel, output storage is O(rows * max_pools),
+    not O(rows * sum(context_pools)). Keep it within the same logits budget
+    reserved by the indexer's profiling path.
+    """
+    batch, next_n, heads, dim = q.shape
+    rows = batch * next_n
+    budget = envs.VLLM_SPARSE_INDEXER_MAX_LOGITS_MB * 1024 * 1024
+    if rows * max_pools * 4 > budget:
+        raise RuntimeError(
+            f"PPU paged kpool logits require {rows * max_pools * 4} bytes "
+            f"above VLLM_SPARSE_INDEXER_MAX_LOGITS_MB={budget // (1024 * 1024)}"
+        )
+    assert dim == 128 and q.dtype == torch.int8
+    assert kv_cache.ndim == 3 and kv_cache.dtype == torch.uint8
+    assert kv_cache.shape[-1] == dim + 4 and kv_cache.stride(-1) == 1
+    assert kv_cache.stride(0) % 4 == 0
+    logits = torch.empty((rows, max_pools), dtype=torch.float32, device=q.device)
+    if rows and max_pools:
+        _paged_int8_logits_kernel[(triton.cdiv(max_pools, 64), rows)](
+            q,
+            kv_cache,
+            kv_cache.view(torch.float32),
+            weights,
+            block_table,
+            row_lengths,
+            logits,
+            max_pools,
+            *q.stride(),
+            *weights.stride(),
+            *block_table.stride(),
+            kv_cache.stride(0),
+            NEXT_N=next_n,
+            HEADS=heads,
+            DIM=dim,
+            BLOCK_SIZE=kv_cache.shape[1],
+            NUM_BLOCKS=kv_cache.shape[0],
+            BLOCK_H=max(16, triton.next_power_of_2(heads)),
+            BLOCK_N=64,
+            num_warps=4,
+        )
+    return logits, torch.zeros_like(row_lengths), row_lengths
+
+
 def _decode_logits_non_paged(
     kv_cache: torch.Tensor,
     padded_q: torch.Tensor,
@@ -583,22 +717,21 @@ def _decode_logits_non_paged(
     the metadata. Sizing it by the *new-token* count (the pre-fix bug) is far
     too small: the gather then runs past the buffer and the logits are garbage.
 
-    Cost is O(sum(seq_len) * head_dim) per layer per step; recorded in the e2e
-    report. ``VLLM_SAIL_KPOOL_DECODE_LOGITS=paged`` switches back once the PPU
-    paged kernel is fixed.
+    Above the gather limit, use per-request Triton paged logits instead. This
+    avoids gathering every request's context and scoring every query against
+    that combined cache. The SDK paged kernel remains unused.
     """
     cu, ks, ke = _decode_logits_layout(seq_lens, decode_lens, batch_size, next_n)
     max_pools = batch_size * ((max_seq_len + kpool - 1) // kpool)
     limit = ppu_envs.VLLM_SAIL_KPOOL_MAX_DENSE_POOLS
     if max_pools > limit:
-        raise RuntimeError(
-            "PPU kpool decode fallback would materialise "
-            f"{max_pools} pool logits (batch={batch_size}, "
-            f"max_seq_len={max_seq_len}, kpool={kpool}) above "
-            f"VLLM_SAIL_KPOOL_MAX_DENSE_POOLS={limit}. Lower "
-            "--max-model-len / batch size, raise the limit, or switch to "
-            "VLLM_SAIL_KPOOL_DECODE_LOGITS=paged once the PPU int8 paged "
-            "kernel is fixed."
+        return _decode_logits_paged_triton(
+            kv_cache,
+            padded_q,
+            padded_weights[:num_padded_tokens],
+            block_table,
+            ke - ks,
+            (max_seq_len + kpool - 1) // kpool,
         )
     values_spec, scales_spec = _gather_workspace_shapes(max_pools, head_dim)
     k_quant, k_scale = current_workspace_manager().get_simultaneous(

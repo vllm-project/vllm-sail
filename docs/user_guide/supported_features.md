@@ -109,4 +109,7 @@ global top-k merging are implemented. Zhenwu M890 keeps the upstream FP8 path.
 
 The INT8 kpool path rejects `VLLM_SAIL_KPOOL_DECODE_LOGITS=paged` because the
 paged kernel does not produce complete logits on PPU. Use the default
-`non_paged` backend.
+`non_paged` backend. It uses the SDK's non-paged scorer below the gathered-cache
+limit and a per-request Triton paged scorer above it. The latter avoids a
+combined cache across requests and remains bounded by
+`VLLM_SPARSE_INDEXER_MAX_LOGITS_MB`.
