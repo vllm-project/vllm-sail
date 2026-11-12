@@ -270,8 +270,9 @@ test does not cover those paths.
 
 ### Zhenwu 810E serving sanity
 
-The [810E sanity runner](../../scripts/ci/ppu_810e_sanity.py) provides ten
-presets covering DeepSeek V4 W4A8/INT8 (TP4, TP8 and DP16/EP16 low latency),
+The shared [PPU sanity runner](../../scripts/ci/ppu_sanity.py) selects presets
+from [ppu_sanity_810e.json](../../scripts/ci/ppu_sanity_810e.json) by default.
+Its ten presets cover DeepSeek V4 W4A8/INT8 (TP4, TP8 and DP16/EP16 low latency),
 DeepSeek V4.1 Flash INT8 TP8, GLM-5.3 Flash W4A8 TP8, GLM-5.2 INT8 TP16,
 Kimi-K2.6 W4A8 TP16,
 Qwen3.5 BF16 TP2 and INT8 TP8/EP8, and MiniMax M3 BF16 TP16.
@@ -282,9 +283,9 @@ visible 810E devices. It changes the HTTP bind address to loopback and assigns a
 served model name; model flags remain those in the preset catalog.
 
 ```bash
-python scripts/ci/ppu_810e_sanity.py --list
-python scripts/ci/ppu_810e_sanity.py --dry-run
-python scripts/ci/ppu_810e_sanity.py \
+python scripts/ci/ppu_sanity.py --list
+python scripts/ci/ppu_sanity.py --dry-run
+python scripts/ci/ppu_sanity.py \
   --models qwen3.5-35b_bf16_tp2 \
   --checkpoint-root /ppusw/datasets/checkpoints \
   --results-dir /tmp/810e-sanity-qwen
@@ -307,7 +308,7 @@ chunked prefill and dspark with seven speculative tokens. Other presets retain
 the Python frontend. To run this case with the reference command's port:
 
 ```bash
-python scripts/ci/ppu_810e_sanity.py \
+python scripts/ci/ppu_sanity.py \
   --models deepseek-v4.1-flash_1017_int8_tp8 \
   --port 8999 \
   --results-dir /tmp/810e-sanity-dsv41
@@ -335,7 +336,8 @@ not establish dataset accuracy, tool-call correctness or benchmark performance.
 
 ### Zhenwu M890 serving sanity
 
-Use `--device 890` to select the M890 catalog and require capability 8.9
+Use the same runner with `--device 890` to select
+[ppu_sanity_890.json](../../scripts/ci/ppu_sanity_890.json) and require capability 8.9
 (`ZW-M890P` identifies Zhenwu M890). The default remains 810E, capability 8.0.
 The M890 catalog covers Qwen3.8-Flash-Next MXFP4/FP8 TP4 with MTP,
 GLM-5.3-Flash MXFP4/FP8 TP8 with MTP, and DeepSeek V4.1-Flash-1017
@@ -346,9 +348,9 @@ It uses the Rust frontend, `deepseek_v41` parsers, CPU Engram offload,
 and disables prefix caching.
 
 ```bash
-python scripts/ci/ppu_810e_sanity.py --device 890 --list
-python scripts/ci/ppu_810e_sanity.py --device 890 --dry-run
-python scripts/ci/ppu_810e_sanity.py --device 890 \
+python scripts/ci/ppu_sanity.py --device 890 --list
+python scripts/ci/ppu_sanity.py --device 890 --dry-run
+python scripts/ci/ppu_sanity.py --device 890 \
   --results-dir /tmp/890-sanity
 ```
 

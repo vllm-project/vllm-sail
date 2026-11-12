@@ -17,7 +17,7 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
 SPEC = importlib.util.spec_from_file_location(
-    "ppu_810e_sanity", ROOT / "scripts/ci/ppu_810e_sanity.py"
+    "ppu_sanity", ROOT / "scripts/ci/ppu_sanity.py"
 )
 sanity = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(sanity)
@@ -116,7 +116,7 @@ def test_sigterm_stops_server_before_joining_blocked_burst_and_saves_results(
         sys,
         "argv",
         [
-            "ppu_810e_sanity.py",
+            "ppu_sanity.py",
             "--models",
             key,
             "--checkpoint",
@@ -324,7 +324,7 @@ def test_runtime_checks_device_family_and_records_selected_catalog(
     }.items():
         monkeypatch.setitem(sys.modules, name, module)
     monkeypatch.setattr(sanity.importlib.metadata, "version", lambda name: "test")
-    catalog = sanity.CATALOG.with_name(f"ppu_{device}_sanity_models.json")
+    catalog = sanity.CATALOG.with_name(f"ppu_sanity_{device}.json")
     environment = sanity.runtime_environment(device, catalog)
     assert environment["devices"][0]["capability"] == capability
     assert environment["device_family"] == device

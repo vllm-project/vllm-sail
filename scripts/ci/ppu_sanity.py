@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: Apache-2.0
-"""Serve 810E or M890 sanity presets using the installed vLLM SAIL.
+"""Serve PPU sanity presets using the installed vLLM SAIL.
 
 Run inside a prepared device container. This script neither installs packages
 nor allocates machines. Results are a serving sanity check, not an accuracy or
@@ -28,7 +28,7 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
-CATALOG = Path(__file__).with_name("ppu_810e_sanity_models.json")
+CATALOG = Path(__file__).with_name("ppu_sanity_810e.json")
 
 
 def serve_command(preset: dict, checkpoint: Path, port: int) -> list[str]:
@@ -333,7 +333,7 @@ def main() -> int:
     parser.add_argument("--request-timeout", type=int, default=600)
     parser.add_argument("--max-tokens", type=int, default=4096)
     args = parser.parse_args()
-    catalog_path = CATALOG.with_name(f"ppu_{args.device}_sanity_models.json")
+    catalog_path = CATALOG.with_name(f"ppu_sanity_{args.device}.json")
     catalog = {item["key"]: item for item in json.loads(catalog_path.read_text())}
     if args.list:
         for key, preset in catalog.items():
