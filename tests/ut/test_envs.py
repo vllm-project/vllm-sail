@@ -30,6 +30,9 @@ BOOL_DEFAULTS = {
     "NVTX_PROFILE": False,
     "NVTX_DUMP_TOPK": False,
     "NVTX_VFA_DUMP_SEQLEN": False,
+    "MINIMAX_M3_MSA": True,
+    "MINIMAX_M3_MSA_INDEXER_TRITON": False,
+    "MINIMAX_M3_MSA_ATTEND_TRITON": False,
 }
 BACKENDS = ("MOE_BACKEND", "DENSE_BACKEND")
 # String env vars with a non-None default and no legacy VLLM_PPU_* alias.

@@ -47,6 +47,7 @@ EXPECTED_MODULES = {
     "glm5_next_mtp",
     "kimi_k3",
     "llama4",
+    "minimax_m3_msa",
     "moe_marlin_gate",
     "qwen3_fused_quant",
     "qwen3_moe",
