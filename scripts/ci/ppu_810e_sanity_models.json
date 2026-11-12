@@ -30,7 +30,7 @@
     "key": "glm-5.3-flash_w4a8_tp8",
     "checkpoint": "LLM/T-HEAD/v5.3/GLM-5.3-Flash-MoE-Quant-W-INT4-PerChannel-A-INT8-PerToken-Dense-Quant-W-INT8-PerChannel-A-INT8-PerToken",
     "cards": 8,
-    "args": ["--tensor-parallel-size", "8", "--block-size", "256", "--no-enable-prefix-caching"]
+    "args": ["--tensor-parallel-size", "8", "--block-size", "256", "--max-model-len", "32768", "--max-num-seqs", "16", "--no-enable-prefix-caching"]
   },
   {
     "key": "glm-5.2_w8a8_tp16",
