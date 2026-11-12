@@ -5,6 +5,7 @@ import concurrent.futures
 import importlib.util
 import json
 import os
+import shlex
 import signal
 import socket
 import sys
@@ -127,7 +128,7 @@ def test_sigterm_stops_server_before_joining_blocked_burst_and_saves_results(
         ],
     )
     monkeypatch.setattr(
-        sanity, "runtime_environment", lambda: {"devices": [None, None]}
+        sanity, "runtime_environment", lambda *args: {"devices": [None, None]}
     )
     generations = 0
     unblocked_by_cleanup = []
@@ -269,6 +270,33 @@ def test_missing_checkpoint_fails_without_starting_a_server(tmp_path):
     assert result["stage"] == "preflight"
     assert "config missing" in result["error"]
     assert not (tmp_path / "missing" / "serve.log").exists()
+
+
+def test_890_cli_preserves_mega_moe_and_fp4_indexer(monkeypatch, capsys):
+    monkeypatch.setattr(sys, "argv", ["sanity", "--device", "890", "--dry-run"])
+    assert sanity.main() == 0
+    commands = [shlex.split(line) for line in capsys.readouterr().out.splitlines()]
+    assert len(commands) == 3
+    deepseek = next(argv for argv in commands if "deepseek_v41" in argv)
+    assert "--enable-expert-parallel" in deepseek
+    assert deepseek[deepseek.index("--moe-backend") + 1] == "deep_gemm_mega_moe"
+    assert json.loads(deepseek[deepseek.index("--attention-config") + 1]) == {
+        "indexer_sparse_logits": True,
+        "indexer_kv_dtype": "mxfp4",
+    }
+    assert "DeepSeek-V4.1-Flash-1017-MoE-Quant" in deepseek[4]
+
+
+def test_810e_v41_uses_1017_int8_checkpoint():
+    preset = next(
+        item
+        for item in json.loads(sanity.CATALOG.read_text())
+        if item["key"] == "deepseek-v4.1-flash_1017_int8_tp8"
+    )
+    assert preset["checkpoint"] == (
+        "LLM/T-HEAD/v4.1/DeepSeek-V4.1-Flash-1017-Quant-W-INT8-PerChannel-"
+        "A-INT8-PerToken-Engram-MXFP8"
+    )
 
 
 def test_insufficient_devices_fail_without_starting_a_server(tmp_path):

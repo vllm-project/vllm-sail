@@ -300,7 +300,7 @@ The `glm-5.3-flash_w4a8_tp8` preset uses the GLM-5.3 Flash checkpoint under
 TP8 and prefix caching disabled. Its HTTP server binds to loopback, as do the
 other sanity presets.
 The `deepseek-v4.1-flash_1017_int8_tp8` preset uses
-`LLM/T-HEAD/v4.1/DeepSeek-V4.1-Flash-Quant-W-INT8-PerChannel-A-INT8-PerToken`
+`LLM/T-HEAD/v4.1/DeepSeek-V4.1-Flash-1017-Quant-W-INT8-PerChannel-A-INT8-PerToken-Engram-MXFP8`
 under the checkpoint root and serves as `DeepSeek-V4.1-Flash-1017`. It enables
 the Rust frontend, Engram CPU offload, a 524288-token context, prefix caching,
 chunked prefill and dspark with seven speculative tokens. Other presets retain
@@ -332,6 +332,30 @@ DP launch cannot terminate earlier at its shorter internal default.
 These presets are test inputs, not a declaration of model support. Passing
 establishes inference for the recorded checkpoint and configuration; it does
 not establish dataset accuracy, tool-call correctness or benchmark performance.
+
+### Zhenwu M890 serving sanity
+
+Use `--device 890` to select the M890 catalog and require capability 8.9
+(`ZW-M890P` identifies Zhenwu M890). The default remains 810E, capability 8.0.
+The M890 catalog covers Qwen3.8-Flash-Next MXFP4/FP8 TP4 with MTP,
+GLM-5.3-Flash MXFP4/FP8 TP8 with MTP, and DeepSeek V4.1-Flash-1017
+MXFP4/FP8 TP8/EP8 with MXFP8 Engram. DeepSeek enables MegaMoE
+(`--moe-backend deep_gemm_mega_moe`) and the MXFP4 sparse indexer
+(`--attention-config '{"indexer_sparse_logits":true,"indexer_kv_dtype":"mxfp4"}'`).
+It uses the Rust frontend, `deepseek_v41` parsers, CPU Engram offload,
+and disables prefix caching.
+
+```bash
+python scripts/ci/ppu_810e_sanity.py --device 890 --list
+python scripts/ci/ppu_810e_sanity.py --device 890 --dry-run
+python scripts/ci/ppu_810e_sanity.py --device 890 \
+  --results-dir /tmp/890-sanity
+```
+
+Use eight visible M890 devices for the complete catalog. The same lifecycle,
+generation checks, checkpoint overrides and evidence files described above apply.
+These are single-host serving checks; they do not validate multi-host DP16 or
+prefill/decode disaggregation.
 
 ## 5. Report correctness and performance
 

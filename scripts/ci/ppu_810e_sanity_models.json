@@ -1,7 +1,7 @@
 [
   {
     "key": "deepseek-v4.1-flash_1017_int8_tp8",
-    "checkpoint": "LLM/T-HEAD/v4.1/DeepSeek-V4.1-Flash-Quant-W-INT8-PerChannel-A-INT8-PerToken",
+    "checkpoint": "LLM/T-HEAD/v4.1/DeepSeek-V4.1-Flash-1017-Quant-W-INT8-PerChannel-A-INT8-PerToken-Engram-MXFP8",
     "cards": 8,
     "served_model_name": "DeepSeek-V4.1-Flash-1017",
     "env": {"VLLM_USE_RUST_FRONTEND": "1"},

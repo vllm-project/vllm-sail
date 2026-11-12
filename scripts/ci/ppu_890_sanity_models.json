@@ -1,0 +1,77 @@
+[
+  {
+    "key": "deepseek-v4.1-flash_1017_mxfp4_tp8_ep8",
+    "checkpoint": "LLM/T-HEAD/v4.1/DeepSeek-V4.1-Flash-1017-MoE-Quant-W-MXFP4-A-MXFP4-Dense-Quant-W-FP8-PerChannel-A-FP8-PerToken-Engram-MXFP8",
+    "cards": 8,
+    "args": [
+      "--gpu-memory-utilization",
+      "0.9",
+      "--kv-cache-dtype",
+      "fp8",
+      "--block-size",
+      "256",
+      "--tokenizer-mode",
+      "deepseek_v41",
+      "--tool-call-parser",
+      "deepseek_v41",
+      "--enable-auto-tool-choice",
+      "--reasoning-parser",
+      "deepseek_v41",
+      "--mm-encoder-tp-mode",
+      "data",
+      "--no-enable-prefix-caching",
+      "--engram-config",
+      "{\"cpu_offload\":true}",
+      "--tensor-parallel-size",
+      "8",
+      "--enable-expert-parallel",
+      "--moe-backend",
+      "deep_gemm_mega_moe",
+      "--attention-config",
+      "{\"indexer_sparse_logits\":true,\"indexer_kv_dtype\":\"mxfp4\"}"
+    ],
+    "env": {
+      "VLLM_USE_RUST_FRONTEND": "1"
+    }
+  },
+  {
+    "key": "qwen3.8-flash-next_mxfp4_tp4",
+    "checkpoint": "LLM/T-HEAD/v3.8/Qwen3.8-Flash-Next-MoE-Quant-W-MXFP4-A-MXFP4-Dense-Quant-W-FP8-PerChannel-A-FP8-PerToken",
+    "cards": 4,
+    "args": [
+      "--tensor-parallel-size",
+      "4",
+      "--gpu-memory-utilization",
+      "0.9",
+      "--max-model-len",
+      "auto",
+      "--reasoning-parser",
+      "qwen3",
+      "--tool-call-parser",
+      "qwen3_xml",
+      "--enable-auto-tool-choice",
+      "--speculative-config",
+      "{\"method\":\"mtp\",\"num_speculative_tokens\":3}",
+      "--enable-prefix-caching"
+    ]
+  },
+  {
+    "key": "glm-5.3-flash_mxfp4_tp8",
+    "checkpoint": "LLM/T-HEAD/v5.3/GLM-5.3-Flash-MoE-Quant-W-MXFP4-A-MXFP4-Dense-Quant-W-FP8-PerChannel-A-FP8-PerToken",
+    "cards": 8,
+    "args": [
+      "--tensor-parallel-size",
+      "8",
+      "--kv-cache-dtype",
+      "fp8",
+      "--tool-call-parser",
+      "glm47",
+      "--reasoning-parser",
+      "glm47",
+      "--enable-auto-tool-choice",
+      "--speculative-config",
+      "{\"method\":\"mtp\",\"num_speculative_tokens\":2}",
+      "--enable-prefix-caching"
+    ]
+  }
+]
