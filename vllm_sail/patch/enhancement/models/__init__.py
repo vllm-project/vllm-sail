@@ -58,5 +58,6 @@ from vllm_sail.patch.enhancement.models import (
     moe_marlin_gate,  # noqa: F401
     qwen3_moe,  # noqa: F401
     qwen3_next,  # noqa: F401
+    qwen4_qsa_quant,  # noqa: F401
     step3p5_mtp,  # noqa: F401
 )

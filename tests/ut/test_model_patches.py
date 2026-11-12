@@ -52,6 +52,7 @@ EXPECTED_MODULES = {
     "qwen3_fused_quant",
     "qwen3_moe",
     "qwen3_next",
+    "qwen4_qsa_quant",
     "step3p5_mtp",
 }
 
