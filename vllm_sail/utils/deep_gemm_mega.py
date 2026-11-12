@@ -62,7 +62,7 @@ def mega_moe_api(mma_type: str):
 
 
 def check_mega_moe_supported(
-    device, hidden_size: int, intermediate_size: int, mma_type: str
+    device, hidden_size: int, intermediate_size: int | None, mma_type: str
 ):
     from vllm.platforms import current_platform
 
@@ -75,7 +75,7 @@ def check_mega_moe_supported(
     ):
         raise NotImplementedError("SAIL MegaMoE requires Zhenwu M890 and DeepGEMM.")
     fmt = MEGA_MOE_FORMATS[mma_type]
-    if (
+    if intermediate_size is not None and (
         hidden_size < fmt.min_hidden
         or hidden_size % fmt.hidden_multiple
         or intermediate_size <= 0
