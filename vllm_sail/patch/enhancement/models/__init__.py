@@ -46,6 +46,7 @@ from vllm_sail.patch.enhancement.models import (
     deepseek_v4,  # noqa: F401
     deepseek_v4_cache,  # noqa: F401
     deepseek_v4_compressor,  # noqa: F401
+    deepseek_v4_graph_warmup,  # noqa: F401
     deepseek_v4_metadata,  # noqa: F401
     deepseek_v41,  # noqa: F401
     deepseek_v41_engram,  # noqa: F401
