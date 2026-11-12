@@ -19,6 +19,7 @@ MODELS = ROOT / "scripts" / "ci" / "ppu_e2e_models.json"
 EVAL_SCRIPT = ROOT / "scripts" / "eval" / "ppu_gsm8k_eval.py"
 GOLDEN = ROOT / "tests" / "e2e" / "models" / "_golden"
 MODEL_WORKFLOW = ROOT / ".github" / "workflows" / "_ppu-model-tests.yaml"
+MODEL_PERF_WORKFLOW = ROOT / ".github" / "workflows" / "_ppu-model-perf.yaml"
 ACCURACY_WORKFLOW = ROOT / ".github" / "workflows" / "_ppu-accuracy-tests.yaml"
 NIGHTLY_WORKFLOW = ROOT / ".github" / "workflows" / "ppu-accuracy-nightly.yaml"
 KERNEL_PERF_WORKFLOW = ROOT / ".github" / "workflows" / "_ppu-kernel-perf.yaml"
@@ -665,7 +666,8 @@ def test_accuracy_script_seeds_reviewed_goldens_into_the_writable_tree() -> None
 
 def test_runtime_wrapper_exposes_accuracy_mode_and_environment() -> None:
     text = RUNTIME.read_text()
-    assert "pin-ut|model-test|model-accuracy|kernel-perf" in text
+    for mode in ("pin-ut", "model-test", "model-accuracy", "kernel-perf"):
+        assert f"{mode})" in text
     assert "/source/scripts/ci/ppu_e2e_accuracy.sh" in text
     for marker in (
         "HF_HOME",
@@ -804,11 +806,20 @@ def test_accuracy_nightly_is_serial_and_wheel_sourced_from_the_build_commit() ->
         "pr_head_sha": "${{ github.sha }}",
         "skip_device_tests": True,
     }
-    assert accuracy["needs"] == ["build", "select"]
-    # Checkout and wheels must describe the same SAIL tree.
-    assert accuracy["with"]["pr_head_sha"] == "${{ github.sha }}"
-    assert accuracy["with"]["wheel_source_sha"] == "${{ github.sha }}"
-    assert accuracy["with"]["build_run_id"] == "${{ github.run_id }}"
+    perf = nightly["jobs"]["model-perf"]
+    assert perf["needs"] == ["build"]
+    assert perf["uses"] == "./.github/workflows/_ppu-model-perf.yaml"
+    assert accuracy["needs"] == ["build", "select", "model-perf"]
+    assert accuracy["if"] == (
+        "${{ !cancelled() && needs.build.result == 'success' && "
+        "needs.select.result == 'success' }}"
+    )
+    # Performance failure must not suppress accuracy over the same build.
+    assert "model-perf" not in accuracy["if"]
+    for job in (perf, accuracy):
+        assert job["with"]["pr_head_sha"] == "${{ github.sha }}"
+        assert job["with"]["wheel_source_sha"] == "${{ github.sha }}"
+        assert job["with"]["build_run_id"] == "${{ github.run_id }}"
     assert accuracy["with"]["pr_mode"] is False
     # The accuracy work runs inside the reusable call, not on a hosted shell.
     assert "runs-on" not in accuracy
@@ -820,6 +831,210 @@ def test_accuracy_nightly_is_serial_and_wheel_sourced_from_the_build_commit() ->
         1 for entry in catalog if entry.get("category") == "accuracy"
     )
     assert "models: ${{ matrix.model }}" in text
+
+
+def test_model_perf_workflow_is_call_only_and_uses_one_m890_runner() -> None:
+    workflow = _workflow(MODEL_PERF_WORKFLOW)
+    assert set(workflow[True]) == {"workflow_call"}
+    assert workflow["permissions"] == {"contents": "read", "actions": "read"}
+    assert workflow["cache-mode"] == "none"
+    assert set(workflow["jobs"]) == {"model-perf"}
+    perf = workflow["jobs"]["model-perf"]
+    assert perf["runs-on"] == "8-ppu-m890p"
+    assert perf["timeout-minutes"] == 150
+    assert "container" not in perf
+    assert "strategy" not in perf
+    assert "ppu-scheduler-action" not in MODEL_PERF_WORKFLOW.read_text()
+    inputs = workflow[True]["workflow_call"]["inputs"]
+    assert set(inputs) == {
+        "pr_head_sha",
+        "wheel_source_sha",
+        "build_run_id",
+        "model_path",
+        "model_revision",
+        "hf_home",
+        "dg_cache_dir",
+    }
+    for name in ("pr_head_sha", "wheel_source_sha", "build_run_id"):
+        assert inputs[name]["required"] is True
+        assert inputs[name]["type"] == "string"
+        assert "default" not in inputs[name]
+    for name, default in (
+        ("model_path", ""),
+        ("model_revision", ""),
+        ("hf_home", "/nas_aisw/datasets/hf_cache"),
+        ("dg_cache_dir", "/nas_aisw/vllmci_dgcache"),
+    ):
+        assert inputs[name]["type"] == "string"
+        assert inputs[name]["default"] == default
+        assert not inputs[name].get("required", False)
+    cache_guard = next(
+        step for step in perf["steps"] if step.get("uses") == "actions/github-script@v7"
+    )
+    assert "process.env.ACTIONS_CACHE_MODE !== 'none'" in cache_guard["with"]["script"]
+
+
+def test_model_perf_workflow_uses_private_checkout_and_exact_wheel_identity() -> None:
+    perf = _workflow(MODEL_PERF_WORKFLOW)["jobs"]["model-perf"]
+    assert perf["env"]["GIT_CONFIG_NOSYSTEM"] == "1"
+    prepare = next(step for step in perf["steps"] if step.get("id") == "runtime")
+    for marker in (
+        'mktemp "${RUNNER_TEMP}/git-config.XXXXXX"',
+        'mktemp -d "${RUNNER_TEMP}/ppu-model-perf-wheels.XXXXXX"',
+        'mktemp -d "${RUNNER_TEMP}/ppu-model-perf-artifacts.XXXXXX"',
+        ".ppu-model-perf-source-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}",
+        "GIT_CONFIG_GLOBAL",
+        "$GITHUB_ENV",
+    ):
+        assert marker in prepare["run"]
+    checkout = next(
+        step for step in perf["steps"] if step.get("uses") == "actions/checkout@v4"
+    )
+    assert checkout["with"]["ref"] == "${{ inputs.pr_head_sha }}"
+    assert checkout["with"]["path"] == "${{ steps.runtime.outputs.source_rel }}"
+    assert checkout["with"]["persist-credentials"] is False
+    verify = next(
+        step for step in perf["steps"] if "rev-parse HEAD" in step.get("run", "")
+    )
+    assert verify["env"]["EXPECTED_SHA"] == "${{ inputs.pr_head_sha }}"
+    assert verify["env"]["SOURCE_DIR"] == "${{ steps.runtime.outputs.source }}"
+    assert '= "$EXPECTED_SHA"' in verify["run"]
+    downloads = [
+        step
+        for step in perf["steps"]
+        if step.get("uses") == "actions/download-artifact@v4"
+    ]
+    assert len(downloads) == 1
+    assert downloads[0]["with"] == {
+        "name": "ppu-wheels-${{ inputs.build_run_id }}",
+        "path": "${{ steps.runtime.outputs.wheels }}",
+        "run-id": "${{ inputs.build_run_id }}",
+        "repository": "${{ github.repository }}",
+        "github-token": "${{ github.token }}",
+    }
+    runtime = next(
+        step
+        for step in perf["steps"]
+        if "ppu_runtime_container.sh" in step.get("run", "")
+    )
+    assert runtime["run"] == (
+        'bash "${PPU_CI_SOURCE_DIR}/scripts/ci/ppu_runtime_container.sh" model-perf'
+    )
+    assert runtime["env"] == {
+        "PPU_CI_SOURCE_DIR": "${{ steps.runtime.outputs.source }}",
+        "PPU_CI_SOURCE_SHA": "${{ inputs.pr_head_sha }}",
+        "PPU_CI_WHEELS_DIR": "${{ steps.runtime.outputs.wheels }}",
+        "PPU_CI_ARTIFACT_DIR": "${{ steps.runtime.outputs.artifacts }}",
+        "PPU_CI_DEVICE_COUNT": "8",
+        "PPU_CI_REQUIRE_PR_ARTIFACT": "false",
+        "PPU_CI_WHEEL_SOURCE_SHA": "${{ inputs.wheel_source_sha }}",
+        "PPU_CI_HF_HOME": "${{ inputs.hf_home }}",
+        "PPU_CI_DG_CACHE_DIR": "${{ inputs.dg_cache_dir }}",
+        "HF_HUB_OFFLINE": "1",
+        "MODEL_ID": (
+            "T-HEAD/DeepSeek-V4-Flash-0731-MoE-Quant-W-MXFP4-A-MXFP4-"
+            "Dense-Quant-W-FP8-PerChannel-A-FP8-PerToken"
+        ),
+        "MODEL_PATH": "${{ inputs.model_path }}",
+        "MODEL_REVISION": "${{ inputs.model_revision }}",
+    }
+
+
+def test_nightly_dispatch_keeps_accuracy_models_and_optional_perf_checkpoint() -> None:
+    nightly = _workflow(NIGHTLY_WORKFLOW)
+    inputs = nightly[True]["workflow_dispatch"]["inputs"]
+    assert set(inputs) == {"models", "perf_model_path", "perf_model_revision"}
+    for name in inputs:
+        assert inputs[name]["type"] == "string"
+        assert inputs[name]["default"] == ""
+        assert inputs[name]["required"] is False
+    perf_inputs = nightly["jobs"]["model-perf"]["with"]
+    assert perf_inputs["model_path"] == "${{ inputs.perf_model_path || '' }}"
+    assert perf_inputs["model_revision"] == "${{ inputs.perf_model_revision || '' }}"
+    assert "models" not in perf_inputs
+    assert nightly["concurrency"]["cancel-in-progress"] is False
+
+
+@pytest.mark.parametrize("path", [MODEL_PERF_WORKFLOW, NIGHTLY_WORKFLOW])
+def test_model_perf_inputs_never_interpolate_into_shell(path: Path) -> None:
+    for job in _workflow(path)["jobs"].values():
+        for step in job.get("steps", []):
+            assert "${{ inputs." not in step.get("run", "")
+
+
+@pytest.mark.parametrize(
+    "filename", ["ppu-build-and-test.yaml", "ppu-pr-ci.yaml", "kernel-perf-label.yaml"]
+)
+def test_model_performance_stays_outside_per_pr_workflows(filename: str) -> None:
+    text = (MODEL_PERF_WORKFLOW.parent / filename).read_text()
+    assert "_ppu-model-perf.yaml" not in text
+    assert 'ppu_runtime_container.sh" model-perf' not in text
+
+
+@pytest.mark.parametrize("report_exists", [False, True])
+def test_model_perf_always_uploads_diagnostics_and_appends_available_report(
+    tmp_path: Path, report_exists: bool
+) -> None:
+    steps = _workflow(MODEL_PERF_WORKFLOW)["jobs"]["model-perf"]["steps"]
+    uploads = [
+        step for step in steps if step.get("uses") == "actions/upload-artifact@v4"
+    ]
+    assert len(uploads) == 1
+    upload = uploads[0]
+    assert upload["if"] == "always()"
+    assert upload["with"]["retention-days"] == 30
+    assert upload["with"]["if-no-files-found"] == "warn"
+    assert upload["with"]["name"] == (
+        "ppu-model-perf-${{ github.run_id }}-${{ github.run_attempt }}"
+    )
+    assert upload["with"]["path"].splitlines() == [
+        "${{ steps.runtime.outputs.artifacts }}/**",
+        "${{ steps.runtime.outputs.wheels }}/wheel-manifest.json",
+    ]
+    summary = next(
+        step for step in steps if "GITHUB_STEP_SUMMARY" in step.get("run", "")
+    )
+    assert summary["if"] == "always()"
+    assert (
+        summary["env"]["PPU_CI_ARTIFACT_DIR"]
+        == "${{ steps.runtime.outputs.artifacts }}"
+    )
+    report = "# Model performance\nDiagnostics remain available after failure.\n"
+    if report_exists:
+        (tmp_path / "perf-summary.md").write_text(report)
+    destination = tmp_path / "summary.md"
+    destination.write_text("Previous job summary\n")
+    result = subprocess.run(
+        ["bash", "-euo", "pipefail", "-c", summary["run"]],
+        env={
+            **os.environ,
+            "PPU_CI_ARTIFACT_DIR": str(tmp_path),
+            "GITHUB_STEP_SUMMARY": str(destination),
+        },
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    assert destination.read_text() == "Previous job summary\n" + (
+        report if report_exists else ""
+    )
+
+
+def test_runtime_model_perf_keeps_offline_module_and_deepgemm_caches() -> None:
+    text = RUNTIME.read_text()
+    assert "    model-perf)" in text
+    block = text.split("    model-perf)", 1)[1].split("        ;;", 1)[0]
+    for marker in (
+        "PPU_CI_HF_HOME",
+        "PPU_CI_DG_CACHE_DIR",
+        "HF_MODULES_CACHE",
+        "HF_HUB_OFFLINE=1",
+        "DG_JIT_CACHE_DIR",
+        "DG_CACHE_DIR",
+        "MODEL_REVISION",
+        "/source/scripts/ci/ppu_model_perf.sh",
+    ):
+        assert marker in block, marker
 
 
 def test_workflows_pull_wheels_by_run_id_and_keep_python_frontend() -> None:

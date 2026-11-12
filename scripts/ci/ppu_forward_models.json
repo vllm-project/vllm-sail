@@ -1,0 +1,30 @@
+{
+  "case_id": "deepseek-v4-mxfp4-dp-ep",
+  "model_id": "T-HEAD/DeepSeek-V4-Flash-0731-MoE-Quant-W-MXFP4-A-MXFP4-Dense-Quant-W-FP8-PerChannel-A-FP8-PerToken",
+  "chip": "890p",
+  "device_count": 8,
+  "data_parallel_size": 8,
+  "kv_len": 4096,
+  "global_batch_sizes": [32, 64],
+  "iters": 20,
+  "samples": 5,
+  "max_sample_spread_pct": 0.5,
+  "engine_args": [
+    "--trust-remote-code",
+    "--kv-cache-dtype", "fp8",
+    "--block-size", "256",
+    "--max-model-len", "16384",
+    "--max-num-batched-tokens", "1024",
+    "--max-num-seqs", "128",
+    "--gpu-memory-utilization", "0.9",
+    "--all2all-backend", "deepep_low_latency",
+    "--enable-expert-parallel",
+    "--data-parallel-size", "8",
+    "--tensor-parallel-size", "1",
+    "--distributed-timeout-seconds", "3600",
+    "--cpu-distributed-timeout-seconds", "3600",
+    "--compilation-config", "{\"cudagraph_mode\":\"FULL_DECODE_ONLY\",\"custom_ops\":[\"all\"]}",
+    "--tokenizer-mode", "deepseek_v4",
+    "--speculative-config", "{\"method\":\"dspark\",\"num_speculative_tokens\":5,\"draft_sample_method\":\"probabilistic\"}"
+  ]
+}

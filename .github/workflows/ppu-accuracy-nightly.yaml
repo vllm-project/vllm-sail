@@ -1,14 +1,14 @@
-name: PPU accuracy nightly
+name: PPU precision and performance nightly
 
-# Nightly GSM8K accuracy regression for the model-precision E2E gate
-# (CI plan category 3). Accuracy stays outside the per-PR gate: this entry
-# point builds wheels from the main commit it was triggered on and calls
+# Nightly model forward performance and GSM8K accuracy regression.
+# Both stay outside the per-PR gate: this entry point builds wheels from the
+# main commit it was triggered on, runs _ppu-model-perf.yaml, then calls
 # _ppu-accuracy-tests.yaml once per accuracy entry in the checked-in catalog.
 #
 #   build    -- reuse ppu-build-and-test.yaml for the wheel build alone. It is
 #               called with skip_device_tests so the pin-UT and model-smoke
 #               lanes stay with the per-PR gate instead of competing for the
-#               same 8-ppu-m890p hosts the accuracy lane needs.
+#               same 8-ppu-m890p hosts the performance and accuracy lanes need.
 #               Resolving "the newest successful build" instead does not work:
 #               ppu-build-and-test.yaml exposes no workflow_dispatch entry, and
 #               the runs its workflow_call produces belong to the caller, so
@@ -17,9 +17,10 @@ name: PPU accuracy nightly
 #               whose checkout predates every fix merged since.
 #   select   -- expand the catalog into the accuracy matrix. It depends on
 #               nothing but the repository, so it runs alongside the build.
-#   accuracy -- one reusable call per model. A single model already needs all
-#               eight devices and ppu_runtime_container.sh takes an exclusive
-#               flock on the runner, so max-parallel stays at 1; the catalog
+#   model-perf -- DeepSeek-V4 MXFP4 DP8+EP forward benchmark after the build.
+#   accuracy -- one reusable call per model after performance, even if it fails.
+#               Each model needs all eight devices and the wrapper takes an
+#               exclusive flock, so max-parallel stays at 1; the catalog
 #               currently has eight accuracy cases, i.e. most of a day.
 #
 # What the lane gates on
@@ -34,8 +35,8 @@ name: PPU accuracy nightly
 # Chip coverage: the lane runs on the self-hosted 8-ppu-m890p runner and uses
 # whatever devices that host exposes, so deepseek-v4-int8 (catalog board
 # OAM-810E) exercises the ZW-M890P int8 path here and its golden is bound to
-# that chip. A true 810E lane needs the ppu-scheduler-action route the kernel
-# and perf lanes use, which the local Docker wrapper cannot provide.
+# that chip. A true 810E lane needs the ppu-scheduler-action route the weekly
+# perf matrix uses, which the local Docker wrapper cannot provide.
 #
 # Schedule: 12:00 UTC = 20:00 CST. The serial accuracy cases are long, so the
 # window is chosen only to start ahead of the 18:30 UTC upstream-reuse and
@@ -46,6 +47,16 @@ on:
     inputs:
       models:
         description: "Comma-separated accuracy catalog keys (blank = every accuracy entry)"
+        required: false
+        default: ""
+        type: string
+      perf_model_path:
+        description: "Performance checkpoint directory (blank = offline HF cache)"
+        required: false
+        default: ""
+        type: string
+      perf_model_revision:
+        description: "Immutable model revision (required with perf_model_path)"
         required: false
         default: ""
         type: string
@@ -70,7 +81,7 @@ jobs:
     uses: ./.github/workflows/ppu-build-and-test.yaml
     with:
       # github.sha is the main commit this run was triggered on, and the same
-      # value goes to the accuracy calls below, so the checkout and the wheel
+      # value goes to the performance and accuracy calls, so checkout and wheel
       # manifest describe one tree.
       pr_head_sha: ${{ github.sha }}
       skip_device_tests: true
@@ -125,9 +136,21 @@ jobs:
               handle.write(f"matrix={matrix}\n")
           PY
 
+  model-perf:
+    name: Model forward performance
+    needs: [build]
+    uses: ./.github/workflows/_ppu-model-perf.yaml
+    with:
+      pr_head_sha: ${{ github.sha }}
+      wheel_source_sha: ${{ github.sha }}
+      build_run_id: ${{ github.run_id }}
+      model_path: ${{ inputs.perf_model_path || '' }}
+      model_revision: ${{ inputs.perf_model_revision || '' }}
+
   accuracy:
     name: Accuracy ${{ matrix.model }}
-    needs: [build, select]
+    needs: [build, select, model-perf]
+    if: ${{ !cancelled() && needs.build.result == 'success' && needs.select.result == 'success' }}
     permissions:
       contents: read
       actions: read

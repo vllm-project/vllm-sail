@@ -3,9 +3,9 @@
 # Run wheel validation in an isolated PPU runtime container.
 set -Eeuo pipefail
 
-mode=${1:?Usage: ppu_runtime_container.sh pin-ut|model-test|model-accuracy|kernel-perf|upstream-reuse}
+mode=${1:?Usage: ppu_runtime_container.sh pin-ut|model-test|model-accuracy|model-perf|kernel-perf|upstream-reuse}
 case "${mode}" in
-    pin-ut|model-test|model-accuracy|kernel-perf|upstream-reuse) ;;
+    pin-ut|model-test|model-accuracy|model-perf|kernel-perf|upstream-reuse) ;;
     *) printf 'Unknown runtime mode: %s\n' "${mode}" >&2; exit 2 ;;
 esac
 
@@ -297,6 +297,61 @@ case "${mode}" in
         create+=(
             --entrypoint bash "${image_id}"
             /source/scripts/ci/ppu_e2e_accuracy.sh
+        )
+        ;;
+    model-perf)
+        : "${PPU_CI_HF_HOME:?PPU_CI_HF_HOME is required for model-perf}"
+        : "${PPU_CI_DG_CACHE_DIR:?PPU_CI_DG_CACHE_DIR is required for model-perf}"
+        : "${MODEL_ID:?MODEL_ID is required for model-perf}"
+        [[ "${PPU_CI_DEVICE_COUNT}" == "8" ]] || {
+            echo "model-perf requires eight M890 devices for DP8+EP" >&2
+            exit 2
+        }
+        hf_home=$(realpath "${PPU_CI_HF_HOME}")
+        dg_cache_root=$(realpath "${PPU_CI_DG_CACHE_DIR}")
+        [[ -d "${hf_home}" && -d "${dg_cache_root}" ]] || {
+            echo "model-perf HF and DeepGEMM cache roots must exist" >&2
+            exit 2
+        }
+        if [[ -n "${MODEL_PATH:-}" ]]; then
+            : "${MODEL_REVISION:?Explicit MODEL_PATH requires an immutable MODEL_REVISION}"
+            model_snapshot=$(realpath "${MODEL_PATH}")
+            model_revision="${MODEL_REVISION}"
+        else
+            model_cache="${hf_home}/hub/models--${MODEL_ID//\//--}"
+            [[ -f "${model_cache}/refs/main" ]] || {
+                echo "Offline cache is missing ${MODEL_ID} refs/main" >&2
+                exit 2
+            }
+            model_revision=$(<"${model_cache}/refs/main")
+            model_snapshot=$(realpath "${model_cache}/snapshots/${model_revision}")
+        fi
+        [[ -f "${model_snapshot}/config.json" ]] || {
+            echo "model-perf checkpoint is missing config.json" >&2
+            exit 2
+        }
+        create+=(
+            --shm-size=32g
+            --mount "type=bind,source=${hf_home},target=${hf_home},readonly"
+            --mount "type=bind,source=${dg_cache_root},target=${dg_cache_root}"
+            --env HF_HOME="${hf_home}"
+            --env HF_MODULES_CACHE="${hf_modules_cache}"
+            --env HF_HUB_OFFLINE=1
+            --env TRANSFORMERS_OFFLINE=1
+            --env DG_JIT_CACHE_DIR="${dg_cache_root}"
+            --env DG_CACHE_DIR="${dg_cache_root}"
+            --env MODEL_PATH="${model_snapshot}"
+            --env MODEL_REVISION="${model_revision}"
+            --env RUNTIME_IMAGE_ID="${image_id}"
+            --env RESULTS_DIR=/artifacts
+            --env BASELINE_ROOT=/source/tests/e2e/perf/baselines
+            --env VLLM_USE_RUST_FRONTEND=0
+            --env VLLM_USE_RUST_BENCH=0
+        )
+        mount_snapshot_if_external "${model_snapshot}"
+        create+=(
+            --entrypoint bash "${image_id}"
+            /source/scripts/ci/ppu_model_perf.sh
         )
         ;;
     kernel-perf)

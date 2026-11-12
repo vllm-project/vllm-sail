@@ -98,6 +98,52 @@ issue and fails the job. Installation failure stops before that report step.
 This scheduled check does not replace PR checks, and none of these public CPU
 jobs runs PPU inference or `tests/e2e`.
 
+### Model forward performance nightly
+
+The [precision and performance nightly](../../.github/workflows/ppu-accuracy-nightly.yaml)
+reuses one build's wheels for model performance and accuracy. Performance runs
+first on eight M890 devices; its failure does not suppress the accuracy matrix.
+Neither lane is part of the per-PR gate. 810E performance is not qualified.
+
+The [forward configuration](../../scripts/ci/ppu_forward_models.json) starts with
+DeepSeek-V4 MXFP4, DP8+EP, real weights and real MoE routing. Global decode batches
+32 and 64 are split into 4 and 8 requests per DP rank:
+
+```text
+decode_b32_k4096=4*1@4096
+decode_b64_k4096=8*1@4096
+```
+
+Each request advances one token. KV length 4096 includes that query token, so
+its existing prefix has 4095 tokens. The benchmark fixes KV jitter to zero and
+collects 20 × 5 timed replays per case after upstream's built-in warmup. It uses
+`--exclude-drafter`: DSpark remains configured for model initialization, but the
+measured interval is target-only. The current verified upstream pin excludes
+sampling as well. Forward bypasses normal scheduling and uses its own CUDA graph
+instead of the production graph manager; HTTP, CPU step overhead and serving
+TTFT/TPOT are not measured. Shape tokens/s is not serving throughput.
+
+By default the runtime resolves the checkpoint from the read-only offline HF
+cache and records its snapshot revision. Manual nightly inputs `perf_model_path`
+and `perf_model_revision` select an explicit host checkpoint, such as a developer
+mount; provide its immutable revision together with the path. The resolved
+checkpoint is mounted read-only. SDK/Torch stack checks and wheel-manifest
+validation remain strict, and the installed wheels run outside the source tree.
+
+Artifacts include raw `forward.json`, command and runtime identities,
+`perf-summary.json`, `perf-summary.html`, logs and a pending candidate under
+`baselines/890p/model.json`. Review the measured candidate, mark its metrics
+`confirmed`, and add it to `tests/e2e/perf/baselines/890p/model.json` in a separate
+reviewed change. No numerical golden is supplied before device measurement.
+Nightly comparisons never overwrite the checked-in golden. Missing goldens
+report `PENDING`, not performance acceptance. Model/configuration/runtime changes
+require baseline review; source commits are retained as evidence, not case keys.
+
+Comparison uses the existing 10% WARN and 25% FAIL bands after subtracting the
+3% noise floor. Invalid shapes, incomplete rank/sample results, non-finite
+outputs or sample-median spread over 0.5% fail the lane even without a golden.
+Graph/eager differences remain diagnostics, not model accuracy qualification.
+
 ### Upstream test reuse
 
 Upstream reuse runs on a single M890 card in the authorized PPU pipeline, not
