@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """GLM's FP8 producers must not reach SAIL's MXFP4-only weighted API."""
 
+import sys
 from types import SimpleNamespace as NS
 
 import pytest
@@ -10,6 +11,10 @@ from tests.support.source import assert_accepts_upstream_keywords, function
 
 PATCH = "vllm_sail/patch/enhancement/attention/sparse_attn_indexer_kpool.py"
 TARGET = "vllm.models.glm5next.nvidia.sparse_indexer"
+CONSUMERS = (
+    "vllm.models.glm5next.sparse_indexer",
+    "vllm.models.glm5next.common.attention",
+)
 
 
 class Tensor:
@@ -27,8 +32,14 @@ class Tensor:
         return 1
 
 
-@pytest.fixture
-def kpool(modules, patch_utils_module):
+@pytest.fixture(params=[False, True], ids=["cold", "preloaded"])
+def kpool(modules, patch_utils_module, monkeypatch, request):
+    if request.param:
+        # Installed-vLLM CI can preload these consumers before this fixture
+        # replaces the provider. Reproduce that state on bare CPU runners too.
+        for name in CONSUMERS:
+            monkeypatch.setitem(sys.modules, name, NS(SparseAttnIndexerKpool=object()))
+
     class Indexer:
         def forward_native(self, *args, **kwargs):
             return self.forward_cuda(*args, **kwargs)
@@ -65,7 +76,16 @@ def kpool(modules, patch_utils_module):
         fp8_fp4_mqa_logits=originals[0],
         fp8_fp4_paged_mqa_logits=originals[1],
     )
+    # Isolate the complete provider/consumer graph, including modules that
+    # real-vLLM test collection may already have imported.
+    for name in CONSUMERS:
+        modules(name, SparseAttnIndexerKpool=Indexer)
     installed = load_patch(PATCH)
+    assert installed._EXPECTED_CONSUMERS == CONSUMERS
+    for name in CONSUMERS:
+        assert (
+            sys.modules[name].SparseAttnIndexerKpool is provider.SparseAttnIndexerKpool
+        )
     for name, original in zip(
         ("fp8_fp4_mqa_logits", "fp8_fp4_paged_mqa_logits"), originals, strict=False
     ):
