@@ -299,6 +299,44 @@ def test_810e_v41_uses_1017_int8_checkpoint():
     )
 
 
+@pytest.mark.parametrize("device,capability", [("810e", (8, 0)), ("890", (8, 9))])
+def test_runtime_checks_device_family_and_records_selected_catalog(
+    monkeypatch, device, capability
+):
+    cuda = SimpleNamespace(
+        is_available=lambda: True,
+        device_count=lambda: 1,
+        get_device_capability=lambda index: capability,
+        get_device_name=lambda index: "test PPU",
+    )
+    for name, module in {
+        "torch": SimpleNamespace(cuda=cuda),
+        "vllm": SimpleNamespace(__file__="/env/site-packages/vllm/__init__.py"),
+        "vllm.platforms": SimpleNamespace(
+            current_platform=SimpleNamespace(is_ppu=lambda: True)
+        ),
+        "vllm_sail": SimpleNamespace(
+            __file__="/env/site-packages/vllm_sail/__init__.py"
+        ),
+        "vllm_sail.compat": SimpleNamespace(
+            check_vllm_compatibility=lambda **kwargs: None
+        ),
+    }.items():
+        monkeypatch.setitem(sys.modules, name, module)
+    monkeypatch.setattr(sanity.importlib.metadata, "version", lambda name: "test")
+    catalog = sanity.CATALOG.with_name(f"ppu_{device}_sanity_models.json")
+    environment = sanity.runtime_environment(device, catalog)
+    assert environment["devices"][0]["capability"] == capability
+    assert environment["device_family"] == device
+    assert (
+        environment["catalog_sha256"]
+        == sanity.hashlib.sha256(catalog.read_bytes()).hexdigest()
+    )
+    other_device = "890" if device == "810e" else "810e"
+    with pytest.raises(RuntimeError, match=f"is not {other_device}"):
+        sanity.runtime_environment(other_device, catalog)
+
+
 def test_insufficient_devices_fail_without_starting_a_server(tmp_path):
     checkpoint = tmp_path / "checkpoint"
     checkpoint.mkdir()
