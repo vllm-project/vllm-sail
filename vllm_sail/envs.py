@@ -37,6 +37,7 @@ if TYPE_CHECKING:
     VLLM_SAIL_USE_PLA: bool = True
     VLLM_SAIL_DEEPGEMM_MOE_TP_FUSED: bool = False
     VLLM_SAIL_DEEPGEMM_MOE_FUSED_ACT_QUANT: bool = False
+    VLLM_SAIL_DEEPGEMM_MEGA_GATE: bool = False
     VLLM_SAIL_USE_DEEPSELECT: bool = True
     VLLM_SAIL_MOE_BACKEND: str | None = None
     VLLM_SAIL_DENSE_BACKEND: str | None = None
@@ -62,6 +63,7 @@ if TYPE_CHECKING:
     VLLM_PPU_USE_PLA: bool = True
     VLLM_PPU_DEEPGEMM_MOE_TP_FUSED: bool = False
     VLLM_PPU_DEEPGEMM_MOE_FUSED_ACT_QUANT: bool = False
+    VLLM_PPU_DEEPGEMM_MEGA_GATE: bool = False
     VLLM_PPU_USE_DEEPSELECT: bool = True
     VLLM_PPU_MOE_BACKEND: str | None = None
     VLLM_PPU_DENSE_BACKEND: str | None = None
@@ -161,6 +163,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_SAIL_DENSE_BF16_DEEPGEMM": _bool("VLLM_SAIL_DENSE_BF16_DEEPGEMM", False),
     "VLLM_SAIL_USE_PLA": _bool("VLLM_SAIL_USE_PLA", True),
     "VLLM_SAIL_DEEPGEMM_MOE_TP_FUSED": _bool("VLLM_SAIL_DEEPGEMM_MOE_TP_FUSED", False),
+    "VLLM_SAIL_DEEPGEMM_MEGA_GATE": _bool("VLLM_SAIL_DEEPGEMM_MEGA_GATE", False),
     "VLLM_SAIL_USE_DEEPSELECT": _bool("VLLM_SAIL_USE_DEEPSELECT", True),
     # Fuse the second GEMM's input quantization into DeepGEMM's activation
     # kernel (`silu_and_mul` / `situ_and_mul`) instead of running the activation
