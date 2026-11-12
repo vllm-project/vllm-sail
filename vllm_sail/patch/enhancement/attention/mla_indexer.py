@@ -262,13 +262,14 @@ def dsa_indexer_uses_fp4(vllm_config):
     return kv_dtype == "mxfp4"
 
 
-# Model modules can capture the capability helper before general plugins load.
+# Models and sparse metadata can capture the helper before general plugins load.
 import sys
 
 for _consumer_name in (
     "vllm.model_executor.models.deepseek_v2",
     "vllm.models.deepseek_v4.attention",
     "vllm.models.deepseek_v41.attention",
+    "vllm.v1.attention.backends.mla.sparse_indexer",
 ):
     _consumer = sys.modules.get(_consumer_name)
     if (

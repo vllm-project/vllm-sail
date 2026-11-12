@@ -25,7 +25,9 @@ def config(value, model_type="deepseek_v4"):
 
 @pytest.fixture
 def installed_indexer(modules, patch_utils_module):
-    def load(capability, *, ppu=True):
+    def load(
+        capability, *, ppu=True, consumer_name="vllm.models.deepseek_v41.attention"
+    ):
         calls = []
         platform = NS(
             is_ppu=lambda: ppu, is_device_capability=lambda cap: capability == cap
@@ -70,27 +72,34 @@ def installed_indexer(modules, patch_utils_module):
             _supports_varlen_paged_mqa_logits=lambda: False,
             DSA_INDEXER_KV_DTYPES=("fp8", "mxfp4"),
         )
-        v41 = modules(
-            "vllm.models.deepseek_v41.attention", dsa_indexer_uses_fp4=upstream
-        )
+        consumer = modules(consumer_name, dsa_indexer_uses_fp4=upstream)
         patch = load_patch("vllm_sail/patch/enhancement/attention/mla_indexer.py")
         assert provider.dsa_indexer_uses_fp4 is patch.dsa_indexer_uses_fp4
-        assert v41.dsa_indexer_uses_fp4 is patch.dsa_indexer_uses_fp4
-        target = "vllm.models.deepseek_v41.attention.dsa_indexer_uses_fp4"
+        assert consumer.dsa_indexer_uses_fp4 is patch.dsa_indexer_uses_fp4
+        target = f"{consumer_name}.dsa_indexer_uses_fp4"
         assert (
-            patch_utils_module.original_of(v41.dsa_indexer_uses_fp4, target) is upstream
+            patch_utils_module.original_of(consumer.dsa_indexer_uses_fp4, target)
+            is upstream
         )
         with pytest.raises(RuntimeError, match="already"):
             patch_utils_module.patch(
-                "vllm.models.deepseek_v41.attention",
+                consumer_name,
                 "dsa_indexer_uses_fp4",
-                reason="Reject duplicate V4.1 capability rebinding.",
+                reason="Reject duplicate capability rebinding.",
                 affected_versions=">=0.33.0,<0.34.0",
                 remove_when="The consumer resolves the provider dynamically.",
             )(lambda config: False)
         return provider.dsa_indexer_uses_fp4, calls
 
     return load
+
+
+def test_preloaded_sparse_metadata_uses_ppu_fp4_capability(installed_indexer):
+    uses_fp4, calls = installed_indexer(
+        89, consumer_name="vllm.v1.attention.backends.mla.sparse_indexer"
+    )
+    assert uses_fp4(config("mxfp4", "deepseek_v41")) is True
+    assert calls == []
 
 
 @pytest.mark.parametrize(
