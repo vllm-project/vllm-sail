@@ -1,0 +1,46 @@
+name: PPU model performance nightly
+
+on:
+  workflow_dispatch:
+    inputs:
+      model_path:
+        description: "Performance checkpoint directory (blank = offline HF cache)"
+        required: false
+        default: ""
+        type: string
+      model_revision:
+        description: "Immutable model revision (required with model_path)"
+        required: false
+        default: ""
+        type: string
+
+  schedule:
+    - cron: "17 19 * * *"
+
+permissions:
+  contents: read
+  actions: read
+cache-mode: none
+
+concurrency:
+  group: model-perf-nightly-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build performance wheels
+    uses: ./.github/workflows/ppu-build-and-test.yaml
+    with:
+      pr_head_sha: ${{ github.sha }}
+      skip_device_tests: true
+
+  model-perf:
+    name: Model forward performance
+    needs: [build]
+    uses: ./.github/workflows/_ppu-model-perf.yaml
+    with:
+      pr_head_sha: ${{ github.sha }}
+      wheel_source_sha: ${{ github.sha }}
+      build_run_id: ${{ github.run_id }}
+      model_path: ${{ inputs.model_path || '' }}
+      model_revision: ${{ inputs.model_revision || '' }}

@@ -100,10 +100,17 @@ jobs runs PPU inference or `tests/e2e`.
 
 ### Model forward performance nightly
 
-The [precision and performance nightly](../../.github/workflows/ppu-accuracy-nightly.yaml)
-reuses one build's wheels for model performance and accuracy. Performance runs
-first on eight M890 devices; its failure does not suppress the accuracy matrix.
-Neither lane is part of the per-PR gate. 810E performance is not qualified.
+The [model performance nightly](../../.github/workflows/ppu-model-perf-nightly.yaml)
+runs independently of the accuracy nightly, with its own trigger, build and
+result. It only builds the tested commit's wheels and runs model forward
+performance on eight M890 devices; it never dispatches the accuracy matrix.
+Its schedule is 19:17 UTC (03:17 China Standard Time). Manual inputs `model_path`
+and `model_revision` select a local checkpoint. Neither nightly is part of the
+per-PR gate. 810E performance is not qualified.
+
+Both workflows use the runtime's exclusive runner lock. Separate schedules do
+not guarantee that long-running jobs cannot overlap; a busy runner fails the
+lock check rather than sharing devices or producing contaminated measurements.
 
 The [forward configuration](../../scripts/ci/ppu_forward_models.json) starts with
 DeepSeek-V4 MXFP4, DP8+EP, real weights and real MoE routing. Global decode batches
@@ -124,8 +131,8 @@ instead of the production graph manager; HTTP, CPU step overhead and serving
 TTFT/TPOT are not measured. Shape tokens/s is not serving throughput.
 
 By default the runtime resolves the checkpoint from the read-only offline HF
-cache and records its snapshot revision. Manual nightly inputs `perf_model_path`
-and `perf_model_revision` select an explicit host checkpoint, such as a developer
+cache and records its snapshot revision. Manual nightly inputs `model_path`
+and `model_revision` select an explicit host checkpoint, such as a developer
 mount; provide its immutable revision together with the path. The resolved
 checkpoint is mounted read-only. SDK/Torch stack checks and wheel-manifest
 validation remain strict, and the installed wheels run outside the source tree.

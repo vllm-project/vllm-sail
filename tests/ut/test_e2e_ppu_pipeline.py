@@ -20,6 +20,7 @@ EVAL_SCRIPT = ROOT / "scripts" / "eval" / "ppu_gsm8k_eval.py"
 GOLDEN = ROOT / "tests" / "e2e" / "models" / "_golden"
 MODEL_WORKFLOW = ROOT / ".github" / "workflows" / "_ppu-model-tests.yaml"
 MODEL_PERF_WORKFLOW = ROOT / ".github" / "workflows" / "_ppu-model-perf.yaml"
+PERF_NIGHTLY_WORKFLOW = ROOT / ".github" / "workflows" / "ppu-model-perf-nightly.yaml"
 ACCURACY_WORKFLOW = ROOT / ".github" / "workflows" / "_ppu-accuracy-tests.yaml"
 NIGHTLY_WORKFLOW = ROOT / ".github" / "workflows" / "ppu-accuracy-nightly.yaml"
 KERNEL_PERF_WORKFLOW = ROOT / ".github" / "workflows" / "_ppu-kernel-perf.yaml"
@@ -806,20 +807,10 @@ def test_accuracy_nightly_is_serial_and_wheel_sourced_from_the_build_commit() ->
         "pr_head_sha": "${{ github.sha }}",
         "skip_device_tests": True,
     }
-    perf = nightly["jobs"]["model-perf"]
-    assert perf["needs"] == ["build"]
-    assert perf["uses"] == "./.github/workflows/_ppu-model-perf.yaml"
-    assert accuracy["needs"] == ["build", "select", "model-perf"]
-    assert accuracy["if"] == (
-        "${{ !cancelled() && needs.build.result == 'success' && "
-        "needs.select.result == 'success' }}"
-    )
-    # Performance failure must not suppress accuracy over the same build.
-    assert "model-perf" not in accuracy["if"]
-    for job in (perf, accuracy):
-        assert job["with"]["pr_head_sha"] == "${{ github.sha }}"
-        assert job["with"]["wheel_source_sha"] == "${{ github.sha }}"
-        assert job["with"]["build_run_id"] == "${{ github.run_id }}"
+    assert accuracy["needs"] == ["build", "select"]
+    assert accuracy["with"]["pr_head_sha"] == "${{ github.sha }}"
+    assert accuracy["with"]["wheel_source_sha"] == "${{ github.sha }}"
+    assert accuracy["with"]["build_run_id"] == "${{ github.run_id }}"
     assert accuracy["with"]["pr_mode"] is False
     # The accuracy work runs inside the reusable call, not on a hosted shell.
     assert "runs-on" not in accuracy
@@ -940,22 +931,56 @@ def test_model_perf_workflow_uses_private_checkout_and_exact_wheel_identity() ->
     }
 
 
-def test_nightly_dispatch_keeps_accuracy_models_and_optional_perf_checkpoint() -> None:
-    nightly = _workflow(NIGHTLY_WORKFLOW)
+def test_performance_nightly_has_its_own_build_trigger_and_result() -> None:
+    nightly = _workflow(PERF_NIGHTLY_WORKFLOW)
+    assert nightly["name"] == "PPU model performance nightly"
+    assert set(nightly[True]) == {"workflow_dispatch", "schedule"}
+    assert nightly[True]["schedule"] == [{"cron": "17 19 * * *"}]
+    assert nightly["permissions"] == {"contents": "read", "actions": "read"}
+    assert nightly["cache-mode"] == "none"
+    assert set(nightly["jobs"]) == {"build", "model-perf"}
+    assert nightly["jobs"]["build"]["uses"] == (
+        "./.github/workflows/ppu-build-and-test.yaml"
+    )
+    assert nightly["jobs"]["build"]["with"] == {
+        "pr_head_sha": "${{ github.sha }}",
+        "skip_device_tests": True,
+    }
+    perf = nightly["jobs"]["model-perf"]
+    assert perf["needs"] == ["build"]
+    assert perf["uses"] == "./.github/workflows/_ppu-model-perf.yaml"
+    assert perf["with"]["pr_head_sha"] == "${{ github.sha }}"
+    assert perf["with"]["wheel_source_sha"] == "${{ github.sha }}"
+    assert perf["with"]["build_run_id"] == "${{ github.run_id }}"
     inputs = nightly[True]["workflow_dispatch"]["inputs"]
-    assert set(inputs) == {"models", "perf_model_path", "perf_model_revision"}
+    assert set(inputs) == {"model_path", "model_revision"}
     for name in inputs:
         assert inputs[name]["type"] == "string"
         assert inputs[name]["default"] == ""
         assert inputs[name]["required"] is False
-    perf_inputs = nightly["jobs"]["model-perf"]["with"]
-    assert perf_inputs["model_path"] == "${{ inputs.perf_model_path || '' }}"
-    assert perf_inputs["model_revision"] == "${{ inputs.perf_model_revision || '' }}"
-    assert "models" not in perf_inputs
-    assert nightly["concurrency"]["cancel-in-progress"] is False
+        assert perf["with"][name] == "${{ inputs." + name + " || '' }}"
+    assert nightly["concurrency"] == {
+        "group": "model-perf-nightly-${{ github.ref }}",
+        "cancel-in-progress": False,
+    }
 
 
-@pytest.mark.parametrize("path", [MODEL_PERF_WORKFLOW, NIGHTLY_WORKFLOW])
+def test_accuracy_and_performance_nightly_are_independent() -> None:
+    accuracy = _workflow(NIGHTLY_WORKFLOW)
+    performance = _workflow(PERF_NIGHTLY_WORKFLOW)
+    assert accuracy["name"] == "PPU accuracy nightly"
+    assert set(accuracy["jobs"]) == {"build", "select", "accuracy"}
+    assert set(accuracy[True]["workflow_dispatch"]["inputs"]) == {"models"}
+    assert accuracy["jobs"]["accuracy"]["needs"] == ["build", "select"]
+    assert "if" not in accuracy["jobs"]["accuracy"]
+    assert "_ppu-model-perf.yaml" not in NIGHTLY_WORKFLOW.read_text()
+    assert "_ppu-accuracy-tests.yaml" not in PERF_NIGHTLY_WORKFLOW.read_text()
+    assert accuracy["concurrency"]["group"] != performance["concurrency"]["group"]
+
+
+@pytest.mark.parametrize(
+    "path", [MODEL_PERF_WORKFLOW, PERF_NIGHTLY_WORKFLOW, NIGHTLY_WORKFLOW]
+)
 def test_model_perf_inputs_never_interpolate_into_shell(path: Path) -> None:
     for job in _workflow(path)["jobs"].values():
         for step in job.get("steps", []):
