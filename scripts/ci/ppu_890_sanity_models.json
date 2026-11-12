@@ -6,6 +6,12 @@
     "args": [
       "--gpu-memory-utilization",
       "0.9",
+      "--max-num-seqs",
+      "16",
+      "--max-model-len",
+      "32768",
+      "--max-num-batched-tokens",
+      "4096",
       "--kv-cache-dtype",
       "fp8",
       "--block-size",
