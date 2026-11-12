@@ -582,6 +582,107 @@ def preprocess_weights_and_scales(*args, **kwargs):
     return _preprocess_weights_and_scales_impl(*args, **kwargs)
 
 
+# ---------------------------------------------------------------------------
+# MegaMoE: fused EP dispatch, expert GEMMs and combine (PPU 1.5 only).
+# The workspace and the transformed weight banks are opaque DeepGEMM-owned
+# handles, so these stay thin forwarding wrappers instead of resolved impls.
+# ---------------------------------------------------------------------------
+
+
+def get_symm_buffer_for_mega_moe(*args: Any, **kwargs: Any) -> Any:
+    """Allocate the symmetric MegaMoE workspace for the given geometry.
+
+    Allocation happens on the first call, so an unsupported device fails inside
+    DeepGEMM rather than at ``import vllm_sail``.
+    """
+    return importlib.import_module("deep_gemm").get_symm_buffer_for_mega_moe(
+        *args, **kwargs
+    )
+
+
+def transform_weights_for_w4a8_mega_moe(l1_weights: Any, l2_weights: Any) -> Any:
+    """Preprocess raw MXFP4 gate/up and down banks for the W4A8 MegaMoE kernels.
+
+    Each input is a ``(packed uint8 weight, raw uint8 UE8M0 scale)`` pair and
+    each returned bank is ``(weight, scale, inv_scale)``. Run once per bank
+    when its weights are ready -- never per forward -- and keep the result; the
+    inverse scale compensates load-time exponent rebasing and is independent of
+    the routing weights and of the input row scales.
+    """
+    return importlib.import_module("deep_gemm").transform_weights_for_w4a8_mega_moe(
+        l1_weights, l2_weights
+    )
+
+
+def mega_moe_pre_dispatch(
+    x: torch.Tensor,
+    topk_idx: torch.Tensor,
+    topk_weights: torch.Tensor,
+    buf_x: torch.Tensor,
+    buf_x_sf: torch.Tensor,
+    buf_topk_idx: torch.Tensor,
+    buf_topk_weights: torch.Tensor,
+    num_tokens: int,
+    group_size: int = 32,
+    mma_type: str = "mxf4xmxf4",
+) -> None:
+    """Quantize ``num_tokens`` rows and stage their routes in the workspace.
+
+    The four ``buf_*`` arguments must be the original views of one live
+    ``SymmBuffer``; routes may repeat ``-1`` to mark masked slots.
+    """
+    importlib.import_module("deep_gemm").mega_moe_pre_dispatch(
+        x,
+        topk_idx,
+        topk_weights,
+        buf_x,
+        buf_x_sf,
+        buf_topk_idx,
+        buf_topk_weights,
+        num_tokens,
+        group_size,
+        mma_type,
+    )
+
+
+def fp8_fp4_mega_moe(*args: Any, **kwargs: Any) -> None:
+    """Run the complete E4M3 x MXFP4 MegaMoE: dispatch, GEMMs and combine."""
+    importlib.import_module("deep_gemm").fp8_fp4_mega_moe(*args, **kwargs)
+
+
+def transform_weights_for_mega_moe(
+    l1_weights: Any, l2_weights: Any, activation: str = "swiglu"
+) -> Any:
+    """Preprocess raw MXFP4 banks for the W4A4 (MXFP4 x MXFP4) MegaMoE kernel.
+
+    Inputs and returns are ``(packed uint8 weight, uint8 UE8M0 scale)`` pairs;
+    the scales come back packed uint16 N-major. Unlike W4A8 there is no
+    inverse scale -- activations are quantized to MXFP4 in pre-dispatch.
+    """
+    return importlib.import_module("deep_gemm").transform_weights_for_mega_moe(
+        l1_weights, l2_weights, activation
+    )
+
+
+def transform_weights_for_w4a16_mega_moe(
+    l1_weights: Any, l2_weights: Any, activation: str = "situ"
+) -> Any:
+    """Pack raw MXFP4 banks for the W4A16 (BF16 x MXFP4) SiTU MegaMoE kernel."""
+    return importlib.import_module(
+        "deep_gemm"
+    ).transform_weights_for_w4a16_mega_moe(l1_weights, l2_weights, activation)
+
+
+def fp4_fp4_mega_moe(*args: Any, **kwargs: Any) -> None:
+    """Run the complete MXFP4 x MXFP4 (W4A4) MegaMoE: dispatch, GEMMs, combine."""
+    importlib.import_module("deep_gemm").fp4_fp4_mega_moe(*args, **kwargs)
+
+
+def bf16_fp4_mega_moe(*args: Any, **kwargs: Any) -> None:
+    """Run the complete BF16 x MXFP4 (W4A16, SiTU-only) MegaMoE."""
+    importlib.import_module("deep_gemm").bf16_fp4_mega_moe(*args, **kwargs)
+
+
 def m_grouped_w4a16_gemm_nt_nopad(*args, **kwargs):
     _lazy_init()
     if _w4a16_grouped_nopad_impl is None:
@@ -808,6 +909,7 @@ def get_paged_mqa_logits_metadata(
     block_size: int,
     num_sms: int,
     metadata_extra: tuple | None,
+    indices: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Build scheduling metadata for paged MQA logits.
 
@@ -816,6 +918,11 @@ def get_paged_mqa_logits_metadata(
             per batch element.
         block_size: KV-cache block size in tokens (e.g., 64).
         num_sms: Number of SMs available. 132 for Hopper
+        metadata_extra: Backend-specific tuple
+            ``(next_n, num_heads, logical_head_dim, qk_dtype)``.
+        indices: Optional per-query request index for the varlen decode layout
+            (one row per query token). Required by the MXFP4 paged logits
+            kernel; forwarded to the backend only when provided.
 
     Returns:
         Backend-specific tensor consumed by `fp8_paged_mqa_logits` to
@@ -827,6 +934,8 @@ def get_paged_mqa_logits_metadata(
     kwargs = {}
     if metadata_extra is not None:
         kwargs["metadata_extra"] = metadata_extra
+    if indices is not None:
+        kwargs["indices"] = indices
     return _get_paged_mqa_logits_metadata_impl(
         context_lens,
         block_size,
@@ -1344,6 +1453,14 @@ __all__ = [
     "get_col_major_tma_aligned_tensor",
     "get_mk_alignment_for_contiguous_layout",
     "moe_align_block_size",
+    "get_symm_buffer_for_mega_moe",
+    "transform_weights_for_w4a8_mega_moe",
+    "transform_weights_for_mega_moe",
+    "transform_weights_for_w4a16_mega_moe",
+    "mega_moe_pre_dispatch",
+    "fp8_fp4_mega_moe",
+    "fp4_fp4_mega_moe",
+    "bf16_fp4_mega_moe",
     "has_fused_act_quant",
     "has_masked_fused_act_quant",
     "get_activation_mode",

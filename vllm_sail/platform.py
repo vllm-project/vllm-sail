@@ -239,14 +239,30 @@ class PPUPlatform(NvmlCudaPlatform):
         # Registering PPU custom ops here (rather than at plugin import) keeps
         # the registration after torch and the platform are both initialised.
         from vllm_sail import ops  # noqa: F401
+        import vllm_sail.envs as ppu_envs
 
         from vllm_sail.models.deepseek_v41.config import normalize_expert_dtype
 
         normalize_expert_dtype(vllm_config)
 
         if vllm_config.kernel_config.moe_backend == "deep_gemm_mega_moe":
-            raise ValueError(
-                "PPU DeepGEMM does not support MegaMoE; select ppu_deep_gemm or auto."
+            # PPU's DeepGEMM only grew the W4A8 MegaMoE entry on PPU 1.5
+            # (capability 8.9); older parts keep the fused-MoE backends.
+            #
+            # The capability is deliberately *not* probed here: every probe
+            # behind ``is_ppu_15`` is cached (``NvmlCudaPlatform.
+            # get_device_capability`` is ``@cache``), and this hook runs while
+            # the config is still being resolved, before the device is
+            # necessarily visible. A miss here would be remembered by that
+            # cache and resurface later as a spurious NotImplementedError from
+            # ``check_deep_gemm_mega_moe_supported``. The hard check belongs to
+            # layer construction, where the device is fully initialised.
+            logger.info_once(
+                "PPU DeepGEMM MegaMoE selected (MXFP4 weights, execution "
+                "precision VLLM_SAIL_MEGA_MOE_MMA_TYPE=%s); it requires PPU 1.5 "
+                "(compute capability 8.9), which is verified when the MoE layer "
+                "is built.",
+                ppu_envs.VLLM_SAIL_MEGA_MOE_MMA_TYPE,
             )
 
         compilation_config = vllm_config.compilation_config

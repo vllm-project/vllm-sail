@@ -103,20 +103,22 @@ def test_ppu_fp4_constructor_delegates_then_adds_fork_state(builder_factory):
     assert builder.indexer_n_head == 64
     assert builder.indexer_q_head_dim == 128
     assert builder.num_sms == 7
-    assert builder.scheduler_metadata_buffer.shape == (7 * 8 + 1, 2)
+    assert builder.scheduler_metadata_buffer.shape == (7 * 16 + 1, 2)
     assert builder.scheduler_metadata_buffer.dtype == "int32"
     assert builder.scheduler_metadata_buffer.device == "ppu:0"
 
 
-def test_ppu_fp8_constructor_keeps_upstream_buffer(builder_factory):
+def test_ppu_fp8_constructor_sizes_the_buffer_too(builder_factory):
     builder_cls, _ = builder_factory(ppu=True, fp4=False)
     builder = builder_cls("config")
 
     assert builder.supports_varlen is False
-    assert builder.indexer_n_head == 0
-    assert builder.indexer_q_head_dim == 0
+    # The paged metadata tuple is required for both cache formats, so the
+    # geometry is cached and the buffer sized for more than one block per CU.
+    assert builder.indexer_n_head == 64
+    assert builder.indexer_q_head_dim == 128
     assert builder.num_sms == 7
-    assert builder.scheduler_metadata_buffer.shape == ("upstream",)
+    assert builder.scheduler_metadata_buffer.shape == (7 * 16 + 1, 2)
 
 
 def test_non_ppu_constructor_is_left_untouched(builder_factory):

@@ -43,7 +43,7 @@ def _paged_namespace(modules, *, ppu, builder=None):
         "_current_builder": [builder] if builder is not None else [],
         "_upstream_paged_metadata": upstream,
         "_ppu_deep_gemm": NS(get_paged_mqa_logits_metadata=paged),
-        "_indexer_module": NS(PPU_FP4_INDEXER_ELEMENT_SIZE=1),
+        "_ppu_metadata_extra": lambda context_lens: ("derived",),
     }
     modules("vllm.platforms", current_platform=NS(is_ppu=lambda: ppu))
     return namespace, calls, fallback
@@ -101,25 +101,135 @@ def test_draft_refresh_wrapper_keeps_the_builder_visible():
     assert namespace["_current_builder"] == []
 
 
-def test_paged_metadata_derives_the_fp4_extra_from_the_builder(modules):
-    builder = NS(indexer_n_head=64, indexer_q_head_dim=128)
-    namespace, calls, fallback = _paged_namespace(modules, ppu=True, builder=builder)
+def test_paged_metadata_delegates_the_derived_extra(modules):
+    namespace, calls, fallback = _paged_namespace(modules, ppu=True)
 
     result = function(PATCH, "_ppu_paged_metadata", namespace)(Span(), 64, 7)
 
     assert result == "ppu-metadata"
-    assert calls == [(ANY, 64, 7, (1, 64, 128, 1))]
+    assert calls == [(ANY, 64, 7, ("derived",))]
     assert not fallback
 
 
-def test_paged_metadata_keeps_the_standard_layout_without_fp4_heads(modules):
-    namespace, calls, fallback = _paged_namespace(modules, ppu=True)
-    namespace["_current_builder"] = [NS(indexer_n_head=0, indexer_q_head_dim=128)]
+def test_paged_metadata_keeps_an_explicit_extra(modules):
+    namespace, calls, _ = _paged_namespace(modules, ppu=True)
 
-    function(PATCH, "_ppu_paged_metadata", namespace)(Span(), 64, 7)
+    function(PATCH, "_ppu_paged_metadata", namespace)(Span(), 64, 7, ("given",))
 
-    assert calls[0][3] is None
-    assert not fallback
+    assert calls == [(ANY, 64, 7, ("given",))]
+
+
+def _extra_namespace(modules, builder=None, *, capability=89):
+    modules(
+        "vllm.platforms",
+        current_platform=NS(is_device_capability=lambda cap: cap == capability),
+    )
+    return {
+        "_current_builder": [builder] if builder is not None else [],
+        "torch": NS(int8="int8", float8_e4m3fn="float8_e4m3fn"),
+    }
+
+
+def test_metadata_extra_reports_the_logical_mxfp4_geometry(modules):
+    builder = NS(indexer_n_head=32, indexer_q_head_dim=128, indexer_uses_fp4=True)
+
+    extra = function(PATCH, "_ppu_metadata_extra", _extra_namespace(modules, builder))(
+        Span()
+    )
+
+    assert extra == (1, 32, 128, "int8")
+
+
+def test_metadata_extra_uses_fp8_for_the_fp8_cache(modules):
+    builder = NS(indexer_n_head=32, indexer_q_head_dim=128, indexer_uses_fp4=False)
+
+    extra = function(PATCH, "_ppu_metadata_extra", _extra_namespace(modules, builder))(
+        Span()
+    )
+
+    assert extra == (1, 32, 128, "float8_e4m3fn")
+
+
+def test_metadata_extra_uses_int8_for_the_fp8_cache_on_810e(modules):
+    builder = NS(indexer_n_head=32, indexer_q_head_dim=128, indexer_uses_fp4=False)
+
+    extra = function(
+        PATCH, "_ppu_metadata_extra", _extra_namespace(modules, builder, capability=80)
+    )(Span())
+
+    assert extra == (1, 32, 128, "int8")
+
+
+def test_metadata_extra_rejects_missing_geometry(modules):
+    builder = NS(indexer_uses_fp4=True)
+
+    with pytest.raises(NotImplementedError, match="indexer_n_head=0"):
+        function(PATCH, "_ppu_metadata_extra", _extra_namespace(modules, builder))(
+            Span()
+        )
+
+
+def test_metadata_extra_requires_the_builder(modules):
+    with pytest.raises(NotImplementedError, match="no builder is active"):
+        function(PATCH, "_ppu_metadata_extra", _extra_namespace(modules))(Span())
+
+
+def test_builder_geometry_falls_back_to_the_hf_text_config():
+    # Kimi-K3.1 shape: the indexer cache spec carries no geometry and the HF
+    # config nests it under dsa_config.
+    text_config = NS(dsa_config=NS(index_num_heads=32, index_head_dim=128))
+    builder = NS(
+        kv_cache_spec=NS(indexer_n_head=None, indexer_q_head_dim=None),
+        vllm_config=NS(model_config=NS(hf_text_config=text_config)),
+    )
+    attr = function(PATCH, "_builder_attr", {})
+
+    assert attr(builder, "indexer_n_head", "index_num_heads", "index_n_heads") == 32
+    assert attr(builder, "indexer_q_head_dim", "index_head_dim") == 128
+
+
+def test_builder_geometry_accepts_the_v32_config_names():
+    text_config = NS(dsa_config={}, index_n_heads=64, index_head_dim=128)
+    builder = NS(
+        kv_cache_spec=NS(), vllm_config=NS(model_config=NS(hf_text_config=text_config))
+    )
+    attr = function(PATCH, "_builder_attr", {})
+
+    assert attr(builder, "indexer_n_head", "index_num_heads", "index_n_heads") == 64
+    assert attr(builder, "indexer_q_head_dim", "index_head_dim") == 128
+
+
+def test_builder_geometry_prefers_the_kv_cache_spec():
+    builder = NS(
+        kv_cache_spec=NS(indexer_n_head=64, indexer_q_head_dim=128),
+        vllm_config=None,
+    )
+    attr = function(PATCH, "_builder_attr", {})
+
+    assert attr(builder, "indexer_n_head", "index_num_heads", "index_n_heads") == 64
+    assert attr(builder, "indexer_q_head_dim", "index_head_dim") == 128
+
+
+def test_builder_geometry_prefers_the_dsa_config():
+    text_config = NS(dsa_config=NS(index_head_dim=128), index_head_dim=64)
+    builder = NS(
+        kv_cache_spec=NS(), vllm_config=NS(model_config=NS(hf_text_config=text_config))
+    )
+    attr = function(PATCH, "_builder_attr", {})
+
+    assert attr(builder, "indexer_q_head_dim", "index_head_dim") == 128
+
+
+def test_builder_geometry_prefers_the_spec_over_the_dsa_config():
+    text_config = NS(dsa_config=NS(index_num_heads=32, index_head_dim=128))
+    builder = NS(
+        kv_cache_spec=NS(indexer_n_head=64, indexer_q_head_dim=None),
+        vllm_config=NS(model_config=NS(hf_text_config=text_config)),
+    )
+    attr = function(PATCH, "_builder_attr", {})
+
+    assert attr(builder, "indexer_n_head", "index_num_heads", "index_n_heads") == 64
+    assert attr(builder, "indexer_q_head_dim", "index_head_dim") == 128
 
 
 def test_paged_metadata_rejects_varlen_indices_on_ppu(modules):

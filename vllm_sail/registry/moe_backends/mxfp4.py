@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
-from vllm.config.kernel import MoEBackend
+from vllm.config.kernel import NATIVE_MEGA_MOE_BACKENDS, MoEBackend
 from vllm.model_executor.layers.fused_moe.oracle import mxfp4 as oracle
 from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
@@ -131,7 +131,11 @@ def backend_to_kernel_cls(
         "mapping. Each standard PPU candidate is followed by its batched "
         "family so the selectors keep upstream's body: the shared "
         "is_supported_config() activation-format check rejects the standard "
-        "candidate for a batched MoE and the batched one for a standard MoE."
+        "candidate for a batched MoE and the batched one for a standard MoE. "
+        "A native MegaMoE backend name also has no mapping, and reaching this "
+        "oracle under one means the layer builds its own FusedMoE, so it is "
+        "rejected with a message naming the model rather than an unknown-name "
+        "error."
     ),
     affected_versions=_AFFECTED,
     remove_when=_REMOVE_WHEN,
@@ -154,6 +158,21 @@ def map_mxfp4_backend(runner_backend: MoEBackend) -> list[Mxfp4MoeBackend]:
             Mxfp4MoeBackend.PPU_DEEPGEMM_MXFP4_FP8,
             Mxfp4MoeBackend.BATCHED_PPU_DEEPGEMM_MXFP4_FP8,
         ]
+    if runner_backend in NATIVE_MEGA_MOE_BACKENDS:
+        # A native backend is bound by the model's own MoE block and never
+        # reaches this oracle. Landing here means this model's MXFP4 MoE layers
+        # are FusedMoE layers, which MegaMoE cannot serve; reject the backend by
+        # name instead of failing on an unmapped alias.
+        from vllm.platforms import current_platform
+
+        if current_platform.is_ppu():
+            raise NotImplementedError(
+                "This model does not support "
+                f"--moe-backend {runner_backend!r}: its MXFP4 MoE layers run "
+                "through the fused-MoE path, while MegaMoE is a native backend "
+                "bound by the model's own MoE block. Use 'ppu_deep_gemm', "
+                "'ppu_deep_gemm_w4a8', or leave --moe-backend unset."
+            )
     return _upstream_map_mxfp4_backend(runner_backend)
 
 

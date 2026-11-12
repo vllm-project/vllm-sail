@@ -7,8 +7,8 @@ upstream: ``__init__`` delegates to the original method and re-applies only the
 fork's PPU state, ``build`` delegates untouched, so upstream drift (new
 helpers, new parameters, refactors) cannot break this plugin.
 
-* Two module-level constants added by the fork (``PPU_DEEP_GEMM_TB_PER_CU``,
-  ``PPU_FP4_INDEXER_ELEMENT_SIZE``) — installed with ``patch_value``.
+* One module-level constant added by the fork (``PPU_DEEP_GEMM_TB_PER_CU``) —
+  installed with ``patch_value``.
 * The fork's import switch (``vllm.utils.ppu_deep_gemm`` instead of
   ``vllm.utils.deep_gemm`` under ``is_ppu()``): ``has_deep_gemm`` is an
   identity (same object); ``get_paged_mqa_logits_metadata`` is rebound on the
@@ -16,17 +16,18 @@ helpers, new parameters, refactors) cannot break this plugin.
   ``PlatformEnum.CUDA``, so upstream's decode build DOES enter its
   ``is_cuda() and has_deep_gemm()`` block; the rebound helper derives the
   fork's ``metadata_extra`` from the builder currently inside ``build``, so
-  upstream's own buffer fill already uses the fp4 layout.
+  upstream's own buffer fill already uses the ppu layout.
 * ``_split_indexer_prefill_chunks`` derives a logits-dtype-aware budget
   from the builder's fp4 capability (PPU-only delta: both upstreams budget
   a fixed 4 bytes/elem), so the fp4 indexer (bf16 logits) chunks against
   the correct logits budget.
 * ``DeepseekV32IndexerMetadataBuilder.__init__`` delegates to upstream, then
-  adds the fork's PPU-only state: pins ``supports_varlen`` off (PPU declares
-  ``PlatformEnum.CUDA``, so the fork's fixed-length paged-logits metadata
-  layout must not be bypassed), ``indexer_n_head``/``indexer_q_head_dim``
-  from the KV-cache spec, the SM count from PPU DeepGEMM, and the enlarged
-  fp4 scheduler-metadata buffer.
+  adds the fork's PPU-only state: pins ``supports_varlen`` off for the FP8
+  cache but enables it for MXFP4 (whose PPU paged logits kernel requires the
+  varlen decode layout's per-query request indices), caches ``indexer_n_head``/
+  ``indexer_q_head_dim`` from the KV-cache spec or the HF text config, the SM
+  count from PPU DeepGEMM, and the enlarged scheduler-metadata buffer (needed
+  by both cache formats: a paged tile schedules more blocks than one per SM).
 * ``DeepseekV32IndexerMetadataBuilder.build`` delegates to upstream, keeping
   the builder on ``_current_builder`` for the duration of the call so the
   static chunk splitter and the rebound paged-metadata helper can read the
@@ -48,7 +49,10 @@ helpers, new parameters, refactors) cannot break this plugin.
 from __future__ import annotations
 
 import torch
-from vllm.v1.attention.backend import CommonAttentionMetadata
+from vllm.v1.attention.backend import (
+    AttentionCGSupport,
+    CommonAttentionMetadata,
+)
 from vllm.v1.attention.backends.mla import indexer as _indexer_module
 from vllm.v1.attention.backends.mla.indexer import (
     DeepseekV32IndexerMetadataBuilder,
@@ -67,27 +71,83 @@ _MODULE = "vllm.v1.attention.backends.mla.indexer"
 _current_builder: list = []
 
 
-patch_value(
-    _MODULE,
-    "PPU_DEEP_GEMM_TB_PER_CU",
-    8,
-    allow_missing=True,
-    reason=(
-        "Fork constant: thread blocks per compute unit used by PPU DeepGEMM "
-        "when sizing the fp4 indexer scheduler-metadata buffer."
-    ),
-    affected_versions=_AFFECTED,
-    remove_when="upstream defines the constant itself (patch_value becomes a no-op).",
-)
+def _builder_attr(builder, *names: str) -> int:
+    """First non-zero indexer attribute among ``names``.
+
+    Only the V4 indexer cache spec carries the head geometry; every other
+    indexer (Kimi-K3 among them) leaves it unset, so the HF text config is the
+    fallback source. Names are matched in order across all sources, so a
+    spec-provided value always wins over a config-provided one.
+    """
+    model_config = getattr(getattr(builder, "vllm_config", None), "model_config", None)
+    text_config = getattr(model_config, "hf_text_config", None)
+    sources = (
+        getattr(builder, "kv_cache_spec", None),
+        getattr(text_config, "dsa_config", None),
+        text_config,
+    )
+    for name in names:
+        for source in sources:
+            if source is None:
+                continue
+            value = (
+                source.get(name)
+                if isinstance(source, dict)
+                else getattr(source, name, None)
+            )
+            if value:
+                return int(value)
+    return 0
+
+
+def _ppu_metadata_extra(context_lens) -> tuple:
+    """DeepGEMM's ``(next_n, num_heads, logical_head_dim, qk_dtype)``.
+
+    PPU0010/PPU0015 reject a missing tuple, so every paged MQA logits metadata
+    call must carry one. The geometry is the indexer's (logical head dim:
+    DeepGEMM derives the packed storage dim itself) and the dtype names the
+    query format -- ``torch.int8`` for packed E2M1 MXFP4 keys (and for 810E,
+    whose paged kernels are INT8 only), ``torch.float8_e4m3fn`` for FP8 keys on
+    M890.
+    """
+    from vllm.platforms import current_platform
+
+    builder = _current_builder[-1] if _current_builder else None
+    if builder is None:
+        raise NotImplementedError(
+            "PPU DeepGEMM paged MQA logits metadata must be built from the DSA "
+            "indexer metadata builder; no builder is active."
+        )
+    n_head = getattr(builder, "indexer_n_head", 0)
+    head_dim = getattr(builder, "indexer_q_head_dim", 0)
+    if not n_head or not head_dim:
+        raise NotImplementedError(
+            "PPU DeepGEMM paged MQA logits metadata needs the indexer head "
+            "geometry, but the builder reports "
+            f"indexer_n_head={n_head}, indexer_q_head_dim={head_dim}. Neither "
+            "the KV-cache spec nor the HF text config "
+            "(index_num_heads/index_n_heads, index_head_dim) provides it."
+        )
+    next_n = context_lens.shape[1] if context_lens.dim() == 2 else 1
+    if getattr(builder, "indexer_uses_fp4", False):
+        qk_dtype = torch.int8
+    elif current_platform.is_device_capability(89):
+        qk_dtype = torch.float8_e4m3fn
+    else:
+        qk_dtype = torch.int8
+    return (next_n, n_head, head_dim, qk_dtype)
+
 
 patch_value(
     _MODULE,
-    "PPU_FP4_INDEXER_ELEMENT_SIZE",
-    1,
+    "PPU_DEEP_GEMM_TB_PER_CU",
+    16,
     allow_missing=True,
     reason=(
-        "Fork constant: element size (bytes) of the PPU fp4 indexer cache, "
-        "passed to the PPU paged MQA logits metadata builder via metadata_extra."
+        "Fork constant: upper bound on the thread blocks per compute unit "
+        "DeepGEMM's paged scheduler-metadata kernel may use (its tile table "
+        "tops out at 8 and the resource search at 16), used to size the "
+        "indexer's scheduler-metadata buffer."
     ),
     affected_versions=_AFFECTED,
     remove_when="upstream defines the constant itself (patch_value becomes a no-op).",
@@ -112,33 +172,18 @@ def _ppu_paged_metadata(
         return _upstream_paged_metadata(
             context_lens, block_size, num_sms, indices=indices
         )
-    if indices is not None:
-        raise NotImplementedError(
-            "SAIL DeepGEMM's paged MQA logits metadata is fixed-length layout only; "
-            "disable decode flattening (e.g. fewer speculative tokens) on PPU"
-        )
     if metadata_extra is None:
         # PPU declares PlatformEnum.CUDA, so upstream's decode build does reach
         # its is_cuda() block and calls this helper without metadata_extra.
-        # Derive the fork's tuple from the builder inside build, so upstream's
-        # own fill already uses the fp4 layout (instead of a redundant second
-        # pass over the decode scheduler metadata). Every PPU-reachable call
-        # site (build and update_draft_decode_metadata) runs behind a wrapper
-        # that puts its builder on the stack.
-        builder = _current_builder[-1] if _current_builder else None
-        n_head = getattr(builder, "indexer_n_head", 0) if builder else 0
-        if n_head > 0:
-            heads_per_token = (
-                context_lens.shape[1] if context_lens.dim() == 2 else 1
-            )
-            metadata_extra = (
-                heads_per_token,
-                n_head,
-                builder.indexer_q_head_dim,
-                _indexer_module.PPU_FP4_INDEXER_ELEMENT_SIZE,
-            )
+        # Every PPU paged kernel requires the tuple, so derive it from the
+        # builder inside build, and let upstream's own fill use it directly
+        # (instead of a redundant second pass over the decode scheduler
+        # metadata). Every PPU-reachable call site (build and
+        # update_draft_decode_metadata) runs behind a wrapper that puts its
+        # builder on the stack.
+        metadata_extra = _ppu_metadata_extra(context_lens)
     return _ppu_deep_gemm.get_paged_mqa_logits_metadata(
-        context_lens, block_size, num_sms, metadata_extra
+        context_lens, block_size, num_sms, metadata_extra, indices=indices
     )
 
 
@@ -147,12 +192,14 @@ patch(
     "get_paged_mqa_logits_metadata",
     reason=(
         "Fork's is_ppu() import switch selects the PPU DeepGEMM wrapper's "
-        "get_paged_mqa_logits_metadata, which accepts the PPU metadata_extra "
-        "tuple. On PPU the rebound helper also derives metadata_extra from the "
-        "builder inside build (PPU declares PlatformEnum.CUDA, so upstream's "
-        "decode build reaches the same call), keeping the fp4 scheduler "
-        "metadata correct in upstream's single fill. The CUDA helper has no "
-        "such parameter."
+        "get_paged_mqa_logits_metadata, which requires the PPU metadata_extra "
+        "tuple (next_n, num_heads, logical_head_dim, qk_dtype). On PPU the "
+        "rebound helper also derives it from the builder inside build (PPU "
+        "declares PlatformEnum.CUDA, so upstream's decode build reaches the "
+        "same call), keeping the scheduler metadata correct in upstream's "
+        "single fill; the per-query request ``indices`` of the varlen decode "
+        "layout (required by the MXFP4 paged logits kernel) are forwarded. "
+        "The CUDA helper has no such parameter."
     ),
     affected_versions=_AFFECTED,
     remove_when=(
@@ -323,44 +370,178 @@ for _consumer_name in (
         )(dsa_indexer_uses_fp4)
 
 
+# ---------------------------------------------------------------------------
+# vllm.utils.deep_gemm: MX inputs for the PPU fp4 MQA logits kernels.
+
+import vllm.model_executor.layers.indexer_topk as _indexer_topk_module
+import vllm.utils.deep_gemm as _deep_gemm_module
+
+_upstream_mqa_logits_mx_inputs = _deep_gemm_module.mqa_logits_mx_inputs
+
+
+@patch(
+    "vllm.utils.deep_gemm",
+    "mqa_logits_mx_inputs",
+    reason=(
+        "PPU's fp4 MQA logits kernels (dense and paged) are the MX form: MXFP4 "
+        "Q/K with UE8M0 scales (already provided by the fp4 Q quantizer) and "
+        "BF16 weights. Upstream only converts the weights on SM100 "
+        "(mqa_logits_use_mx_scales is capability-family(100)-gated), so PPU "
+        "fp4 calls reach the kernel with FP32 weights and it rejects them "
+        "('weights must be a 2D tensor with dtype BFloat16'). Convert them "
+        "here whenever MX scales are present (i.e. the fp4 Q path); the FP8 Q "
+        "path (q_scale is None) is left to upstream."
+    ),
+    affected_versions=_AFFECTED,
+    remove_when="upstream gates the MX conversion on a platform capability hook.",
+)
+def _ppu_mqa_logits_mx_inputs(q, q_scale, weights):
+    from vllm.platforms import current_platform
+
+    if current_platform.is_ppu() and q_scale is not None:
+        return q_scale, weights.to(torch.bfloat16)
+    return _upstream_mqa_logits_mx_inputs(q, q_scale, weights)
+
+
+# Consumers bind mqa_logits_mx_inputs with ``from ... import`` at module
+# scope; rebind the ones already loaded (same pattern as dsa_indexer_uses_fp4
+# above).
+for _consumer_name in (
+    "vllm.model_executor.layers.sparse_attn_indexer",
+    "vllm.models.deepseek_v41.nvidia.specialized_decode.attention.indexer",
+    "vllm.models.kimi_k3.nvidia.specialized_decode.cutedsl.dsa.indexer_stage",
+):
+    _consumer = sys.modules.get(_consumer_name)
+    if (
+        _consumer is not None
+        and getattr(_consumer, "mqa_logits_mx_inputs", None)
+        is _upstream_mqa_logits_mx_inputs
+    ):
+        patch(
+            _consumer_name,
+            "mqa_logits_mx_inputs",
+            reason="Preloaded MX-input consumers must use PPU's BF16-weights form.",
+            affected_versions=_AFFECTED,
+            remove_when="Consumers resolve the helper through its provider module.",
+        )(_ppu_mqa_logits_mx_inputs)
+
+
+# ---------------------------------------------------------------------------
+# vllm.model_executor.layers.indexer_topk: DeepSelect is SM100-only.
+
+_upstream_is_deep_select_supported = (
+    _indexer_topk_module.is_deep_select_supported
+)
+
+
+@patch(
+    "vllm.model_executor.layers.indexer_topk",
+    "is_deep_select_supported",
+    reason=(
+        "The DeepSelect ranking kernel ships as an SM100 C extension; PPU "
+        "builds do not register torch.ops.deep_select, so probing it from "
+        "is_deep_select_supported raises AttributeError "
+        "('deep_select' object has no attribute 'get_alignment_requirement') "
+        "instead of just reporting 'unsupported'. Report unsupported on PPU; "
+        "the indexer then takes its FP32-copy + per-row top-k fallback."
+    ),
+    affected_versions=_AFFECTED,
+    remove_when="upstream guards DeepSelect support on the platform.",
+)
+def _ppu_is_deep_select_supported(input, topk):
+    from vllm.platforms import current_platform
+
+    if current_platform.is_ppu():
+        return False
+    return _upstream_is_deep_select_supported(input, topk)
+
+
+# Consumers bind is_deep_select_supported with ``from ... import`` at module
+# scope; rebind the ones already loaded.
+for _consumer_name in (
+    "vllm.model_executor.layers.sparse_attn_indexer",
+):
+    _consumer = sys.modules.get(_consumer_name)
+    if (
+        _consumer is not None
+        and getattr(_consumer, "is_deep_select_supported", None)
+        is _upstream_is_deep_select_supported
+    ):
+        patch(
+            _consumer_name,
+            "is_deep_select_supported",
+            reason="Preloaded DeepSelect probes must report unsupported on PPU.",
+            affected_versions=_AFFECTED,
+            remove_when="Consumers resolve the helper through its provider module.",
+        )(_ppu_is_deep_select_supported)
+
+
+_upstream_get_cudagraph_support = (
+    DeepseekV32IndexerMetadataBuilder.get_cudagraph_support
+)
+
+@patch(
+    _MODULE,
+    "DeepseekV32IndexerMetadataBuilder.get_cudagraph_support",
+    reason=(
+        "PPU MXFP4's paged logits kernel requires the varlen decode layout "
+        "(per-query request indices), so the builder must advertise full CUDA "
+        "graph support (its __init__ enables supports_varlen for fp4) instead "
+        "of upstream's UNIFORM_BATCH fallback on PPU."
+    ),
+    affected_versions=_AFFECTED,
+    remove_when="upstream grows a platform hook for the varlen decode layout.",
+)
+def _get_cudagraph_support(cls, vllm_config, kv_cache_spec):
+    from vllm.platforms import current_platform
+
+    if current_platform.is_ppu() and dsa_indexer_uses_fp4(vllm_config):
+        return AttentionCGSupport.ALWAYS
+    return _upstream_get_cudagraph_support(vllm_config, kv_cache_spec)
+
+
 _upstream_builder_init = DeepseekV32IndexerMetadataBuilder.__init__
 
 
 def _builder_init_wrapper(self, *args, **kwargs) -> None:
     """Delegate to upstream, then add the fork's PPU-only builder state."""
     _upstream_builder_init(self, *args, **kwargs)
-    # PPU MODIFICATION: begin -- fork-only builder state for the MXFP4
-    # indexer (sm_89): head geometry from the KV-cache spec, SM count from
-    # PPU DeepGEMM, and the enlarged fp4 scheduler-metadata buffer.
+    # PPU MODIFICATION: begin -- fork-only builder state for the DSA indexer
+    # (both cache formats): head geometry from the KV-cache spec or the HF
+    # text config, SM count from PPU DeepGEMM, and the enlarged
+    # scheduler-metadata buffer.
     from vllm.platforms import current_platform
 
     if not current_platform.is_ppu():
         return
     # PPU declares PlatformEnum.CUDA, so upstream's varlen probe would pass
-    # its is_cuda() gate and only fail on the capability check. Pin it off:
-    # SAIL's paged logits API uses the existing fixed-length metadata layout.
-    self.supports_varlen = False
-    self.indexer_n_head = (
-        getattr(self.kv_cache_spec, "indexer_n_head", 0) or 0
-        if self.indexer_uses_fp4
-        else 0
+    # its is_cuda() gate and only fail on the capability check. The FP8 paged
+    # kernel stays on the fixed-length metadata layout (pin varlen off), but
+    # the MXFP4 paged logits kernel REQUIRES per-query request indices, i.e.
+    # the varlen decode layout (upstream's _indexer_decode_metadata_kernel
+    # produces them). Enable it for the fp4 cache.
+    self.supports_varlen = bool(getattr(self, "indexer_uses_fp4", False))
+    # DeepGEMM's paged metadata takes the indexer head geometry, so cache it for
+    # both cache formats (FP8 and MXFP4): every PPU paged call needs the tuple.
+    self.indexer_n_head = _builder_attr(
+        self, "indexer_n_head", "index_num_heads", "index_n_heads"
     )
-    self.indexer_q_head_dim = (
-        getattr(self.kv_cache_spec, "indexer_q_head_dim", 0) or 0
-        if self.indexer_uses_fp4
-        else 0
+    self.indexer_q_head_dim = _builder_attr(
+        self, "indexer_q_head_dim", "index_head_dim"
     )
     from vllm_sail.utils.deep_gemm import get_num_sms
 
     self.num_sms = get_num_sms()
-    if self.indexer_uses_fp4:
-        # NOTE(kai): fp4 paged uses extra metadata
-        # (num_sms * tb_per_cu + 1, 2)
-        self.scheduler_metadata_buffer = torch.empty(
-            (self.num_sms * _indexer_module.PPU_DEEP_GEMM_TB_PER_CU + 1, 2),
-            dtype=torch.int32,
-            device=self.device,
-        )
+    # A paged tile schedules more blocks per CU than one (DeepGEMM's table
+    # reports 4-8 for the FP4 and FP8 indexer shapes), so the upstream
+    # ``num_sms + 1`` header only fits a single block per CU. build() narrows
+    # this to the exact size the metadata kernel reports, which keeps the
+    # runtime header check happy for either cache format.
+    self.scheduler_metadata_buffer = torch.empty(
+        (self.num_sms * _indexer_module.PPU_DEEP_GEMM_TB_PER_CU + 1, 2),
+        dtype=torch.int32,
+        device=self.device,
+    )
     # PPU MODIFICATION: end
 
 
@@ -368,12 +549,13 @@ patch(
     _MODULE,
     "DeepseekV32IndexerMetadataBuilder.__init__",
     reason=(
-        "PPU-only builder state from the fork: pin supports_varlen off (PPU "
-        "declares PlatformEnum.CUDA, so the upstream varlen probe passes its "
-        "is_cuda() gate), indexer_n_head/indexer_q_head_dim "
-        "read from the KV-cache spec, SM count from PPU DeepGEMM's get_num_sms, "
-        "and the enlarged num_sms * PPU_DEEP_GEMM_TB_PER_CU scheduler-metadata "
-        "buffer for fp4 paged logits. Delegates to the upstream __init__ so "
+        "PPU-only builder state from the fork: pin supports_varlen off for the "
+        "FP8 cache but enable it for MXFP4 (whose paged logits kernel requires "
+        "per-query request indices), indexer_n_head/indexer_q_head_dim "
+        "from the KV-cache spec or the HF text config, SM count from PPU "
+        "DeepGEMM's get_num_sms, and the enlarged "
+        "num_sms * PPU_DEEP_GEMM_TB_PER_CU scheduler-metadata buffer for paged "
+        "logits (both cache formats). Delegates to the upstream __init__ so "
         "upstream buffer/refactor drift cannot break this plugin."
     ),
     affected_versions=_AFFECTED,

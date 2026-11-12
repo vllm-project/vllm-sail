@@ -47,6 +47,7 @@ if TYPE_CHECKING:
     VLLM_SAIL_FP8_LOAD_POLICY: str | None = None
     VLLM_SAIL_ENABLE_FP8_TO_INT8: bool = False
     VLLM_SAIL_KPOOL_DECODE_LOGITS: str = "non_paged"
+    VLLM_SAIL_MEGA_MOE_MMA_TYPE: str = "fp8xmxfp4"
     VLLM_SAIL_KPOOL_MAX_DENSE_POOLS: int = 1 << 21
     VLLM_SAIL_NVTX_PROFILE: bool = False
     VLLM_SAIL_NVTX_DUMP_TOPK: bool = False
@@ -78,6 +79,9 @@ _TRUTHY = ("true", "1", "yes", "on")
 
 #: Backend names accepted by both MoE and dense GEMM selection.
 GEMM_BACKENDS = ("deepgemm", "acext", "triton")
+#: PPU MegaMoE execution precisions over an MXFP4 checkpoint (see
+#: ``vllm_sail.model_executor.layers.fused_moe.experts.deep_gemm_mega_moe``).
+MEGA_MOE_MMA_TYPES = ("fp8xmxfp4", "mxf4xmxf4", "bf16xmxfp4")
 GDN_DECODE_KERNELS = ("auto", "cuda", "pla", "triton")
 KPOOL_DECODE_LOGITS_BACKENDS = ("non_paged",)
 
@@ -185,6 +189,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Legacy Marlin selection gate. Native Marlin execution remains excluded
     # by the CUDA-free manifest; this flag cannot supply those kernels.
     "VLLM_SAIL_ENABLE_MOE_MARLIN": _bool("VLLM_SAIL_ENABLE_MOE_MARLIN", False),
+    # PPU MegaMoE execution precision over an MXFP4 checkpoint. 'fp8xmxfp4'
+    # (W4A8) is the default; 'mxf4xmxf4' runs the W4A4 kernel and
+    # 'bf16xmxfp4' the W4A16 (SiTU-only) one.
+    "VLLM_SAIL_MEGA_MOE_MMA_TYPE": _choice(
+        "VLLM_SAIL_MEGA_MOE_MMA_TYPE", "fp8xmxfp4", MEGA_MOE_MMA_TYPES
+    ),
     # -- Quantization -------------------------------------------------------
     # Triton implementation of dynamic per-token int8 quant; faster than the
     # compiled kernel on PPU.
