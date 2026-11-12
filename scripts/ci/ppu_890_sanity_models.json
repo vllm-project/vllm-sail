@@ -9,7 +9,7 @@
       "--kv-cache-dtype",
       "fp8",
       "--block-size",
-      "256",
+      "128",
       "--tokenizer-mode",
       "deepseek_v41",
       "--tool-call-parser",
