@@ -20,6 +20,7 @@ WORKFLOW = "ppu-pr-ci.yaml"
 TREE_MODES = "100644:blob 100755:blob 120000:blob 040000:tree 160000:commit".split()
 CI_REUSE_FILES = set(
     f".github/workflows/{WORKFLOW} .github/workflows/ppu-build-and-test.yaml "
+    ".github/workflows/ut.yaml "
     ".github/workflows/_ppu-build.yaml .github/workflows/_ppu-pin-ut.yaml "
     ".github/workflows/_ppu-model-tests.yaml .github/workflows/_ppu-upstream-reuse.yaml "
     "scripts/ci/ppu_ci_command.py "
@@ -551,7 +552,7 @@ class Controller:
             or self.find_comment(pr["number"], tag)
         ):
             return
-        body = f"{tag}\n@{login}: {HELP}. New commits require `/ci run`. `--allow-stale` permits running behind the base branch. CPU checks remain automatic."
+        body = f"{tag}\n@{login}: {HELP}. New commits require `/ci run`. `--allow-stale` permits running behind the base branch. Bare CPU UT and the remaining runtime/source UT run with `/ci run`."
         self.api("POST", f"/issues/{pr['number']}/comments", {"body": body})
 
     def inputs(self):
@@ -592,6 +593,7 @@ class Controller:
         native = build if mode == "native" else ""
         with open(self.env["GITHUB_OUTPUT"], "a") as output:
             output.write(
+                f"pr_head_ref={pr['head']['ref']}\n"
                 f"skip_ppu={'true' if skip else 'false'}\n"
                 f"existing_build_run_id={existing}\n"
                 f"native_reuse_run_id={native}\nwheel_source_sha={source}\n"
@@ -601,12 +603,13 @@ class Controller:
         inputs = self.inputs()
         needs = json.loads(self.env["NEEDS"])
         results = {
-            stage: needs.get(stage, {}).get("result") for stage in ("validate", "ppu")
+            stage: needs.get(stage, {}).get("result")
+            for stage in ("validate", "cpu", "ppu")
         }
         skipped = needs.get("validate", {}).get("outputs", {}).get("skip_ppu") == "true"
         state, description = "success", "Passed"
         if skipped and all(result == "success" for result in results.values()):
-            description = "Skipped (no PPU-impacting changes)"
+            description = "Passed (PPU skipped: no PPU-impacting changes)"
         if "cancelled" in results.values():
             state, description = "error", "Cancelled"
         elif any(result != "success" for result in results.values()):

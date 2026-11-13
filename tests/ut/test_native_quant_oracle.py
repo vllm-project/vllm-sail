@@ -8,6 +8,7 @@ import pytest
 
 
 @pytest.mark.parametrize("sign", [-1, 1])
+@pytest.mark.requires_runtime
 def test_fp8_oracle_rejects_nan_next_to_finite_max(sign):
     torch = pytest.importorskip("torch")
     suite = Path(__file__).parents[1] / "e2e/tier_b/test_norm_quant.py"

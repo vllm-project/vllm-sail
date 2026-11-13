@@ -85,6 +85,17 @@ def test_accuracy_workflow_supplies_the_deep_gemm_cache_root():
     assert "default: /nas_aisw/vllmci_dgcache" in workflow
 
 
+@pytest.mark.parametrize("mode", ["pin-ut", "upstream-reuse"])
+def test_ut_and_reuse_require_exact_read_only_upstream_source(mode):
+    text = SCRIPT.read_text()
+    branch = text.split(f"\n    {mode})\n", 1)[1].split("\n        ;;", 1)[0]
+    assert "PPU_CI_UPSTREAM_DIR is required" in branch
+    assert "source=${upstream_dir},target=/upstream,readonly" in branch
+    assert "--env VLLM_SOURCE_ROOT=/upstream" in branch
+    assert 'rev-parse HEAD)" == "${expected_vllm_commit}"' in branch
+    assert "exit 2" in branch
+
+
 def test_runtime_wrapper_serializes_jobs_and_verifies_source_identity():
     text = SCRIPT.read_text()
     assert "flock -n 9" in text

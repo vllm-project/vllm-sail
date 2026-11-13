@@ -33,7 +33,7 @@ PR = {
     "state": "open",
     "draft": False,
     "user": USER,
-    "head": {"sha": SHA},
+    "head": {"sha": SHA, "ref": "feature/ci"},
     "base": {"ref": "release/next", "repo": {"full_name": REPO}},
     "changed_files": 1,
     "labels": [{"name": "ready"}],
@@ -810,7 +810,11 @@ def executor_setup(inputs=None, needs=None):
         {
             "NEEDS": json.dumps(
                 needs
-                or {"validate": {"result": "success"}, "ppu": {"result": "success"}}
+                or {
+                    "validate": {"result": "success"},
+                    "cpu": {"result": "success"},
+                    "ppu": {"result": "success"},
+                }
             ),
         },
     )
@@ -891,22 +895,31 @@ def test_validate_fails_for_changed_head_closed_or_revoked_authorization(change)
 
 
 @pytest.mark.parametrize(
-    "validate,ppu,state,description",
+    "validate,cpu,ppu,state,description",
     [
-        ("success", "success", "success", "Passed"),
-        ("failure", "skipped", "failure", "validate"),
-        ("success", "failure", "failure", "ppu"),
-        ("success", "skipped", "failure", "ppu"),
-        ("cancelled", "skipped", "error", "Cancelled"),
-        ("failure", "cancelled", "error", "Cancelled"),
-        ("skipped", "success", "failure", "validate"),
+        ("success", "success", "success", "success", "Passed"),
+        ("failure", "skipped", "skipped", "failure", "validate"),
+        ("success", "success", "failure", "failure", "ppu"),
+        ("success", "success", "skipped", "failure", "ppu"),
+        ("cancelled", "skipped", "skipped", "error", "Cancelled"),
+        ("failure", "skipped", "cancelled", "error", "Cancelled"),
+        ("skipped", "success", "success", "failure", "validate"),
+        ("success", "failure", "success", "failure", "cpu"),
+        ("success", "skipped", "success", "failure", "cpu"),
+        ("success", None, "success", "failure", "cpu"),
+        ("success", "cancelled", "success", "error", "Cancelled"),
+        ("success", "failure", "cancelled", "error", "Cancelled"),
     ],
 )
 def test_report_mapping_and_finishes_old_sha_without_reauthorization(
-    validate, ppu, state, description
+    validate, cpu, ppu, state, description
 ):
     control, gh, _ = executor_setup(
-        needs={"validate": {"result": validate}, "ppu": {"result": ppu}}
+        needs={
+            "validate": {"result": validate},
+            "cpu": {"result": cpu},
+            "ppu": {"result": ppu},
+        }
     )
     control.report()
     status = gh.writes(f"/statuses/{SHA}")[0][2]
@@ -919,17 +932,27 @@ def test_report_mapping_and_finishes_old_sha_without_reauthorization(
     assert not any("/pulls/" in c[1] or "/collaborators/" in c[1] for c in gh.calls)
 
 
-def test_report_marks_docs_only_execution_as_skipped_success():
+@pytest.mark.parametrize(
+    "cpu,state,description",
+    [
+        ("success", "success", "Passed (PPU skipped: no PPU-impacting changes)"),
+        ("failure", "failure", "cpu failed"),
+        ("skipped", "failure", "cpu failed"),
+        ("cancelled", "error", "Cancelled"),
+    ],
+)
+def test_report_docs_only_execution_still_requires_cpu_checks(cpu, state, description):
     control, gh, _ = executor_setup(
         needs={
             "validate": {"result": "success", "outputs": {"skip_ppu": "true"}},
+            "cpu": {"result": cpu},
             "ppu": {"result": "success"},
         }
     )
     control.report()
     status = gh.writes(f"/statuses/{SHA}")[0][2]
-    assert status["state"] == "success"
-    assert status["description"] == ("Skipped (no PPU-impacting changes) (attempt 2)")
+    assert status["state"] == state
+    assert status["description"] == f"{description} (attempt 2)"
     assert status["description"] in reply(gh)
 
 
@@ -999,7 +1022,10 @@ def test_notify_filters_event_author_and_labels(change, notify):
             assert command in text
         assert "<!-- ppu-ci-authorized -->" in text
         assert "new commits" in text.lower()
-        assert "CPU" in text and "automatic" in text and "behind" in text
+        assert (
+            "Bare CPU UT and the remaining runtime/source UT run with `/ci run`" in text
+        )
+        assert "automatic" not in text and "behind" in text
 
 
 @pytest.mark.parametrize("user,sent", [(BOT, False), (USER, True)])
@@ -1306,7 +1332,11 @@ def test_native_retry_can_reuse_successful_validate_and_report_new_attempt():
         GITHUB_RUN_ID="100",
         GITHUB_RUN_ATTEMPT="3",
         NEEDS=json.dumps(
-            {"validate": {"result": "success"}, "ppu": {"result": "success"}}
+            {
+                "validate": {"result": "success"},
+                "cpu": {"result": "success"},
+                "ppu": {"result": "success"},
+            }
         ),
     )
     calls_before_report = len(gh.calls)
@@ -1367,6 +1397,7 @@ def test_validate_skips_ppu_for_non_executable_changes(files, github_output, cap
         line.split("=", 1) for line in github_output.read_text().splitlines()
     )
     assert outputs == {
+        "pr_head_ref": "feature/ci",
         "skip_ppu": "true",
         "existing_build_run_id": "",
         "native_reuse_run_id": "",
@@ -1801,6 +1832,7 @@ def test_executor_rejects_forged_extra_inputs_before_apis(extra, mode, github_ou
 
 def reuse_result(mode, run_id="555", source=OLD):
     return {
+        "pr_head_ref": "feature/ci",
         "skip_ppu": "false",
         "existing_build_run_id": run_id if mode == "full" else "",
         "native_reuse_run_id": run_id if mode == "native" else "",

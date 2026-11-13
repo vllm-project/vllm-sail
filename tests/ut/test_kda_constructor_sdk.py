@@ -9,6 +9,7 @@ import pytest
 
 
 @pytest.mark.parametrize("backend", ["flashkda", "triton"])
+@pytest.mark.requires_runtime
 def test_kda_constructor_reserves_workspace_before_norm(monkeypatch, backend):
     torch = pytest.importorskip("torch")
     pytest.importorskip("vllm")

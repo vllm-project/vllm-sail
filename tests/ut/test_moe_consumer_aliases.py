@@ -169,6 +169,7 @@ def test_consumer_inventory_matches_vllm_source(upstream_source_root: Path) -> N
     assert discovered == expected
 
 
+@pytest.mark.requires_runtime
 def test_register_updates_real_vllm_moe_consumer_aliases() -> None:
     """Consumers imported first must use every oracle function patched by PPU."""
     pytest.importorskip("torch")

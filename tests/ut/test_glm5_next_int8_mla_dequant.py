@@ -12,6 +12,8 @@ from __future__ import annotations
 
 import pytest
 
+pytestmark = pytest.mark.requires_runtime
+
 torch = pytest.importorskip("torch")
 pytest.importorskip("vllm")
 

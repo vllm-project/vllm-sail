@@ -341,6 +341,7 @@ def test_every_patch_call_carries_metadata(mxfp4_module) -> None:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.requires_runtime
 def test_install_lands_every_target_and_is_idempotent(
     monkeypatch: pytest.MonkeyPatch, mxfp4_module
 ) -> None:
@@ -355,6 +356,7 @@ def test_install_lands_every_target_and_is_idempotent(
     assert len(PATCH_REGISTRY) == registry_before + N_TARGETS
 
 
+@pytest.mark.requires_runtime
 def test_config_init_and_from_config(
     monkeypatch: pytest.MonkeyPatch, mxfp4_module
 ) -> None:
@@ -387,6 +389,7 @@ def test_config_init_and_from_config(
     _Platform.ppu = True
 
 
+@pytest.mark.requires_runtime
 def test_get_quant_method_ignores_experts_and_channelwise_linear(
     monkeypatch: pytest.MonkeyPatch, mxfp4_module
 ) -> None:
@@ -477,6 +480,7 @@ def test_get_quant_method_ignores_experts_and_channelwise_linear(
     _Platform.ppu = True
 
 
+@pytest.mark.requires_runtime
 def test_apply_vllm_mapper_remaps_channelwise_on_ppu(
     monkeypatch: pytest.MonkeyPatch, mxfp4_module
 ) -> None:
@@ -500,6 +504,7 @@ def test_apply_vllm_mapper_remaps_channelwise_on_ppu(
     _Platform.ppu = True
 
 
+@pytest.mark.requires_runtime
 def test_method_initialization_preserves_upstream_factory(
     monkeypatch: pytest.MonkeyPatch, mxfp4_module
 ) -> None:
@@ -521,6 +526,7 @@ def test_method_initialization_preserves_upstream_factory(
     assert state.select_calls == [{"moe": moe, "activation_key": oracle.kMxfp4Dynamic}]
 
 
+@pytest.mark.requires_runtime
 def test_get_fused_moe_quant_config_threads_swiglu_params(
     monkeypatch: pytest.MonkeyPatch, mxfp4_module
 ) -> None:
@@ -556,6 +562,7 @@ def test_get_fused_moe_quant_config_threads_swiglu_params(
     assert method.get_fused_moe_quant_config(layer) == "upstream-fm-quant-config"
 
 
+@pytest.mark.requires_runtime
 def test_oracle_make_quant_config_ppu_branch(
     monkeypatch: pytest.MonkeyPatch, mxfp4_module
 ) -> None:
@@ -582,6 +589,7 @@ def test_oracle_make_quant_config_ppu_branch(
     assert result[0] == "upstream-quant-config"
 
 
+@pytest.mark.requires_runtime
 def test_oracle_convert_weights_preprocesses_scales(
     monkeypatch: pytest.MonkeyPatch, mxfp4_module
 ) -> None:
@@ -631,6 +639,7 @@ def test_oracle_convert_weights_preprocesses_scales(
     assert len(state.upstream_convert) == 2
 
 
+@pytest.mark.requires_runtime
 def test_oracle_round_up_sizes_32_on_ppu_backends(
     monkeypatch: pytest.MonkeyPatch, mxfp4_module
 ) -> None:

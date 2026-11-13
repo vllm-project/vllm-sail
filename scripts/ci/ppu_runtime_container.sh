@@ -190,8 +190,17 @@ case "${mode}" in
         )
         ;;
     pin-ut)
+        : "${PPU_CI_UPSTREAM_DIR:?PPU_CI_UPSTREAM_DIR is required for pin-ut}"
+        upstream_dir=$(realpath "${PPU_CI_UPSTREAM_DIR}")
+        [[ -f "${upstream_dir}/vllm/__init__.py" ]] &&
+            [[ "$(git -c safe.directory="${upstream_dir}" -C "${upstream_dir}" rev-parse HEAD)" == "${expected_vllm_commit}" ]] || {
+            echo "PPU CI upstream checkout does not match the tested pin" >&2
+            exit 2
+        }
         create+=(
             --shm-size=8g
+            --mount "type=bind,source=${upstream_dir},target=/upstream,readonly"
+            --env VLLM_SOURCE_ROOT=/upstream
             --env UT_RESULTS_DIR=/artifacts
             --env VLLM_USE_RUST_FRONTEND=0
             --env VLLM_USE_RUST_BENCH=0

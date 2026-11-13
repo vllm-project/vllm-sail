@@ -14,6 +14,7 @@ export VLLM_USE_RUST_FRONTEND=0 VLLM_USE_RUST_BENCH=0
 REQUIRE_PR_ARTIFACT="${REQUIRE_PR_ARTIFACT:-false}"
 EXPECTED_VLLM_COMMIT="${EXPECTED_VLLM_COMMIT:?EXPECTED_VLLM_COMMIT is required}"
 EXPECTED_SAIL_COMMIT="${EXPECTED_SAIL_COMMIT:?EXPECTED_SAIL_COMMIT is required}"
+: "${VLLM_SOURCE_ROOT:?VLLM_SOURCE_ROOT is required}"
 python "${ROOT_DIR}/scripts/ci/ppu_wheel_manifest.py" verify "${WHEELS_DIR}"
 if [[ "${REQUIRE_PR_ARTIFACT}" == "true" ]]; then
     python "${ROOT_DIR}/scripts/ci/ppu_wheel_manifest.py" verify "${WHEELS_DIR}" \
@@ -38,7 +39,8 @@ python "${ROOT_DIR}/scripts/ci/ppu_image_stack.py" capture \
 python -m pip install --no-deps --force-reinstall \
     "${WHEELS_DIR}"/vllm/*.whl "${WHEELS_DIR}"/vllm-sail/*.whl
 PIP_INDEX_URL=https://mirrors.aliyun.com/pypi/simple/ \
-    python -m pip install -r "${ROOT_DIR}/requirements/dev.txt"
+    python -m pip install -r "${ROOT_DIR}/requirements/dev.txt" \
+    -r "${ROOT_DIR}/requirements/profiling.txt"
 python "${ROOT_DIR}/scripts/ci/ppu_image_stack.py" verify \
     --sdk /usr/local/PPU_SDK --output "${UT_RESULTS_DIR}/image-stack.json"
 
@@ -61,11 +63,11 @@ print("Platform:", type(current_platform).__name__)
 print("Device capability:", current_platform.get_device_capability())
 PY
 
-# Compatibility UT intentionally exercises checkout code beside real vLLM.
-# Kernel/model device tests and source-only tests have separate jobs.
 cd "${ROOT_DIR}"
 git config --global --add safe.directory "${ROOT_DIR}"
-python -m pytest tests/ut -q -rs -m "not upstream_source and not ppu" \
+python -m pytest tests/ut -q -rs \
+    -m "upstream_source or requires_runtime or ppu or cap80 or cap89" \
+    --require-upstream-source \
     --junitxml="${UT_RESULTS_DIR}/pin-ut.xml" \
     2>&1 | tee "${UT_RESULTS_DIR}/pin-ut.log"
 echo "PPU PIN UT PASS"

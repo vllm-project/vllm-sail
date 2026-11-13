@@ -26,6 +26,8 @@ pytest.importorskip("vllm", reason="requires vLLM")
 from vllm.model_executor.layers.quantization.mxfp4 import Mxfp4Config
 from vllm.model_executor.models.interfaces import SupportsQuant
 
+pytestmark = pytest.mark.requires_runtime
+
 FP8_CHANNELWISE_LAYERS = [
     "q_proj",
     "k_proj",

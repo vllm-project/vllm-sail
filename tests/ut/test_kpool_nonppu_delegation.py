@@ -13,6 +13,8 @@ from types import SimpleNamespace
 
 import pytest
 
+pytestmark = pytest.mark.requires_runtime
+
 pytest.importorskip("torch")
 pytest.importorskip("vllm")
 

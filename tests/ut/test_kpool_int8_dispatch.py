@@ -9,13 +9,24 @@ from types import SimpleNamespace
 
 import pytest
 
-torch = pytest.importorskip("torch")
 
-from vllm_sail.attention.ops import mla_sparse_kpool as kpool  # noqa: E402
+@pytest.fixture
+def torch():
+    return pytest.importorskip("torch")
+
+
+@pytest.fixture
+def kpool(torch):
+    pytest.importorskip("vllm")
+    from vllm_sail.attention.ops import mla_sparse_kpool
+
+    return mla_sparse_kpool
 
 
 def test_ppu_module_contains_no_cuda_fp8_calls():
-    source = Path(kpool.__file__).read_text(encoding="utf-8")
+    source = (
+        Path(__file__).parents[2] / "vllm_sail/attention/ops/mla_sparse_kpool.py"
+    ).read_text(encoding="utf-8")
 
     assert "int8_mqa_logits" in source
     assert "int8_paged_mqa_logits" in source
@@ -37,7 +48,8 @@ def test_ppu_module_contains_no_cuda_fp8_calls():
     )
 
 
-def test_registered_op_annotations_survive_breakable_cudagraph_wrapper():
+@pytest.mark.requires_runtime
+def test_registered_op_annotations_survive_breakable_cudagraph_wrapper(kpool):
     """Schema inference must not depend on the op module's globals.
 
     ``ppu_sparse_attn_indexer_kpool`` is wrapped by
@@ -79,7 +91,8 @@ def test_decode_defaults_to_non_paged_backend(monkeypatch):
         _ = ppu_envs.VLLM_SAIL_KPOOL_DECODE_LOGITS
 
 
-def test_decode_logits_layout_uniform_and_padded_rows():
+@pytest.mark.requires_runtime
+def test_decode_logits_layout_uniform_and_padded_rows(kpool, torch):
     decode_lens = torch.tensor([2, 1])
     next_n = 2
     # Request 0: two queries of 8/8 pools; request 1: 3 pools, second row padded.
@@ -91,7 +104,8 @@ def test_decode_logits_layout_uniform_and_padded_rows():
     assert ke.tolist() == [8, 8, 11, 8]  # padded row: ks == ke
 
 
-def test_decode_logits_layout_broadcasts_1d_seq_lens():
+@pytest.mark.requires_runtime
+def test_decode_logits_layout_broadcasts_1d_seq_lens(kpool, torch):
     decode_lens = torch.tensor([1, 1])
     seq_lens = torch.tensor([5, 2])
     cu, ks, ke = kpool._decode_logits_layout(seq_lens, decode_lens, 2, 1)
@@ -100,7 +114,8 @@ def test_decode_logits_layout_broadcasts_1d_seq_lens():
     assert ke.tolist() == [5, 7]
 
 
-def test_decode_non_paged_glue(monkeypatch):
+@pytest.mark.requires_runtime
+def test_decode_non_paged_glue(monkeypatch, kpool, torch):
     calls = {}
 
     def fake_gather(kv_cache, k_quant, k_scale, block_table, cu):
@@ -158,7 +173,8 @@ def test_decode_non_paged_glue(monkeypatch):
     assert ks.tolist() == [0, 5] and ke.tolist() == [5, 8]
 
 
-def test_rejects_non_int8_q(monkeypatch):
+@pytest.mark.requires_runtime
+def test_rejects_non_int8_q(monkeypatch, kpool, torch):
     monkeypatch.setattr(
         kpool,
         "get_forward_context",
@@ -184,7 +200,8 @@ def test_rejects_non_int8_q(monkeypatch):
         )
 
 
-def test_rejects_q_scale(monkeypatch):
+@pytest.mark.requires_runtime
+def test_rejects_q_scale(monkeypatch, kpool, torch):
     monkeypatch.setattr(
         kpool,
         "get_forward_context",
@@ -210,7 +227,8 @@ def test_rejects_q_scale(monkeypatch):
         )
 
 
-def test_rejects_fp4_cache(monkeypatch):
+@pytest.mark.requires_runtime
+def test_rejects_fp4_cache(monkeypatch, kpool, torch):
     monkeypatch.setattr(
         kpool,
         "get_forward_context",
@@ -237,7 +255,8 @@ def test_rejects_fp4_cache(monkeypatch):
         )
 
 
-def test_fake_impl_returns_input_buffer():
+@pytest.mark.requires_runtime
+def test_fake_impl_returns_input_buffer(kpool, torch):
     buffer = torch.zeros((4, 2176), dtype=torch.int32)
 
     out = kpool.ppu_sparse_attn_indexer_kpool_fake(

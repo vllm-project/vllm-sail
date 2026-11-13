@@ -13,6 +13,7 @@ from tests.support.modules import load_patch
 from tests.ut.test_ppu_kernel_capabilities import complete_warmup_contract
 
 
+@pytest.mark.upstream_source
 @pytest.mark.parametrize("ppu", [False, True])
 @pytest.mark.parametrize("local", [False, True])
 @pytest.mark.parametrize("jit", [False, True])
