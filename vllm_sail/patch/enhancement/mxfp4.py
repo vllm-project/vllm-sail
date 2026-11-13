@@ -36,7 +36,7 @@ if TYPE_CHECKING:
 
 _QMODULE = "vllm.model_executor.layers.quantization.mxfp4"
 _OMODULE = "vllm.model_executor.layers.fused_moe.oracle.mxfp4"
-AFFECTED_VERSIONS = ">=0.32.0,<0.33.0"
+AFFECTED_VERSIONS = ">=0.32.0,<0.34.0"
 
 # Explicit per-kind member lists, keyed by the kernel path each member takes:
 # "w4a16" reuses MARLIN's 16-bit activation packing, "w4a16mma" is DeepGEMM's
