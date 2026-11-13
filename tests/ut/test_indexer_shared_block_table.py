@@ -11,16 +11,16 @@ from tests.support.source import definition, function
 PATCH = "vllm_sail/patch/enhancement/attention/mla_indexer.py"
 
 
-class Row:
-    def __init__(self, value):
-        self.value = value
-
-    def item(self):
-        return self.value
-
-
 class Span:
     shape = (3, 1)
+    ndim = 2
+    device = "cuda"
+
+    def reshape(self, *shape):
+        return self
+
+    def contiguous(self):
+        return self
 
     @staticmethod
     def dim():
@@ -32,7 +32,9 @@ def _paged_namespace(modules, *, ppu, builder=None):
     fallback = []
 
     def paged(context_lens, block_size, num_sms, metadata_extra=None, **kwargs):
-        calls.append((context_lens, block_size, num_sms, metadata_extra))
+        calls.append(
+            (context_lens, block_size, num_sms, metadata_extra, kwargs.get("indices"))
+        )
         return "ppu-metadata"
 
     def upstream(context_lens, block_size, num_sms, indices=None):
@@ -43,9 +45,16 @@ def _paged_namespace(modules, *, ppu, builder=None):
         "_current_builder": [builder] if builder is not None else [],
         "_upstream_paged_metadata": upstream,
         "_ppu_deep_gemm": NS(get_paged_mqa_logits_metadata=paged),
-        "_indexer_module": NS(PPU_FP4_INDEXER_ELEMENT_SIZE=1),
+        "torch": NS(int8="int8", int32="int32"),
     }
-    modules("vllm.platforms", current_platform=NS(is_ppu=lambda: ppu))
+    modules(
+        "vllm.platforms",
+        current_platform=NS(
+            is_ppu=lambda: ppu,
+            is_device_capability=lambda cap: cap == (8, 9),
+            fp8_dtype=lambda: "fp8",
+        ),
+    )
     return namespace, calls, fallback
 
 
@@ -65,20 +74,101 @@ def test_wrapper_delegates_with_the_builder_visible(modules):
     assert result is metadata
     assert seen == [[builder]]
     assert namespace["_current_builder"] == []
+    assert builder._sail_decode_request_ids is None
 
 
 def test_wrapper_pops_the_builder_when_upstream_raises(modules):
     namespace = {"_current_builder": []}
+    builder = NS()
 
     def upstream(*args):
+        builder._sail_decode_request_ids = "partial-build-ids"
         raise RuntimeError("upstream build failed")
 
     namespace["_upstream_build"] = upstream
 
     with pytest.raises(RuntimeError, match="upstream build failed"):
-        function(PATCH, "_build_wrapper", namespace)(NS(), 0, None)
+        function(PATCH, "_build_wrapper", namespace)(builder, 0, None)
 
     assert namespace["_current_builder"] == []
+    assert builder._sail_decode_request_ids is None
+
+
+def test_prebuilt_metadata_keeps_request_ids_after_upstream_flattens(modules):
+    builder = NS(
+        indexer_uses_fp4=True,
+        indexer_n_head=32,
+        indexer_q_head_dim=128,
+        per_req_decode_lens_buffer=[3, 1, 2],
+    )
+    namespace, calls, _ = _paged_namespace(modules, ppu=True, builder=builder)
+    namespace["_current_builder"] = []
+    prepared = Span()
+    prepared.shape = (6, 1)
+    expected_ids = [0, 0, 0, 1, 2, 2]
+    overwritten_lens = [3, 1, 2]
+
+    def upstream_prepare(self, **kwargs):
+        assert kwargs["num_decodes"] == 3
+        kwargs["decode_lens"][:] = [1] * 6
+        return prepared, object(), overwritten_lens, 6, False
+
+    def request_ids(contexts, lengths, flattened):
+        assert contexts is prepared and lengths == [3, 1, 2] and flattened
+        return expected_ids
+
+    namespace.update(
+        _upstream_prepare_decode=upstream_prepare,
+        _decode_request_ids=request_ids,
+    )
+    prepare = function(PATCH, "_prepare_decode_wrapper", namespace)
+    paged = function(PATCH, "_ppu_paged_metadata", namespace)
+
+    def upstream_build(self, *args):
+        prepare(
+            self,
+            Span(),
+            object(),
+            overwritten_lens,
+            object(),
+            object(),
+            3,
+            6,
+            False,
+            3,
+            3,
+        )
+        assert overwritten_lens == [1] * 6
+        return paged(prepared, 64, 7)
+
+    namespace["_upstream_build"] = upstream_build
+    assert (
+        function(PATCH, "_build_wrapper", namespace)(builder, 0, None) == "ppu-metadata"
+    )
+    assert calls == [(prepared, 64, 7, (1, 32, 128, "int8"), expected_ids)]
+    assert builder._sail_decode_request_ids is None
+
+
+@pytest.mark.parametrize(
+    "shape,lengths,flattened,expected",
+    [
+        ((6, 1), [3, 1, 2], True, [0, 0, 0, 1, 2, 2]),
+        ((4, 1), [2, 2], True, [0, 0, 1, 1]),
+        ((8, 1), [3, 1, 2, 0], True, [0, 0, 0, 1, 2, 2, -7, -8]),
+        ((3, 2), [2, 1, 0], False, [0, 0, 1, -4, -5, -6]),
+    ],
+)
+def test_prebuilt_request_ids_follow_query_ownership(
+    shape, lengths, flattened, expected
+):
+    torch = pytest.importorskip("torch")
+    ids = function(PATCH, "_decode_request_ids", {"torch": torch})(
+        torch.empty(shape, dtype=torch.int32),
+        torch.tensor(lengths, dtype=torch.int32),
+        flattened,
+    )
+    assert ids.tolist() == expected
+    assert ids.dtype == torch.int32 and ids.is_contiguous()
 
 
 def test_draft_refresh_wrapper_keeps_the_builder_visible():
@@ -101,35 +191,34 @@ def test_draft_refresh_wrapper_keeps_the_builder_visible():
     assert namespace["_current_builder"] == []
 
 
-def test_paged_metadata_derives_the_fp4_extra_from_the_builder(modules):
+def test_paged_metadata_derives_legacy_fp8_geometry_from_the_builder(modules):
     builder = NS(indexer_n_head=64, indexer_q_head_dim=128)
     namespace, calls, fallback = _paged_namespace(modules, ppu=True, builder=builder)
 
     result = function(PATCH, "_ppu_paged_metadata", namespace)(Span(), 64, 7)
 
     assert result == "ppu-metadata"
-    assert calls == [(ANY, 64, 7, (1, 64, 128, 1))]
+    assert calls == [(ANY, 64, 7, (1, 64, 128, "fp8"), None)]
     assert not fallback
 
 
-def test_paged_metadata_keeps_the_standard_layout_without_fp4_heads(modules):
+def test_paged_metadata_rejects_missing_query_geometry(modules):
     namespace, calls, fallback = _paged_namespace(modules, ppu=True)
     namespace["_current_builder"] = [NS(indexer_n_head=0, indexer_q_head_dim=128)]
 
-    function(PATCH, "_ppu_paged_metadata", namespace)(Span(), 64, 7)
-
-    assert calls[0][3] is None
+    with pytest.raises(ValueError, match="query head geometry"):
+        function(PATCH, "_ppu_paged_metadata", namespace)(Span(), 64, 7)
+    assert not calls
     assert not fallback
 
 
-def test_paged_metadata_rejects_varlen_indices_on_ppu(modules):
-    builder = NS(indexer_n_head=64, indexer_q_head_dim=128)
-    namespace, _, _ = _paged_namespace(modules, ppu=True, builder=builder)
-
-    with pytest.raises(NotImplementedError, match="fixed-length"):
-        function(PATCH, "_ppu_paged_metadata", namespace)(
-            Span(), 64, 7, indices=Span()
-        )
+@pytest.mark.parametrize("fp4,tag", [(True, "int8"), (False, "fp8")])
+def test_paged_metadata_groups_only_weighted_mxfp4_queries(modules, fp4, tag):
+    builder = NS(indexer_n_head=64, indexer_q_head_dim=128, indexer_uses_fp4=fp4)
+    namespace, calls, _ = _paged_namespace(modules, ppu=True, builder=builder)
+    ids = Span()
+    function(PATCH, "_ppu_paged_metadata", namespace)(Span(), 64, 7, indices=ids)
+    assert calls == [(ANY, 64, 7, (1, 64, 128, tag), ids if fp4 else None)]
 
 
 def test_paged_metadata_delegates_on_non_ppu(modules):
@@ -143,39 +232,6 @@ def test_paged_metadata_delegates_on_non_ppu(modules):
     assert result == "upstream-metadata"
     assert not calls
     assert fallback == [(ANY, 64, 7, None)]
-
-
-@pytest.mark.parametrize("fp4,chunks", [(True, 2), (False, 4)])
-def test_chunk_budget_follows_the_builder_logits_dtype(fp4, chunks):
-    namespace = {
-        "_current_builder": [NS(indexer_uses_fp4=fp4)],
-        "torch": NS(
-            bfloat16="bfloat16",
-            float32="float32",
-            empty=lambda shape, dtype=None, **kwargs: NS(
-                element_size=lambda: 2 if dtype == "bfloat16" else 4
-            ),
-        ),
-    }
-    split = function(PATCH, "_split_indexer_prefill_chunks_body", namespace)
-
-    assert len(split([Row(100)], [Row(8)], 10_000, 1024)) == chunks
-
-
-def test_chunk_budget_falls_back_to_fp32_outside_build():
-    namespace = {
-        "_current_builder": [],
-        "torch": NS(
-            bfloat16="bfloat16",
-            float32="float32",
-            empty=lambda shape, dtype=None, **kwargs: NS(
-                element_size=lambda: 2 if dtype == "bfloat16" else 4
-            ),
-        ),
-    }
-    split = function(PATCH, "_split_indexer_prefill_chunks_body", namespace)
-
-    assert len(split([Row(100)], [Row(8)], 10_000, 1024)) == 4
 
 
 @pytest.mark.upstream_source

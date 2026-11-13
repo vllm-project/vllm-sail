@@ -1,5 +1,13 @@
 [
   {
+    "key": "deepseek-v4.1-flash_1017_int8_tp8",
+    "checkpoint": "LLM/T-HEAD/v4.1/DeepSeek-V4.1-Flash-1017-Quant-W-INT8-PerChannel-A-INT8-PerToken-Engram-MXFP8",
+    "cards": 8,
+    "served_model_name": "DeepSeek-V4.1-Flash-1017",
+    "env": {"VLLM_USE_RUST_FRONTEND": "1"},
+    "args": ["--gpu-memory-utilization=0.9", "--tokenizer-mode", "deepseek_v41", "--tensor-parallel-size", "8", "--reasoning-parser", "deepseek_v41", "--tool-call-parser", "deepseek_v41", "--enable-auto-tool-choice", "--engram-config", "{\"cpu_offload\":true,\"dp_shared_memory\":false}", "--mm-encoder-tp-mode", "data", "--limit-mm-per-prompt", "{\"image\":0,\"video\":0}", "--max-model-len", "524288", "--enable-prefix-caching", "--distributed-timeout-seconds", "60000", "--cpu-distributed-timeout-seconds", "60000", "--kv-cache-dtype", "auto", "--enable-chunked-prefill", "--speculative-config", "{\"method\":\"dspark\",\"num_speculative_tokens\":7,\"draft_sample_method\":\"probabilistic\"}"]
+  },
+  {
     "key": "deepseek-v4-flash_0731_w4a8_tp4",
     "checkpoint": "LLM/deepseek-ai/v1.0/DeepSeek-V4-Flash-0731-w4a8",
     "cards": 4,
@@ -19,6 +27,12 @@
     "args": ["--kv-cache-dtype", "fp8", "--block-size", "256", "--max-num-batched-tokens", "1024", "--max-num-seqs", "128", "--gpu-memory-utilization=0.9", "--all2all-backend", "deepep_low_latency", "--enable-expert-parallel", "--data-parallel-size", "16", "--compilation-config", "{\"cudagraph_mode\":\"FULL_DECODE_ONLY\",\"custom_ops\":[\"all\"]}", "--tokenizer-mode", "deepseek_v4", "--tool-call-parser", "deepseek_v4", "--enable-auto-tool-choice", "--reasoning-parser", "deepseek_v4", "--reasoning-config", "{\"reasoning_parser\":\"deepseek_v4\",\"reasoning_start_str\":\"\",\"reasoning_end_str\":\"\"}", "--speculative-config", "{\"method\":\"dspark\",\"num_speculative_tokens\":7,\"draft_sample_method\":\"probabilistic\"}"]
   },
   {
+    "key": "glm-5.3-flash_w4a8_tp8",
+    "checkpoint": "LLM/T-HEAD/v5.3/GLM-5.3-Flash-MoE-Quant-W-INT4-PerChannel-A-INT8-PerToken-Dense-Quant-W-INT8-PerChannel-A-INT8-PerToken",
+    "cards": 8,
+    "args": ["--tensor-parallel-size", "8", "--block-size", "256", "--max-model-len", "32768", "--max-num-seqs", "16", "--no-enable-prefix-caching"]
+  },
+  {
     "key": "glm-5.2_w8a8_tp16",
     "checkpoint": "ppu_quantization/qlean-test/GLM-5.2-int8-qyj",
     "cards": 16,
@@ -34,6 +48,7 @@
     "key": "qwen3.5-35b_bf16_tp2",
     "checkpoint": "LLM/qwen/v3.5/Qwen3.5-35B-A3B",
     "cards": 2,
+    "temperature": 1.0,
     "args": ["--dtype", "bfloat16", "--tensor-parallel-size", "2", "--no-enable-prefix-caching"]
   },
   {

@@ -21,6 +21,7 @@ BOOL_DEFAULTS = {
     "USE_PLA": True,
     "DEEPGEMM_MOE_TP_FUSED": False,
     "DEEPGEMM_MOE_FUSED_ACT_QUANT": False,
+    "USE_DEEPSELECT": True,
     "FUSED_GDN_DECODE": True,
     "DISABLE_MOE_WNA16_CUDA": False,
     "FORCE_MOE_WNA16_CUDA": False,

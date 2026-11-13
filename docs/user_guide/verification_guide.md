@@ -270,19 +270,22 @@ test does not cover those paths.
 
 ### Zhenwu 810E serving sanity
 
-The [810E sanity runner](../../scripts/ci/ppu_810e_sanity.py) provides eight
-presets covering DeepSeek V4 W4A8/INT8 (TP4, TP8 and DP16/EP16 low latency),
-GLM-5.2 INT8 TP16, Kimi-K2.6 W4A8 TP16, Qwen3.5 BF16 TP2 and INT8 TP8/EP8,
-and MiniMax M3 BF16 TP16. Run it inside a prepared SAIL SDK container with the
+The shared [PPU sanity runner](../../scripts/ci/ppu_sanity.py) selects presets
+from [ppu_sanity_810e.json](../../scripts/ci/ppu_sanity_810e.json) by default.
+Its ten presets cover DeepSeek V4 W4A8/INT8 (TP4, TP8 and DP16/EP16 low latency),
+DeepSeek V4.1 Flash INT8 TP8, GLM-5.3 Flash W4A8 TP8, GLM-5.2 INT8 TP16,
+Kimi-K2.6 W4A8 TP16,
+Qwen3.5 BF16 TP2 and INT8 TP8/EP8, and MiniMax M3 BF16 TP16.
+Run it inside a prepared SAIL SDK container with the
 installed, compatible vLLM and vLLM SAIL wheels. It does not install packages or
 reserve hardware. Select idle cards before running; the full catalog needs 16
 visible 810E devices. It changes the HTTP bind address to loopback and assigns a
 served model name; model flags remain those in the preset catalog.
 
 ```bash
-python scripts/ci/ppu_810e_sanity.py --list
-python scripts/ci/ppu_810e_sanity.py --dry-run
-python scripts/ci/ppu_810e_sanity.py \
+python scripts/ci/ppu_sanity.py --list
+python scripts/ci/ppu_sanity.py --dry-run
+python scripts/ci/ppu_sanity.py \
   --models qwen3.5-35b_bf16_tp2 \
   --checkpoint-root /ppusw/datasets/checkpoints \
   --results-dir /tmp/810e-sanity-qwen
@@ -293,13 +296,33 @@ different path, pass `--checkpoint KEY=/absolute/checkpoint/path`; the resolved
 path and config hash are recorded. Missing checkpoints or insufficient devices
 fail the selected case. The results directory must be new.
 The Qwen 397B INT8 preset uses the checkpoint directory suffix `W8A8-INT8`.
+The `glm-5.3-flash_w4a8_tp8` preset uses the GLM-5.3 Flash checkpoint under
+`LLM/T-HEAD/v5.3`, with INT4/INT8 MoE and INT8/INT8 dense weights and activations,
+TP8 and prefix caching disabled. Its HTTP server binds to loopback, as do the
+other sanity presets.
+The `deepseek-v4.1-flash_1017_int8_tp8` preset uses
+`LLM/T-HEAD/v4.1/DeepSeek-V4.1-Flash-1017-Quant-W-INT8-PerChannel-A-INT8-PerToken-Engram-MXFP8`
+under the checkpoint root and serves as `DeepSeek-V4.1-Flash-1017`. It enables
+the Rust frontend, Engram CPU offload, a 524288-token context, prefix caching,
+chunked prefill and dspark with seven speculative tokens. Other presets retain
+the Python frontend. To run this case with the reference command's port:
+
+```bash
+python scripts/ci/ppu_sanity.py \
+  --models deepseek-v4.1-flash_1017_int8_tp8 \
+  --port 8999 \
+  --results-dir /tmp/810e-sanity-dsv41
+```
 
 Each case checks `/health` and `/v1/models`, sends a chat request and a repeated
 request, and requires nonempty content, generated tokens and a normal `stop`
 finish reason. Truncation at the output limit fails; the default budget is
 4096 output tokens per request (`--max-tokens` overrides it). DP16 uses a
 16-request burst after the first request; this does not establish per-rank
-routing. Responses with reasoning but empty content fail. The runner records exact commands,
+routing. Requests use seed 0. Most presets use temperature 0; Qwen3.5-35B uses
+temperature 1.0, matching its checkpoint's sampled-generation default and
+[official model guidance](https://huggingface.co/Qwen/Qwen3.5-35B-A3B).
+Responses with reasoning but empty content fail. The runner records exact commands,
 package paths and versions, device capabilities, startup logs, requests,
 responses and JSON results. It terminates its own server process group after
 each case. Any failed case makes the command exit nonzero. Startup and request
@@ -310,6 +333,31 @@ DP launch cannot terminate earlier at its shorter internal default.
 These presets are test inputs, not a declaration of model support. Passing
 establishes inference for the recorded checkpoint and configuration; it does
 not establish dataset accuracy, tool-call correctness or benchmark performance.
+
+### Zhenwu M890 serving sanity
+
+Use the same runner with `--device 890` to select
+[ppu_sanity_890.json](../../scripts/ci/ppu_sanity_890.json) and require capability 8.9
+(`ZW-M890P` identifies Zhenwu M890). The default remains 810E, capability 8.0.
+The M890 catalog covers Qwen3.8-Flash-Next MXFP4/FP8 TP4 with MTP,
+GLM-5.3-Flash MXFP4/FP8 TP8 with MTP, and DeepSeek V4.1-Flash-1017
+MXFP4/FP8 TP8/EP8 with MXFP8 Engram. DeepSeek enables MegaMoE
+(`--moe-backend deep_gemm_mega_moe`) and the MXFP4 sparse indexer
+(`--attention-config '{"indexer_sparse_logits":true,"indexer_kv_dtype":"mxfp4"}'`).
+It uses the Rust frontend, `deepseek_v41` parsers, CPU Engram offload,
+and disables prefix caching.
+
+```bash
+python scripts/ci/ppu_sanity.py --device 890 --list
+python scripts/ci/ppu_sanity.py --device 890 --dry-run
+python scripts/ci/ppu_sanity.py --device 890 \
+  --results-dir /tmp/890-sanity
+```
+
+Use eight visible M890 devices for the complete catalog. The same lifecycle,
+generation checks, checkpoint overrides and evidence files described above apply.
+These are single-host serving checks; they do not validate multi-host DP16 or
+prefill/decode disaggregation.
 
 ## 5. Report correctness and performance
 

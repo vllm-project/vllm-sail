@@ -59,6 +59,8 @@ _AFFECTED = ">=0.32.0,<0.33.0"
 _MODULE = "vllm.models.glm5next.nvidia.sparse_indexer"
 
 if not _unavailable:
+    _upstream_mqa_logits = _kpool_indexer.fp8_fp4_mqa_logits
+    _upstream_paged_mqa_logits = _kpool_indexer.fp8_fp4_paged_mqa_logits
     _upstream_forward_native = _kpool_indexer.SparseAttnIndexerKpool.forward_native
     # The pinned upstream (db9527a46) has no ``topk_backend``; newer builds do.
     # Delegate with only the keywords the live upstream actually accepts.
@@ -110,6 +112,57 @@ _FORWARD_NATIVE_REASON = (
 _FORWARD_NATIVE_REMOVE_WHEN = (
     "upstream's forward_native grows a platform hook, or PPU stops overriding this op."
 )
+
+
+def fp8_mqa_logits(q, kv, weights, cu_seqlen_ks, cu_seqlen_ke, max_seqlen_k):
+    """Keep GLM's FP8 producers on SAIL's legacy FP8 scoring API."""
+    if not current_platform.is_ppu():
+        return _upstream_mqa_logits(
+            q, kv, weights, cu_seqlen_ks, cu_seqlen_ke, max_seqlen_k
+        )
+    from vllm_sail.utils import deep_gemm
+
+    q_values, q_scale = q
+    if q_scale is not None or q_values.dtype != torch.float8_e4m3fn:
+        raise ValueError("SAIL GLM Kpool expects FP8 Q with scales folded into weights")
+    return deep_gemm.fp8_mqa_logits(
+        q_values, kv, weights, cu_seqlen_ks, cu_seqlen_ke,
+        clean_logits=False, max_seqlen_k=max_seqlen_k,
+    )
+
+
+def fp8_paged_mqa_logits(
+    q, kv_cache, weights, context_lens, block_tables, schedule_metadata,
+    max_model_len, indices=None,
+):
+    """Generate the FP8 schedule from the device-built per-query GLM rows."""
+    if not current_platform.is_ppu():
+        return _upstream_paged_mqa_logits(
+            q, kv_cache, weights, context_lens, block_tables, schedule_metadata,
+            max_model_len, indices=indices,
+        )
+    from vllm_sail.utils import deep_gemm
+
+    q_values, q_scale = q
+    if q_scale is not None or q_values.dtype != torch.float8_e4m3fn:
+        raise ValueError("SAIL GLM Kpool expects FP8 Q with scales folded into weights")
+    # SM89's varlen builder expands contexts and block tables to one row per
+    # query. Legacy FP8 must omit the request IDs used by weighted MXFP4.
+    if q_values.shape[1] != 1:
+        raise ValueError("SAIL GLM Kpool requires device-built per-query decode rows")
+    contexts = context_lens.reshape(-1, 1).contiguous()
+    # Preserve upstream's singleton-column stride repair; contiguous() can
+    # leave a size-one dimension's non-unit stride unchanged.
+    if block_tables.stride(-1) != 1:
+        block_tables = block_tables.clone(memory_format=torch.contiguous_format)
+    schedule = deep_gemm.get_paged_mqa_logits_metadata(
+        contexts, kv_cache.shape[1], deep_gemm.get_num_sms(),
+        (1, q_values.shape[2], q_values.shape[3], q_values.dtype),
+    )
+    return deep_gemm.fp8_paged_mqa_logits(
+        q_values, kv_cache, weights, contexts, block_tables, schedule,
+        max_model_len, clean_logits=False,
+    )
 
 
 def forward_ppu(
@@ -247,6 +300,21 @@ def _check_live_consumer() -> None:
 # (older transformers) can import this module and skip it instead of failing the
 # whole plugin install.
 if not _unavailable:
+    for _name, _replacement in (
+        ("fp8_fp4_mqa_logits", fp8_mqa_logits),
+        ("fp8_fp4_paged_mqa_logits", fp8_paged_mqa_logits),
+    ):
+        patch(
+            _MODULE,
+            _name,
+            reason=(
+                "GLM Kpool produces FP8 Q/K and FP32 weights on M890. SAIL's "
+                "unified weighted API accepts only MXFP4, so use legacy FP8 "
+                "with relative prefill columns and per-query decode metadata."
+            ),
+            affected_versions=_AFFECTED,
+            remove_when="The upstream Kpool indexer selects a platform logits backend.",
+        )(_replacement)
     patch(
         _MODULE,
         "SparseAttnIndexerKpool.forward_ppu",

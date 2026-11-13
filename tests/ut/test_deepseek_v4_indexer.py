@@ -56,6 +56,11 @@ def installed(monkeypatch, patch_utils_module):
 
     calls = []
 
+    class Indexer:
+        def _q_rope_quant(self, *args):
+            calls.append(("upstream_method", args, {}))
+            return "upstream_method"
+
     def upstream_q(
         positions,
         index_q,
@@ -92,9 +97,17 @@ def installed(monkeypatch, patch_utils_module):
         calls.append(("int8_k", args, kwargs))
         return "int8_k"
 
-    module(Q_PROVIDER, fused_indexer_q_rope_quant=upstream_q)
+    module(
+        Q_PROVIDER,
+        fused_indexer_q_rope_quant=upstream_q,
+        _indexer_weights_out_dtypes=lambda config: ("float32",),
+    )
     module(f"{BASE}.common.ops", fused_indexer_q_rope_quant=upstream_q)
-    module(f"{BASE}.attention", fused_indexer_q_rope_quant=upstream_q)
+    module(
+        f"{BASE}.attention",
+        fused_indexer_q_rope_quant=upstream_q,
+        DeepseekV4Indexer=Indexer,
+    )
     module(K_PROVIDER, compress_norm_rope_store_triton=upstream_k)
     module(f"{BASE}.compressor", compress_norm_rope_store_triton=upstream_k)
     module(
@@ -189,6 +202,38 @@ def test_fp4_query_forwards_scoring_weights_dtype(installed):
     assert calls[-1][2]["weights_out_dtype"] == "bfloat16"
 
 
+@pytest.mark.parametrize("ppu,fp4", [(True, True), (True, False), (False, True)])
+@pytest.mark.parametrize("weights_dtype", ["bfloat16", "operator-dtype"])
+def test_v4_model_uses_the_operator_weights_dtype_for_ppu_mxfp4(
+    installed, patch_utils_module, ppu, fp4, weights_dtype
+):
+    platform, modules, calls, patched = installed
+    platform.ppu, platform.capability = ppu, (8, 9)
+    indexer = modules[f"{BASE}.attention"].DeepseekV4Indexer()
+    indexer.use_fp4_kv, indexer.softmax_scale, indexer.n_head = fp4, 0.5, 32
+    indexer.indexer_op = types.SimpleNamespace(weights_dtype=weights_dtype)
+    rotary = types.SimpleNamespace(cos_sin_cache="rotary")
+    result = indexer._q_rope_quant("positions", "q", rotary, "weights")
+    if ppu and fp4:
+        assert result == "upstream_q"
+        assert calls[-1][2] == {"use_fp4": True, "weights_out_dtype": weights_dtype}
+    else:
+        assert result == "upstream_method"
+    target = patched._INDEXER_Q_TARGET
+    assert (
+        patch_utils_module.original_of(patched.indexer_q_rope_quant, target)
+        is not patched.indexer_q_rope_quant
+    )
+    with pytest.raises(RuntimeError, match="already"):
+        patch_utils_module.patch(
+            f"{BASE}.attention",
+            "DeepseekV4Indexer._q_rope_quant",
+            reason="Duplicate dtype selection.",
+            affected_versions=">=0.33.0,<0.34.0",
+            remove_when="The model selects the PPU weights dtype.",
+        )(lambda *args: None)
+
+
 def test_int8_query_requires_float32_scoring_weights(installed):
     _, modules, calls, _ = installed
     with pytest.raises(AssertionError):
@@ -196,6 +241,34 @@ def test_int8_query_requires_float32_scoring_weights(installed):
             *range(6), weights_out_dtype="bfloat16"
         )
     assert not calls
+
+
+@pytest.mark.parametrize(
+    "ppu,capability,expected",
+    [
+        (True, (8, 9), ("float32", "bfloat16")),
+        (True, (8, 0), ("float32",)),
+        (False, (8, 9), ("float32",)),
+    ],
+)
+def test_fp4_warmup_includes_dense_ppu_weights_dtype(
+    installed, patch_utils_module, ppu, capability, expected
+):
+    platform, modules, _, patched = installed
+    platform.ppu, platform.capability = ppu, capability
+    helper = modules[Q_PROVIDER]._indexer_weights_out_dtypes
+    assert helper is patched._indexer_weights_out_dtypes
+    assert helper(object()) == expected
+    target = Q_PROVIDER + "._indexer_weights_out_dtypes"
+    assert patch_utils_module.original_of(helper, target)(None) == ("float32",)
+    with pytest.raises(RuntimeError, match="already"):
+        patch_utils_module.patch(
+            Q_PROVIDER,
+            "_indexer_weights_out_dtypes",
+            reason="Duplicate warmup selection.",
+            affected_versions=">=0.33.0,<0.34.0",
+            remove_when="The model selects the PPU weights dtype.",
+        )(lambda *args: None)
 
 
 @pytest.mark.parametrize("consumer", [K_PROVIDER, f"{BASE}.compressor"])

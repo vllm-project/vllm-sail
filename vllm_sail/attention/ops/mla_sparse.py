@@ -18,6 +18,12 @@ from vllm.v1.attention.backends.mla.indexer import (
 from vllm.v1.attention.ops.common import pack_seq_triton, unpack_seq_triton
 from vllm.v1.worker.workspace import current_workspace_manager
 
+from vllm_sail.utils.deep_select import (
+    can_use_deep_select,
+    deep_select_topk,
+    warn_deep_select_fallback,
+)
+
 if current_platform.is_cuda_alike():
     from vllm import _custom_ops as ops
 
@@ -31,6 +37,8 @@ if current_platform.is_ppu():
         fp8_fp4_paged_mqa_logits,
         fp8_mqa_logits,
         fp8_paged_mqa_logits,
+        get_num_sms,
+        get_paged_mqa_logits_metadata,
         int8_mqa_logits,
         int8_paged_mqa_logits,
         is_deep_gemm_supported,
@@ -174,6 +182,7 @@ def ppu_sparse_attn_indexer(
     candidate_blocks: torch.Tensor | None = None,
     candidate_block_size: int = 0,
     candidate_write: bool = False,
+    topk_backend: str = "auto",
 ) -> torch.Tensor:
     # careful! this will be None in dummy run
     attn_metadata = get_forward_context().attn_metadata
@@ -220,6 +229,7 @@ def ppu_sparse_attn_indexer(
             candidate_blocks,
             candidate_block_size,
             candidate_write,
+            topk_backend,
         )
     attn_metadata_narrowed = attn_metadata[k_cache_prefix]
     assert isinstance(attn_metadata_narrowed, DeepseekV32IndexerMetadata)
@@ -277,6 +287,10 @@ def ppu_sparse_attn_indexer(
         for chunk in prefill_metadata.chunks:
             k_quant = k_quant_full[: chunk.total_seq_lens]
             k_scale = k_scale_full[: chunk.total_seq_lens]
+            # Both host-known bounds cover every row's valid K window. Cap
+            # short batches too, so a large configured context cannot inflate
+            # a small chunk's allocation beyond its gathered KV extent.
+            logits_capacity = min(max_model_len, chunk.total_seq_lens)
 
             if not chunk.skip_kv_gather:
                 ops.cp_gather_indexer_k_quant_cache(
@@ -314,6 +328,7 @@ def ppu_sparse_attn_indexer(
                         chunk.cu_seqlen_ke,
                         clean_logits=False,
                         logits_dtype=torch.bfloat16,
+                        max_seqlen_k=logits_capacity,
                     )
                 elif q_dtype == torch.int8:
                     logits = int8_mqa_logits(
@@ -323,6 +338,7 @@ def ppu_sparse_attn_indexer(
                         chunk.cu_seqlen_ks,
                         chunk.cu_seqlen_ke,
                         clean_logits=False,
+                        max_seqlen_k=logits_capacity,
                     )
                 elif q_dtype == torch.float8_e4m3fn:
                     logits = fp8_mqa_logits(
@@ -332,6 +348,7 @@ def ppu_sparse_attn_indexer(
                         chunk.cu_seqlen_ks,
                         chunk.cu_seqlen_ke,
                         clean_logits=False,
+                        max_seqlen_k=logits_capacity,
                     )
                 else:
                     raise RuntimeError(
@@ -341,11 +358,16 @@ def ppu_sparse_attn_indexer(
                 raise RuntimeError("indexer need PPU deep gemm installed")
 
             num_rows = logits.shape[0]
+            row_starts = chunk.cu_seqlen_ks
+            row_ends = chunk.cu_seqlen_ke
+            # All non-paged policies use compressed, query-relative columns.
+            row_ends = (row_ends - row_starts).clamp_min(0)
+            row_starts = torch.zeros_like(row_ends)
             if candidate_blocks is not None:
                 _filter_candidates(
                     logits,
-                    chunk.cu_seqlen_ks,
-                    chunk.cu_seqlen_ke,
+                    row_starts,
+                    row_ends,
                     candidate_blocks[chunk.token_start : chunk.token_end],
                     candidate_block_size,
                     candidate_write,
@@ -355,11 +377,16 @@ def ppu_sparse_attn_indexer(
                 chunk.token_start : chunk.token_end, :topk_tokens
             ]
 
-            if logits.dtype == torch.bfloat16:
+            if _use_deep_select(logits, topk_tokens, topk_backend):
+                # Compressed rows start at each query's first K position;
+                # BF16 scores use the wheel with per-row valid lengths.
+                deep_select_topk(logits, topk_tokens, row_ends, topk_indices)
+            elif logits.dtype == torch.bfloat16:
+                warn_deep_select_fallback()
                 sail_ops.top_k_per_row_prefill_bf16(
                     logits,
-                    chunk.cu_seqlen_ks,
-                    chunk.cu_seqlen_ke,
+                    row_starts,
+                    row_ends,
                     topk_indices,
                     num_rows,
                     logits.stride(0),
@@ -369,8 +396,8 @@ def ppu_sparse_attn_indexer(
             else:
                 torch.ops._C.top_k_per_row_prefill(
                     logits,
-                    chunk.cu_seqlen_ks,
-                    chunk.cu_seqlen_ke,
+                    row_starts,
+                    row_ends,
                     topk_indices,
                     num_rows,
                     logits.stride(0),
@@ -430,36 +457,72 @@ def ppu_sparse_attn_indexer(
         )
 
         if is_deep_gemm_supported():
+            # All paged DSA policies in 4869f1e use next_n=1. Q, weights,
+            # contexts and page tables must share the same query row order.
+            decode_weights = weights[:num_decode_tokens]
+            if decode_metadata.requires_padding:
+                decode_weights = pack_seq_triton(
+                    decode_weights, decode_lens, pad_value=0
+                ).reshape(num_padded_tokens, -1)
+            contexts, tables, request_ids = _paged_decode_rows(
+                seq_lens,
+                decode_metadata.block_table,
+                decode_lens,
+                next_n,
+                decode_metadata.indices,
+                decode_metadata.per_req_decode_lens,
+            )
+            schedule = get_paged_mqa_logits_metadata(
+                contexts,
+                kv_cache.shape[1],
+                get_num_sms(),
+                (
+                    1,
+                    padded_q_quant_cast.shape[-2],
+                    head_dim,
+                    torch.int8 if use_fp4_cache else q_dtype,
+                ),
+                indices=request_ids if use_fp4_cache else None,
+            )
+            flat_q = padded_q_quant_cast.reshape(
+                num_padded_tokens, 1, *padded_q_quant_cast.shape[2:]
+            )
             if use_fp4_cache:
                 logits = fp8_fp4_paged_mqa_logits(
-                    (padded_q_quant_cast, padded_q_scale),
+                    (
+                        flat_q,
+                        padded_q_scale.reshape(
+                            num_padded_tokens, 1, *padded_q_scale.shape[2:]
+                        ),
+                    ),
                     kv_cache,
-                    weights[:num_padded_tokens],
-                    seq_lens,
-                    decode_metadata.block_table,
-                    decode_metadata.schedule_metadata,
+                    decode_weights,
+                    contexts,
+                    tables,
+                    schedule,
                     max_model_len=max_model_len,
                     clean_logits=False,
+                    indices=request_ids,
                 )
             elif q_dtype == torch.int8:
                 logits = int8_paged_mqa_logits(
-                    padded_q_quant_cast,
+                    flat_q,
                     kv_cache,
-                    weights[:num_padded_tokens],
-                    seq_lens,
-                    decode_metadata.block_table,
-                    decode_metadata.schedule_metadata,
+                    decode_weights,
+                    contexts,
+                    tables,
+                    schedule,
                     max_model_len=max_model_len,
                     clean_logits=False,
                 )
             elif q_dtype == torch.float8_e4m3fn:
                 logits = fp8_paged_mqa_logits(
-                    padded_q_quant_cast,
+                    flat_q,
                     kv_cache,
-                    weights[:num_padded_tokens],
-                    seq_lens,
-                    decode_metadata.block_table,
-                    decode_metadata.schedule_metadata,
+                    decode_weights,
+                    contexts,
+                    tables,
+                    schedule,
                     max_model_len=max_model_len,
                     clean_logits=False,
                 )
@@ -469,22 +532,42 @@ def ppu_sparse_attn_indexer(
                 )
         else:
             raise RuntimeError("indexer need ppu deep gemm installed")
+        seq_lens = contexts.reshape(batch_size, next_n)
         num_rows = logits.shape[0]
         if candidate_blocks is not None:
+            decode_candidates = candidate_blocks[:num_decode_tokens]
+            if decode_metadata.requires_padding:
+                decode_candidates = pack_seq_triton(
+                    decode_candidates, decode_lens, pad_value=-1
+                ).reshape(num_padded_tokens, -1)
             vis = seq_lens.reshape(-1)
             row_repeat = next_n if vis.numel() != num_rows else 1
             _filter_candidates(
                 logits,
                 None,
                 vis[:num_rows],
-                candidate_blocks[:num_rows],
+                decode_candidates,
                 candidate_block_size,
                 candidate_write,
                 row_repeat,
             )
+            if candidate_write and decode_metadata.requires_padding:
+                candidate_blocks[:num_decode_tokens].copy_(
+                    unpack_seq_triton(
+                        decode_candidates.reshape(batch_size, next_n, -1), decode_lens
+                    )
+                )
         topk_indices = topk_indices_buffer[:num_padded_tokens, :topk_tokens]
 
-        if topk_tokens in (512, 1024, 2048):
+        if _use_deep_select(logits, topk_tokens, topk_backend):
+            row_ends = seq_lens.reshape(-1)
+            deep_select_topk(logits, topk_tokens, row_ends, topk_indices)
+        elif topk_tokens in (512, 1024, 2048):
+            # The existing decode kernels consume FP32 only. This expansion
+            # preserves BF16 scores exactly and never rounds FP32 into BF16.
+            if logits.dtype == torch.bfloat16:
+                warn_deep_select_fallback()
+                logits = logits.float()
             workspace_manager = current_workspace_manager()
             (topk_workspace,) = workspace_manager.get_simultaneous(
                 ((RADIX_TOPK_WORKSPACE_SIZE,), torch.uint8),
@@ -498,6 +581,9 @@ def ppu_sparse_attn_indexer(
                 attn_metadata_narrowed.max_seq_len,
             )
         else:
+            if logits.dtype == torch.bfloat16:
+                warn_deep_select_fallback()
+                logits = logits.float()
             torch.ops._C.top_k_per_row_decode(
                 logits,
                 next_n,
@@ -543,8 +629,68 @@ def ppu_sparse_attn_indexer_fake(
     candidate_blocks: torch.Tensor | None = None,
     candidate_block_size: int = 0,
     candidate_write: bool = False,
+    topk_backend: str = "auto",
 ) -> torch.Tensor:
     return topk_indices_buffer
+
+
+def _use_deep_select(logits, topk, backend):
+    supported = can_use_deep_select(logits, topk)
+    if backend == "deep_select" and not supported:
+        raise RuntimeError(
+            "deep_select was requested but the SAIL BF16 wheel, device or "
+            "shape is unsupported; FP32 logits are never rounded to BF16"
+        )
+    return backend in ("auto", "deep_select") and supported
+
+
+def _paged_decode_rows(
+    seq_lens, block_table, decode_lens, next_n, indices, per_req_decode_lens=None
+):
+    """Request-major [Q,1] rows, including safe, separately labelled padding."""
+    batch = decode_lens.shape[0]
+    device = seq_lens.device
+    positions = torch.arange(next_n, device=device, dtype=torch.int32)
+    if seq_lens.numel() == batch * next_n:
+        contexts = seq_lens.reshape(batch, next_n)
+        # Native metadata is right-aligned to the maximum verify count,
+        # whereas pack_seq_triton left-aligns each request's actual queries.
+        # Gather the already compressed contexts rather than adding token
+        # offsets in compressed units (which is wrong for C2 indexers).
+        source_cols = (next_n - decode_lens.reshape(batch, 1) + positions).clamp(
+            0, next_n - 1
+        )
+        contexts = contexts.gather(1, source_cols.to(torch.int64))
+    else:
+        contexts = (
+            seq_lens.reshape(batch, 1) - decode_lens.reshape(batch, 1) + 1 + positions
+        ).clamp_min(0)
+    valid = positions.unsqueeze(0) < decode_lens.reshape(batch, 1)
+    contexts = torch.where(valid, contexts, 0).reshape(-1, 1).contiguous()
+    rows = batch * next_n
+    if indices is None and next_n == 1 and per_req_decode_lens is not None:
+        # The non-varlen upstream flattening path replaces decode_lens by
+        # ones, but retains original verify counts separately. Recover true
+        # owners without a GPU->CPU read or a dynamic repeat_interleave size.
+        request_ends = per_req_decode_lens.to(torch.int32).cumsum(0)
+        request_ids = torch.searchsorted(
+            request_ends, torch.arange(rows, device=device), right=True
+        ).to(torch.int32)
+        valid = valid.reshape(-1) & (request_ids < per_req_decode_lens.numel())
+        contexts = torch.where(valid.reshape(-1, 1), contexts, 0)
+    elif indices is None:
+        request_ids = torch.arange(batch, device=device, dtype=torch.int32)
+        request_ids = request_ids.repeat_interleave(next_n)
+    else:
+        request_ids = indices.reshape(-1).to(torch.int32)
+        if request_ids.numel() != rows:
+            raise ValueError("Request IDs must cover every flattened query")
+    # Real request IDs are nonnegative local indices; negative labels isolate
+    # padding without colliding with any real request, even after flattening.
+    dummy_ids = -1 - torch.arange(rows, device=device, dtype=torch.int32)
+    request_ids = torch.where(valid.reshape(-1), request_ids, dummy_ids).contiguous()
+    tables = block_table.repeat_interleave(next_n, dim=0)
+    return contexts, tables, request_ids
 
 
 def _filter_candidates(

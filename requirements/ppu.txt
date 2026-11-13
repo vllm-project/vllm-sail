@@ -1,4 +1,4 @@
-# Runtime dependencies installed from PyPI.
+# Runtime dependencies installed from the configured package indexes.
 #
 # NOTE: vllm is deliberately NOT declared here. PPU is CUDA-source-compatible
 # but not binary-compatible: a PyPI vllm wheel ships compiled CUDA binaries
@@ -12,7 +12,10 @@ tokenspeed-mla==0.1.2
 # transformers releases do not ship; the plugin loads that model at install().
 # Range matches the vLLM 0.32 pin and the validated PPU runtime (5.16.1).
 transformers>=5.16.1,<5.20.0
+# SAIL DeepGEMM wheel from the PPU package index.
+deep_gemm==1.1.0+v1.1.0.ppu2.2.0
+# SAIL DeepSelect wheel from the PPU package index.
+deep_select==1.0.0
 
 # PPU SDK dependencies — supplied by the SDK and NOT installable from PyPI.
-# Their availability is checked at runtime: acext, deep_gemm, flash_attn,
-# flash_attn_3.
+# Their availability is checked at runtime: acext, flash_attn, flash_attn_3.

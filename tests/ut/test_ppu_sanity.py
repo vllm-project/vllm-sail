@@ -5,6 +5,7 @@ import concurrent.futures
 import importlib.util
 import json
 import os
+import shlex
 import signal
 import socket
 import sys
@@ -16,7 +17,7 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
 SPEC = importlib.util.spec_from_file_location(
-    "ppu_810e_sanity", ROOT / "scripts/ci/ppu_810e_sanity.py"
+    "ppu_sanity", ROOT / "scripts/ci/ppu_sanity.py"
 )
 sanity = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(sanity)
@@ -115,7 +116,7 @@ def test_sigterm_stops_server_before_joining_blocked_burst_and_saves_results(
         sys,
         "argv",
         [
-            "ppu_810e_sanity.py",
+            "ppu_sanity.py",
             "--models",
             key,
             "--checkpoint",
@@ -127,7 +128,7 @@ def test_sigterm_stops_server_before_joining_blocked_burst_and_saves_results(
         ],
     )
     monkeypatch.setattr(
-        sanity, "runtime_environment", lambda: {"devices": [None, None]}
+        sanity, "runtime_environment", lambda *args: {"devices": [None, None]}
     )
     generations = 0
     unblocked_by_cleanup = []
@@ -206,14 +207,51 @@ def test_completion_requires_a_final_answer_and_generated_tokens():
             sanity.validate_completion(response, "demo")
 
 
+@pytest.mark.parametrize("temperature", [None, 1.0])
+def test_model_temperature_preserves_request_budget_and_validation(
+    tmp_path, monkeypatch, external_launcher, temperature
+):
+    checkpoint = tmp_path / "checkpoint"
+    checkpoint.mkdir()
+    (checkpoint / "config.json").write_text("{}")
+    args = SimpleNamespace(
+        results_dir=tmp_path,
+        port=0,
+        ready_timeout=5,
+        request_timeout=5,
+        max_tokens=4096,
+    )
+    preset = {"key": "demo", "cards": 2, "args": []}
+    if temperature is not None:
+        preset["temperature"] = temperature
+    payloads = []
+
+    def request(url, *, payload=None, timeout=5):
+        if url.endswith("/health"):
+            return None
+        if url.endswith("/v1/models"):
+            return {"data": [{"id": "demo"}]}
+        payloads.append(payload)
+        return completion()
+
+    monkeypatch.setattr(sanity, "request_json", request)
+    result = sanity.run_preset(preset, checkpoint, args, 2)
+    assert result["status"] == "passed" and result["requests"] == 2
+    assert [p["temperature"] for p in payloads] == [temperature or 0] * 2
+    assert all(p["max_completion_tokens"] == 4096 and p["seed"] == 0 for p in payloads)
+    assert all(p["model"] == "demo" for p in payloads)
+
+
 def test_serve_preserves_json_and_checkpoint_arguments():
     presets = json.loads(sanity.CATALOG.read_text())
-    assert len(presets) == 8
+    assert len(presets) == 10
     for preset in presets:
         argv = sanity.serve_command(preset, Path("/models/space in name"), 9985)
         assert argv[4] == "/models/space in name"
         assert argv[argv.index("--host") + 1] == "127.0.0.1"
-        assert argv[argv.index("--served-model-name") + 1] == preset["key"]
+        assert argv[argv.index("--served-model-name") + 1] == preset.get(
+            "served_model_name", preset["key"]
+        )
         assert argv[-len(preset["args"]) :] == preset["args"]
         if "--speculative-config" in argv:
             config = json.loads(argv[argv.index("--speculative-config") + 1])
@@ -234,6 +272,71 @@ def test_missing_checkpoint_fails_without_starting_a_server(tmp_path):
     assert not (tmp_path / "missing" / "serve.log").exists()
 
 
+def test_890_cli_preserves_mega_moe_and_fp4_indexer(monkeypatch, capsys):
+    monkeypatch.setattr(sys, "argv", ["sanity", "--device", "890", "--dry-run"])
+    assert sanity.main() == 0
+    commands = [shlex.split(line) for line in capsys.readouterr().out.splitlines()]
+    assert len(commands) == 3
+    deepseek = next(argv for argv in commands if "deepseek_v41" in argv)
+    assert "--enable-expert-parallel" in deepseek
+    assert deepseek[deepseek.index("--moe-backend") + 1] == "deep_gemm_mega_moe"
+    assert json.loads(deepseek[deepseek.index("--attention-config") + 1]) == {
+        "indexer_sparse_logits": True,
+        "indexer_kv_dtype": "mxfp4",
+    }
+    assert "DeepSeek-V4.1-Flash-1017-MoE-Quant" in deepseek[4]
+
+
+def test_810e_v41_uses_1017_int8_checkpoint():
+    preset = next(
+        item
+        for item in json.loads(sanity.CATALOG.read_text())
+        if item["key"] == "deepseek-v4.1-flash_1017_int8_tp8"
+    )
+    assert preset["checkpoint"] == (
+        "LLM/T-HEAD/v4.1/DeepSeek-V4.1-Flash-1017-Quant-W-INT8-PerChannel-"
+        "A-INT8-PerToken-Engram-MXFP8"
+    )
+
+
+@pytest.mark.parametrize("device,capability", [("810e", (8, 0)), ("890", (8, 9))])
+def test_runtime_checks_device_family_and_records_selected_catalog(
+    monkeypatch, device, capability
+):
+    cuda = SimpleNamespace(
+        is_available=lambda: True,
+        device_count=lambda: 1,
+        get_device_capability=lambda index: capability,
+        get_device_name=lambda index: "test PPU",
+    )
+    for name, module in {
+        "torch": SimpleNamespace(cuda=cuda),
+        "vllm": SimpleNamespace(__file__="/env/site-packages/vllm/__init__.py"),
+        "vllm.platforms": SimpleNamespace(
+            current_platform=SimpleNamespace(is_ppu=lambda: True)
+        ),
+        "vllm_sail": SimpleNamespace(
+            __file__="/env/site-packages/vllm_sail/__init__.py"
+        ),
+        "vllm_sail.compat": SimpleNamespace(
+            check_vllm_compatibility=lambda **kwargs: None
+        ),
+    }.items():
+        monkeypatch.setitem(sys.modules, name, module)
+    monkeypatch.setattr(sanity.importlib.metadata, "version", lambda name: "test")
+    catalog = sanity.CATALOG.with_name(f"ppu_sanity_{device}.json")
+    environment = sanity.runtime_environment(device, catalog)
+    assert environment["devices"][0]["capability"] == capability
+    assert environment["device_family"] == device
+    assert (
+        environment["catalog_sha256"]
+        == sanity.hashlib.sha256(catalog.read_bytes()).hexdigest()
+    )
+    other_device = "890" if device == "810e" else "810e"
+    with pytest.raises(RuntimeError, match=f"is not {other_device}"):
+        sanity.runtime_environment(other_device, catalog)
+
+
 def test_insufficient_devices_fail_without_starting_a_server(tmp_path):
     checkpoint = tmp_path / "checkpoint"
     checkpoint.mkdir()
@@ -250,8 +353,9 @@ def test_insufficient_devices_fail_without_starting_a_server(tmp_path):
 
 
 @pytest.mark.parametrize("answer", ["hello", ""])
+@pytest.mark.parametrize("use_v41_settings", [False, True])
 def test_real_http_lifecycle_records_generation_and_cleans_up(
-    tmp_path, monkeypatch, answer
+    tmp_path, monkeypatch, answer, use_v41_settings
 ):
     """A strict HTTP double stands in for the external vLLM server only."""
     with socket.socket() as free_port:
@@ -265,32 +369,51 @@ import sys
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 assert os.environ.get("VLLM_ENGINE_READY_TIMEOUT_S") == "20"
+assert os.environ.get("VLLM_USE_RUST_FRONTEND") == sys.argv[3]
+model_name = sys.argv[4]
 
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         assert self.path in {"/health", "/v1/models"}
         self.send_response(200)
         self.end_headers()
-        self.wfile.write(json.dumps({"data": [{"id": "demo"}]}).encode())
+        self.wfile.write(json.dumps({"data": [{"id": model_name}]}).encode())
 
     def do_POST(self):
         assert self.path == "/v1/chat/completions"
         payload = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
-        assert payload["model"] == "demo" and payload["messages"]
+        assert payload["model"] == model_name and payload["messages"]
         self.send_response(200)
         self.end_headers()
         self.wfile.write(json.dumps({
-            "model": "demo",
+            "model": model_name,
             "choices": [{"message": {"content": sys.argv[2]}, "finish_reason": "stop"}],
             "usage": {"completion_tokens": 1},
         }).encode())
 
 HTTPServer(("127.0.0.1", int(sys.argv[1])), Handler).serve_forever()
 """)
+    preset = {"key": "demo", "cards": 2, "args": []}
+    if use_v41_settings:
+        v41 = next(
+            item
+            for item in json.loads(sanity.CATALOG.read_text())
+            if item["key"] == "deepseek-v4.1-flash_1017_int8_tp8"
+        )
+        preset.update(served_model_name=v41["served_model_name"], env=v41["env"])
+    model_name = preset.get("served_model_name", preset["key"])
+    rust_frontend = "1" if use_v41_settings else "0"
     monkeypatch.setattr(
         sanity,
         "serve_command",
-        lambda *unused: [sys.executable, str(server), str(port), answer],
+        lambda *unused: [
+            sys.executable,
+            str(server),
+            str(port),
+            answer,
+            rust_frontend,
+            model_name,
+        ],
     )
     checkpoint = tmp_path / "checkpoint"
     checkpoint.mkdir()
@@ -303,12 +426,13 @@ HTTPServer(("127.0.0.1", int(sys.argv[1])), Handler).serve_forever()
         max_tokens=16,
     )
     result = sanity.run_preset(
-        {"key": "demo", "cards": 2, "args": []},
+        preset,
         checkpoint,
         args,
         available_cards=2,
     )
     assert result["status"] == ("passed" if answer else "failed")
+    assert result["serve_env"]["VLLM_USE_RUST_FRONTEND"] == rust_frontend
     assert json.loads((tmp_path / "demo" / "result.json").read_text()) == result
     assert (tmp_path / "demo" / "response-0.json").is_file()
     if answer:
@@ -324,7 +448,7 @@ HTTPServer(("127.0.0.1", int(sys.argv[1])), Handler).serve_forever()
     args.results_dir = tmp_path / "repeat"
     args.results_dir.mkdir()
     repeated = sanity.run_preset(
-        {"key": "demo", "cards": 2, "args": []},
+        preset,
         checkpoint,
         args,
         available_cards=2,

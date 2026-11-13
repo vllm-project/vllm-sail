@@ -426,6 +426,9 @@ def test_megamoe_api_reports_all_missing_functions(
         ("bf16xmxfp4", 2304, 128, True),
         ("bf16xmxfp4", 2048, 0, False),
         ("bf16xmxfp4", 0, 128, False),
+        ("mxf4xmxf4", 1, None, True),
+        ("fp8xmxfp4", 1, None, True),
+        ("bf16xmxfp4", 1, None, True),
     ],
 )
 def test_megamoe_geometry_matches_wheel_contract(
@@ -452,11 +455,101 @@ def test_megamoe_geometry_matches_wheel_contract(
         assert not calls
 
 
+@pytest.mark.parametrize("missing", ["ppu", "m890", "deep_gemm", "api"])
+def test_megamoe_unknown_geometry_still_checks_hardware_and_api(modules, missing):
+    modules(
+        "vllm.platforms",
+        current_platform=SimpleNamespace(
+            is_ppu=lambda: missing != "ppu",
+            has_device_capability=lambda *args, **kwargs: missing != "m890",
+        ),
+    )
+    modules(
+        "vllm_sail.utils.deep_gemm",
+        is_deep_gemm_supported=lambda: missing != "deep_gemm",
+    )
+    modules("deep_gemm.mega")
+    module = load_patch(_MEGAMOE_API)
+    error = RuntimeError if missing == "api" else NotImplementedError
+    match = "API is missing" if missing == "api" else "requires Zhenwu M890"
+    with pytest.raises(error, match=match):
+        module.check_mega_moe_supported(SimpleNamespace(index=0), 1, None, "fp8xmxfp4")
+
+
+@pytest.fixture
+def megamoe_platform_gate(modules):
+    calls = []
+    modules("vllm_sail.ops")
+    modules(
+        "vllm_sail.models.deepseek_v41.config",
+        normalize_expert_dtype=lambda config: None,
+    )
+    envs = modules("vllm_sail.envs", VLLM_SAIL_MEGA_MOE_MMA_TYPE="fp8xmxfp4")
+    modules(
+        "vllm_sail.utils.deep_gemm_mega",
+        check_mega_moe_supported=lambda *args: calls.append(args),
+    )
+    modules(
+        "torch",
+        device=lambda kind, index: (kind, index),
+        cuda=SimpleNamespace(current_device=lambda: 0),
+    )
+    gate = function(
+        "vllm_sail/platform.py",
+        "PPUPlatform.apply_config_platform_defaults",
+        {"logger": SimpleNamespace(info_once=lambda *args: None)},
+    )
+    config = SimpleNamespace(
+        kernel_config=SimpleNamespace(moe_backend="deep_gemm_mega_moe"),
+        model_config=SimpleNamespace(),
+        parallel_config=SimpleNamespace(enable_eplb=True),
+        compilation_config=SimpleNamespace(custom_ops=[]),
+        attention_config=SimpleNamespace(),
+        speculative_config=None,
+    )
+    return gate, config, envs, calls
+
+
+@pytest.mark.parametrize("model_type", ["deepseek_v41", "kimi_k31", "other_moe"])
+@pytest.mark.parametrize("mode", _MEGAMOE_MODE_APIS)
+@pytest.mark.parametrize("intermediate", [None, 128])
+def test_megamoe_platform_gate_accepts_models_and_eplb(
+    megamoe_platform_gate, model_type, mode, intermediate
+):
+    gate, config, envs, calls = megamoe_platform_gate
+    text_config = SimpleNamespace(model_type=model_type, hidden_size=2048)
+    if intermediate is not None:
+        text_config.moe_intermediate_size = intermediate
+    config.model_config.hf_text_config = text_config
+    envs.VLLM_SAIL_MEGA_MOE_MMA_TYPE = mode
+    gate(None, config)
+    assert calls == [(("cuda", 0), 2048, intermediate, mode)]
+
+
+def test_megamoe_platform_gate_rejects_declared_non_fp4_experts(megamoe_platform_gate):
+    gate, config, _, calls = megamoe_platform_gate
+    config.model_config.hf_text_config = SimpleNamespace(
+        model_type="other_moe", hidden_size=2048, expert_dtype="fp8"
+    )
+    with pytest.raises(ValueError, match="requires MXFP4 experts"):
+        gate(None, config)
+    assert calls == []
+
+
 @pytest.mark.parametrize("tokens", [0, 3])
 @pytest.mark.parametrize("with_shared", [False, True])
-@pytest.mark.parametrize("mode", _MEGAMOE_MODE_APIS)
+@pytest.mark.parametrize(
+    "mode,activation",
+    [
+        ("mxf4xmxf4", "swiglu"),
+        ("fp8xmxfp4", "swiglu"),
+        ("mxf4xmxf4", "situ"),
+        ("fp8xmxfp4", "situ"),
+        ("bf16xmxfp4", "situ"),
+    ],
+)
 def test_expert_forward_uses_sail_dispatch_and_main_shared_contract(
-    tokens, with_shared, mode
+    tokens, with_shared, mode, activation
 ):
     calls = []
 
@@ -481,7 +574,13 @@ def test_expert_forward_uses_sail_dispatch_and_main_shared_contract(
     )
     l1, l2 = object(), object()
     kernel_name = _MEGAMOE_MODE_APIS[mode][0]
-    expected_kwargs = {"fast_math": False, "activation": "swiglu"}
+    expected_kwargs = {"fast_math": False, "activation": activation}
+    if activation == "situ":
+        expected_kwargs.update(situ_beta=1.7, situ_linear_beta=-0.2)
+    else:
+        expected_kwargs["activation_clamp"] = 7.0
+    if mode == "mxf4xmxf4":
+        expected_kwargs["recipe"] = (1, 1, 32)
 
     def dispatch(
         x,
@@ -535,6 +634,7 @@ def test_expert_forward_uses_sail_dispatch_and_main_shared_contract(
         "mega_moe_api": get_api,
     }
     forward = function(_MEGAMOE_IMPL, f"{_MEGAMOE_CLASS}.forward", ns)
+    kernel_kwargs = function(_MEGAMOE_IMPL, f"{_MEGAMOE_CLASS}._kernel_kwargs", {})
     expert = SimpleNamespace(
         max_num_tokens=4,
         _synchronize_first_launch=lambda: calls.append("sync"),
@@ -542,10 +642,15 @@ def test_expert_forward_uses_sail_dispatch_and_main_shared_contract(
         eplb_state=SimpleNamespace(logical_to_physical_map=None),
         get_symm_buffer=lambda: buffer,
         mma_type=mode,
-        mma_format=SimpleNamespace(kernel=kernel_name),
+        mma_format=SimpleNamespace(
+            kernel=kernel_name,
+            transform=None if mode == "mxf4xmxf4" else "transform",
+        ),
+        activation=SimpleNamespace(name=activation, alpha=1.7, beta=-0.2, clamp=7.0),
+        fast_math=False,
         _kernel_weights=kernel_weights,
-        _kernel_kwargs=lambda: expected_kwargs,
     )
+    expert._kernel_kwargs = lambda: kernel_kwargs(expert)
     assert (
         forward(expert, hidden, weights, ids, shared if with_shared else None) is output
     )

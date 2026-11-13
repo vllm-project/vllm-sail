@@ -10,6 +10,8 @@ Import order notes:
 * ``mla_indexer`` rebinds ``has_deep_gemm`` / ``get_paged_mqa_logits_metadata``
   on the indexer module, so it must come after ``enhancement.deep_gemm_redirect``
   (already imported by the parent package) but is otherwise independent.
+* ``sparse_mqa_indexer`` follows ``mla_indexer`` and ``indexer_topk`` so its
+  constructors see PPU query rows and the SAIL DeepSelect capability checks.
 * The ``forward_ppu`` additions (``mhc``, ``sparse_attn_indexer``) rely on the
   parent package's ``custom_op_dispatch`` having installed the dispatch reroute
   first; the parent ``__init__`` guarantees that.
@@ -33,10 +35,12 @@ from vllm_sail.patch.enhancement.attention import (
     mhc_delayed,  # noqa: F401
     mla_attention,  # noqa: F401
     mla_indexer,  # noqa: F401
+    indexer_topk,  # noqa: F401
     minimax_dspark,  # noqa: F401
     musespark_routing,  # noqa: F401
     mla_prefill_flash_attn,  # noqa: F401
     sparse_attn_indexer,  # noqa: F401
+    sparse_mqa_indexer,  # noqa: F401 (requires mla_indexer and indexer_topk)
     sparse_attn_indexer_kpool,  # noqa: F401
     triton_decode_attention,  # noqa: F401
     dsv41_kv_record,  # noqa: F401
