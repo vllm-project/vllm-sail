@@ -24,6 +24,8 @@ they are covered by the FlashMLA PR#54 kernel UTs plus on-device smoke.
 from __future__ import annotations
 
 import importlib.util
+import sys
+from dataclasses import make_dataclass
 from types import SimpleNamespace
 
 import pytest
@@ -39,7 +41,85 @@ _SWITCH_NAMES = (
     "VLLM_PPU_FUSED_NORM_ROPE_ATTN",
     "VLLM_SAIL_PPU_KV_MXFP8",
     "VLLM_PPU_PPU_KV_MXFP8",
+    "VLLM_SAIL_PPU_FUSED_OUTPUT_CHANNELWISE",
+    "VLLM_PPU_PPU_FUSED_OUTPUT_CHANNELWISE",
 )
+
+
+class _UpstreamMegaAttnStub:
+    """Stand-in for upstream's ``DeepseekV4MegaAttnAttention``.
+
+    Carries the attributes the PPU overrides read (topology, block size) and a
+    ``_alloc_attn_out`` that returns a sentinel, so the channel-wise override
+    can be checked for delegating to ``super()`` when it is off.
+    """
+
+    def __init__(self, *args, **kwargs) -> None:
+        self._o_proj_block_size = 128
+        self.n_wv_group = 1
+        self.n_local_groups = 1
+        self.o_lora_rank = 4
+
+    def _alloc_attn_out(self, num_tokens, hidden_states):
+        return "super-alloc"
+
+
+def _load_attention_module(modules, monkeypatch, *, real_torch: bool = False):
+    """Load ``flash_mla_mega_attn.py`` against the stubbed vLLM module tree.
+
+    ``real_torch=False`` keeps the module on the CPU-only tier's torch stub.
+    ``real_torch=True`` binds the real (CPU) torch instead, which the tensor
+    level helpers need; vLLM and any device stay stubbed either way.
+    """
+    logs = []
+    logger = SimpleNamespace(info_once=lambda msg, *a: logs.append((msg, a)))
+    if real_torch:
+        monkeypatch.setitem(sys.modules, "torch", pytest.importorskip("torch"))
+    else:
+        modules("torch")
+    modules("vllm.logger", init_logger=lambda name: logger)
+    modules(
+        "vllm.model_executor.layers.fusion.quant_activation",
+        QuantizedActivation=make_dataclass(
+            "QuantizedActivation",
+            ["data", "scale", "orig_dtype", "orig_shape", "quant_key"],
+        ),
+    )
+    modules(
+        "vllm.model_executor.layers.quantization.utils.mxfp8_utils",
+        dequant_mxfp8_to_bf16=lambda weight, scale: weight,
+    )
+    modules(
+        "vllm.model_executor.layers.quantization.utils.quant_utils",
+        kMxfp8Dynamic=object(),
+    )
+    modules(
+        "vllm.models.deepseek_v41.common.ops",
+        combine_topk_swa_indices=lambda *a, **k: None,
+        dequantize_and_gather_k_cache=lambda *a, **k: None,
+    )
+    modules("vllm.models.deepseek_v41.common.ops.fused_layout", WV_GROUP_SIZE=8)
+    modules(
+        "vllm.models.deepseek_v41.nvidia.flash_mla_mega_attn",
+        _HEAD_DIM_V=512,
+        _QUANT_GROUP=32,
+        _ROPE_DIM=64,
+        _token_slice=lambda out, start, end: out,
+        DeepseekV4MegaAttnAttention=_UpstreamMegaAttnStub,
+    )
+    modules(
+        "vllm.models.deepseek_v41.sparse_mla",
+        DeepseekV4FlashMLABackend=type("DeepseekV4FlashMLABackend", (), {}),
+    )
+    modules("vllm.utils.math_utils", round_up=lambda x, y: -(-x // y) * y)
+    modules("vllm.v1.worker.workspace", current_workspace_manager=lambda: None)
+    platform = SimpleNamespace(
+        is_ppu=lambda: True,
+        get_device_capability=lambda device_id=0: SimpleNamespace(major=8, minor=9),
+    )
+    modules("vllm.platforms", current_platform=platform)
+    module = load_patch("vllm_sail/models/deepseek_v41/flash_mla_mega_attn.py")
+    return SimpleNamespace(module=module, platform=platform, logs=logs)
 
 
 @pytest.fixture(autouse=True)
@@ -115,44 +195,8 @@ def test_sail_name_takes_precedence_over_ppu_alias(
 
 @pytest.fixture
 def gate(modules, monkeypatch):
-    logs = []
-    logger = SimpleNamespace(info_once=lambda msg, *a: logs.append((msg, a)))
-    modules("torch")
-    modules("vllm.logger", init_logger=lambda name: logger)
-    modules(
-        "vllm.model_executor.layers.fusion.quant_activation",
-        QuantizedActivation=type("QuantizedActivation", (), {}),
-    )
-    modules(
-        "vllm.model_executor.layers.quantization.utils.mxfp8_utils",
-        dequant_mxfp8_to_bf16=lambda weight, scale: weight,
-    )
-    modules(
-        "vllm.models.deepseek_v41.common.ops",
-        combine_topk_swa_indices=lambda *a, **k: None,
-        dequantize_and_gather_k_cache=lambda *a, **k: None,
-    )
-    modules("vllm.models.deepseek_v41.common.ops.fused_layout", WV_GROUP_SIZE=8)
-    modules(
-        "vllm.models.deepseek_v41.nvidia.flash_mla_mega_attn",
-        _HEAD_DIM_V=512,
-        _QUANT_GROUP=32,
-        _ROPE_DIM=64,
-        _token_slice=lambda out, start, end: out,
-        DeepseekV4MegaAttnAttention=type("DeepseekV4MegaAttnAttention", (), {}),
-    )
-    modules(
-        "vllm.models.deepseek_v41.sparse_mla",
-        DeepseekV4FlashMLABackend=type("DeepseekV4FlashMLABackend", (), {}),
-    )
-    modules("vllm.utils.math_utils", round_up=lambda x, y: -(-x // y) * y)
-    modules("vllm.v1.worker.workspace", current_workspace_manager=lambda: None)
-    platform = SimpleNamespace(
-        is_ppu=lambda: True,
-        get_device_capability=lambda device_id=0: SimpleNamespace(major=8, minor=9),
-    )
-    modules("vllm.platforms", current_platform=platform)
-    module = load_patch("vllm_sail/models/deepseek_v41/flash_mla_mega_attn.py")
+    loaded = _load_attention_module(modules, monkeypatch)
+    module, platform, logs = loaded.module, loaded.platform, loaded.logs
     # Opt-in contract: gate tests explicitly enable both switches; the
     # default-off behaviour is asserted separately below.
     monkeypatch.setenv("VLLM_SAIL_FUSED_NORM_ROPE_ATTN", "1")
@@ -588,3 +632,532 @@ def test_forward_mega_methods_cast_positions_to_int32() -> None:
             f"{name} lost the defensive int32 cast for token_positions; the "
             "PPU fused kernel rejects int64 positions (seen on lingjun-08)."
         )
+
+
+# ---------------------------------------------------------------------------
+# channel-wise (per-token FP32) output scales — FlashMLA PR#59 macro=1
+# ---------------------------------------------------------------------------
+#
+# The switch pairs a runtime env var with a wheel compiled with
+# FLASHMLA_FUSED_OUTPUT_CHANNELWISE=1. FlashMLA cannot be probed at runtime,
+# so the tests below pin: the env wiring, the SM89-only gate, the buffer and
+# dequantization contract, the call-argument matrix, and the actionable
+# fail-fast when the wheel macro and the switch disagree.
+
+
+@pytest.fixture
+def tensor_gate(modules, monkeypatch):
+    """The attention module loaded against the real (CPU) torch."""
+    loaded = _load_attention_module(modules, monkeypatch, real_torch=True)
+    monkeypatch.setenv("VLLM_SAIL_FUSED_NORM_ROPE_ATTN", "1")
+    monkeypatch.setenv("VLLM_SAIL_PPU_KV_MXFP8", "1")
+    return SimpleNamespace(
+        module=loaded.module,
+        logs=loaded.logs,
+        torch=sys.modules["torch"],
+        monkeypatch=monkeypatch,
+    )
+
+
+def test_channelwise_switch_defaults_off() -> None:
+    assert envs.VLLM_SAIL_PPU_FUSED_OUTPUT_CHANNELWISE is False
+    assert envs.VLLM_PPU_PPU_FUSED_OUTPUT_CHANNELWISE is False
+    assert envs.snapshot()["VLLM_SAIL_PPU_FUSED_OUTPUT_CHANNELWISE"] is False
+
+
+@pytest.mark.parametrize(
+    "sail, ppu",
+    [
+        (
+            "VLLM_SAIL_PPU_FUSED_OUTPUT_CHANNELWISE",
+            "VLLM_PPU_PPU_FUSED_OUTPUT_CHANNELWISE",
+        )
+    ],
+)
+def test_channelwise_switch_turns_on_via_either_name(
+    monkeypatch: pytest.MonkeyPatch, sail: str, ppu: str
+) -> None:
+    for name in (sail, ppu):
+        monkeypatch.setenv(name, "1")
+        assert getattr(envs, sail) is True
+        assert getattr(envs, ppu) is True
+        monkeypatch.delenv(name)
+        assert getattr(envs, sail) is False
+
+
+def test_channelwise_sail_name_takes_precedence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sail = "VLLM_SAIL_PPU_FUSED_OUTPUT_CHANNELWISE"
+    ppu = "VLLM_PPU_PPU_FUSED_OUTPUT_CHANNELWISE"
+    monkeypatch.setenv(ppu, "0")
+    monkeypatch.setenv(sail, "1")
+    assert envs.VLLM_SAIL_PPU_FUSED_OUTPUT_CHANNELWISE is True
+    monkeypatch.setenv(sail, "0")
+    monkeypatch.setenv(ppu, "1")
+    assert envs.VLLM_SAIL_PPU_FUSED_OUTPUT_CHANNELWISE is False
+
+
+def test_gate_channelwise_opens_on_sm89_with_macro_report(gate) -> None:
+    gate.monkeypatch.setenv("VLLM_SAIL_PPU_FUSED_OUTPUT_CHANNELWISE", "1")
+    gate.set_wheel("api")
+    ok, report = gate.module.fused_gate(_config())
+    assert ok
+    assert "out_scale=per_token_fp32" in report
+    assert "required_flashmla_macro=1" in report
+
+
+def test_gate_channelwise_closes_on_sm80(gate) -> None:
+    gate.monkeypatch.setenv("VLLM_SAIL_PPU_FUSED_OUTPUT_CHANNELWISE", "1")
+    gate.set_capability(SimpleNamespace(major=8, minor=0))
+    gate.set_wheel("api")
+    ok, report = gate.module.fused_gate(_config())
+    assert not ok
+    assert report.startswith("gate-outscale-cap:")
+    assert "capability 8.9" in report
+
+
+def test_gate_default_report_still_per32(gate) -> None:
+    gate.set_wheel("api")
+    ok, report = gate.module.fused_gate(_config())
+    assert ok
+    assert "out_scale=per32_ue8m0" in report
+    assert "required_flashmla_macro=0" in report
+
+
+@pytest.mark.parametrize(
+    ("channelwise", "expected"),
+    [
+        (True, (4096, False, False, False)),
+        (False, (32, True, True, True)),
+    ],
+)
+def test_out_scale_args_matrix(gate, channelwise, expected) -> None:
+    assert gate.module._out_scale_args(channelwise) == expected
+    # The kernel hardcodes 4096 channels per WV group; the module derives it
+    # from the geometry (8 heads x 512) and asserts the two agree.
+    assert gate.module._PPU_OUT_SCALE_CHANNELS == 4096
+
+
+def test_alloc_attn_out_channelwise_allocates_fp32_scale(tensor_gate) -> None:
+    tensor_gate.monkeypatch.setenv("VLLM_SAIL_PPU_FUSED_OUTPUT_CHANNELWISE", "1")
+    cls = tensor_gate.module.PPUDeepseekV4MegaAttnAttention
+    out = cls()._alloc_attn_out(3, tensor_gate.torch.empty(0))
+    assert out.data.shape == (3, 1, 4096)
+    assert out.data.dtype == tensor_gate.torch.float8_e4m3fn
+    assert out.scale.shape == (3, 1, 1)
+    assert out.scale.dtype == tensor_gate.torch.float32
+    assert out.scale.is_contiguous()
+    assert out.orig_dtype == tensor_gate.torch.bfloat16
+    assert out.orig_shape == out.data.shape
+    # The quant key stays upstream's per-32 key: on PPU the only consumer is
+    # the BF16 bmm in _o_proj, which never reads it.
+    assert out.quant_key is tensor_gate.module.kMxfp8Dynamic
+
+
+def test_alloc_attn_out_default_delegates_to_super(gate) -> None:
+    cls = gate.module.PPUDeepseekV4MegaAttnAttention
+    instance = cls()
+    assert instance._output_channelwise is False
+    assert instance._alloc_attn_out(3, SimpleNamespace(device="cpu")) == "super-alloc"
+
+
+def test_alloc_attn_out_reads_switch_at_construction(tensor_gate) -> None:
+    tensor_gate.monkeypatch.setenv("VLLM_SAIL_PPU_FUSED_OUTPUT_CHANNELWISE", "1")
+    on = tensor_gate.module.PPUDeepseekV4MegaAttnAttention()
+    assert on._output_channelwise is True
+    tensor_gate.monkeypatch.delenv("VLLM_SAIL_PPU_FUSED_OUTPUT_CHANNELWISE")
+    off = tensor_gate.module.PPUDeepseekV4MegaAttnAttention()
+    assert off._output_channelwise is False
+
+
+def test_dequant_per_token_applies_one_scale_per_group(tensor_gate) -> None:
+    torch = tensor_gate.torch
+    module = tensor_gate.module
+    data = torch.tensor(
+        [[[1.5, -2.0, 0.5, 3.0]], [[1.0, 1.0, 1.0, 1.0]]], dtype=torch.float32
+    ).to(torch.float8_e4m3fn)
+    # One FP32 scale per (token, group): 2^-1 for token 0, 3.0 for token 1.
+    scale = torch.tensor([[[0.5]], [[3.0]]], dtype=torch.float32)
+    out = module._dequant_fused_output(data, scale)
+    assert out.dtype == torch.bfloat16
+    assert out.shape == (2, 1, 4)
+    expected = data.to(torch.float32) * scale
+    assert torch.allclose(out.float(), expected, rtol=2**-8, atol=0)
+    # Spot values on the power-of-two scale are exact: no bf16 rounding.
+    assert out[0, 0, 0].item() == 0.75
+    assert out[0, 0, 1].item() == -1.0
+
+
+def test_dequant_per_token_rejects_non_singleton_scale_dim(tensor_gate) -> None:
+    torch = tensor_gate.torch
+    data = torch.ones((1, 1, 8), dtype=torch.float8_e4m3fn)
+    scale = torch.ones((1, 1, 2), dtype=torch.float32)
+    with pytest.raises(AssertionError, match=r"channel-wise.*scale shape"):
+        tensor_gate.module._dequant_fused_output(data, scale)
+
+
+def test_dequant_per32_ue8m0_path_unchanged(tensor_gate) -> None:
+    torch = tensor_gate.torch
+    module = tensor_gate.module
+    data = torch.ones((1, 1, 128), dtype=torch.float8_e4m3fn)
+    # Four UE8M0 exponent bytes per int32 word, one per 32-dim block:
+    # 127 -> 2^0, 128 -> 2^1, 126 -> 2^-1, 127 -> 2^0.
+    packed = torch.tensor([[[127, 128, 126, 127]]], dtype=torch.uint8).view(torch.int32)
+    out = module._dequant_fused_output(data, packed)
+    assert out.dtype == torch.bfloat16
+    assert out.shape == (1, 1, 128)
+    expected = torch.cat(
+        [
+            torch.full((32,), 1.0),
+            torch.full((32,), 2.0),
+            torch.full((32,), 0.5),
+            torch.full((32,), 1.0),
+        ]
+    )
+    assert torch.equal(out[0, 0].float(), expected)
+
+
+def test_dequant_rejects_unknown_scale_dtype(tensor_gate) -> None:
+    torch = tensor_gate.torch
+    data = torch.ones((1, 1, 128), dtype=torch.float8_e4m3fn)
+    scale = torch.ones((1, 1, 1), dtype=torch.int64)
+    with pytest.raises(AssertionError, match="must be int32 .* or float32"):
+        tensor_gate.module._dequant_fused_output(data, scale)
+
+
+def _o_proj_instance(module, torch, *, channelwise: bool, scale_dtype, scale_shape):
+    instance = module.PPUDeepseekV4MegaAttnAttention()
+    instance._output_channelwise = channelwise
+    instance.wo_a = SimpleNamespace(
+        weight=torch.zeros((4, 128), dtype=torch.bfloat16), weight_scale=None
+    )
+    instance._wo_b_proj = lambda z: z
+    data = torch.ones((2, 1, 128), dtype=torch.float8_e4m3fn)
+    scale = torch.ones(scale_shape, dtype=scale_dtype)
+    attn_out = module.QuantizedActivation(
+        data=data,
+        scale=scale,
+        orig_dtype=torch.bfloat16,
+        orig_shape=data.shape,
+        quant_key=module.kMxfp8Dynamic,
+    )
+    return instance, attn_out
+
+
+def test_o_proj_channelwise_accepts_fp32_singleton_scale(tensor_gate) -> None:
+    instance, attn_out = _o_proj_instance(
+        tensor_gate.module,
+        tensor_gate.torch,
+        channelwise=True,
+        scale_dtype=tensor_gate.torch.float32,
+        scale_shape=(2, 1, 1),
+    )
+    out = instance._o_proj(attn_out, None)
+    assert out.shape == (2, 4)
+    assert out.dtype == tensor_gate.torch.bfloat16
+    assert tensor_gate.logs, "the first-call ledger line must still be emitted"
+    assert "output_channelwise=%s" in tensor_gate.logs[-1][0]
+    assert tensor_gate.logs[-1][1][-1] is True
+
+
+def test_o_proj_channelwise_rejects_per32_int32_scale(tensor_gate) -> None:
+    instance, attn_out = _o_proj_instance(
+        tensor_gate.module,
+        tensor_gate.torch,
+        channelwise=True,
+        scale_dtype=tensor_gate.torch.int32,
+        scale_shape=(2, 1, 1),
+    )
+    with pytest.raises(AssertionError, match="per-token FP32"):
+        instance._o_proj(attn_out, None)
+
+
+def test_o_proj_default_rejects_fp32_scale(tensor_gate) -> None:
+    instance, attn_out = _o_proj_instance(
+        tensor_gate.module,
+        tensor_gate.torch,
+        channelwise=False,
+        scale_dtype=tensor_gate.torch.float32,
+        scale_shape=(2, 1, 32),
+    )
+    with pytest.raises(AssertionError, match="per-32 packed UE8M0"):
+        instance._o_proj(attn_out, None)
+
+
+def test_o_proj_channelwise_rejects_non_singleton_scale_shape(tensor_gate) -> None:
+    instance, attn_out = _o_proj_instance(
+        tensor_gate.module,
+        tensor_gate.torch,
+        channelwise=True,
+        scale_dtype=tensor_gate.torch.float32,
+        scale_shape=(2, 1, 4),
+    )
+    with pytest.raises(AssertionError, match=r"scale shape.*per-token FP32"):
+        instance._o_proj(attn_out, None)
+
+
+@pytest.mark.parametrize("channelwise", [True, False])
+def test_macro_mismatch_hint_names_required_macro(gate, channelwise) -> None:
+    required = 1 if channelwise else 0
+    exc = RuntimeError(
+        "num_per_channels must match this FLASHMLA_FUSED_OUTPUT_CHANNELWISE="
+        f"{1 - required} build"
+    )
+    hint = gate.module._macro_mismatch_hint(exc, channelwise)
+    assert hint is not None
+    assert f"VLLM_SAIL_PPU_FUSED_OUTPUT_CHANNELWISE={required}" in hint
+    assert f"FLASHMLA_FUSED_OUTPUT_CHANNELWISE={required}" in hint
+    assert "compile-time constant" in hint
+    # The hint must stay portable: no local build fingerprints.
+    assert "sha256" not in hint
+
+
+def test_macro_mismatch_hint_passes_other_errors_through(gate) -> None:
+    assert gate.module._macro_mismatch_hint(RuntimeError("boom"), True) is None
+
+
+def test_source_channelwise_helpers_and_default_quad_are_pinned() -> None:
+    """Source-level guards for what the offline tier cannot execute."""
+    from tests.support.source import ROOT
+
+    source = (ROOT / "vllm_sail/models/deepseek_v41/flash_mla_mega_attn.py").read_text()
+    # Both fused call sites share the argument matrix (definition + 2 callers).
+    assert source.count("_out_scale_args(") == 3
+    assert source.count("_macro_mismatch_hint(exc, self._output_channelwise)") == 2
+    # The default (per-32) quartet and the ledger recipe stay as they were.
+    assert "return (_QUANT_GROUP, True, True, True)" in source
+    assert "_PPU_EINSUM_RECIPE = (1, 1, 32)" in source
+    # The output copy stays layout-agnostic (element-wise copy_): decode copies
+    # into ``out`` and each prefill chunk into ``chunk_out``.
+    assert source.count(".data.copy_(out_fp8)") == 2
+    assert source.count(".scale.copy_(out_sf)") == 2
+    assert source.count("chunk_out.scale.copy_(out_sf)") == 1
+
+
+# ---------------------------------------------------------------------------
+# per-channel wo_a scales: shape-aware load permutation + per-channel dequant
+# ---------------------------------------------------------------------------
+#
+# An FP8 weight-per-channel checkpoint (``fp8_channelwise_layers``) stores one
+# scale per output row, so ``wo_a.weight_scale`` has a size-1 K axis while
+# upstream unconditionally registers the 128-entry per-32 chunk permutation on
+# it; loading aborted with ``output with shape [rows, 1] doesn't match the
+# broadcast shape [rows, 128]``. The patch makes ``permute_on_load`` skip the
+# permutation for that geometry and keeps every other geometry delegated.
+
+
+@pytest.fixture
+def permute_patch(modules, patch_utils_module):
+    """Load the shape-aware ``permute_on_load`` patch against a stub target."""
+    logs = []
+    logger = SimpleNamespace(info_once=lambda msg, *a: logs.append((msg, a)))
+    modules("vllm.logger", init_logger=lambda name: logger)
+    calls = []
+
+    def permute_on_load(param, perm, dim):
+        calls.append((param, perm, dim))
+
+    modules(
+        "vllm.models.deepseek_v41.nvidia.flash_mla_mega_attn",
+        permute_on_load=permute_on_load,
+    )
+    module = load_patch("vllm_sail/patch/enhancement/deepseek_v41_fused_layout.py")
+    return SimpleNamespace(
+        module=module,
+        patched=module.permute_on_load,
+        original=permute_on_load,
+        calls=calls,
+        logs=logs,
+        registry=patch_utils_module.PATCH_REGISTRY,
+        marker=patch_utils_module.PATCH_MARKER,
+    )
+
+
+@pytest.mark.parametrize(("axis", "perm_length"), [(4096, 4096), (128, 128), (1, 1)])
+def test_scale_permute_action_applies_to_one_entry_per_element(
+    permute_patch, axis, perm_length
+) -> None:
+    """Canonical geometry is what the permutation was written for."""
+    assert permute_patch.module.scale_permute_action(axis, perm_length) == "apply"
+
+
+@pytest.mark.parametrize(("axis", "perm_length"), [(1, 128), (1, 4096)])
+def test_scale_permute_action_skips_per_channel_scale(
+    permute_patch, axis, perm_length
+) -> None:
+    """A per-row scale is constant along K, so the K-chunk move is identity."""
+    assert permute_patch.module.scale_permute_action(axis, perm_length) == "skip"
+
+
+@pytest.mark.parametrize(("axis", "perm_length"), [(128, 4096), (4096, 128), (0, 128)])
+def test_scale_permute_action_rejects_unknown_geometry(
+    permute_patch, axis, perm_length
+) -> None:
+    """Anything else means caller and permutation disagree: never guess."""
+    with pytest.raises(AssertionError, match="geometry mismatch"):
+        permute_patch.module.scale_permute_action(axis, perm_length)
+
+
+def test_permute_on_load_skips_per_channel_scale(permute_patch) -> None:
+    param = SimpleNamespace(shape=(1024, 1))
+    perm = SimpleNamespace(numel=lambda: 128)
+    permute_patch.patched(param, perm, 1)
+    assert permute_patch.calls == []
+    assert permute_patch.logs, "the skip must leave one forensic line"
+    assert "skipping the 32-chunk K permutation" in permute_patch.logs[-1][0]
+
+
+def test_permute_on_load_delegates_canonical_geometry(permute_patch) -> None:
+    param = SimpleNamespace(shape=(1024, 4096))
+    perm = SimpleNamespace(numel=lambda: 4096)
+    permute_patch.patched(param, perm, 1)
+    assert permute_patch.calls == [(param, perm, 1)]
+    assert permute_patch.logs == []
+
+
+def test_permute_on_load_rejects_geometry_mismatch(permute_patch) -> None:
+    param = SimpleNamespace(shape=(1024, 64))
+    perm = SimpleNamespace(numel=lambda: 128)
+    with pytest.raises(AssertionError, match="geometry mismatch"):
+        permute_patch.patched(param, perm, 1)
+    assert permute_patch.calls == []
+
+
+def test_fused_layout_patch_metadata(permute_patch) -> None:
+    target = "vllm.models.deepseek_v41.nvidia.flash_mla_mega_attn.permute_on_load"
+    stub = sys.modules["vllm.models.deepseek_v41.nvidia.flash_mla_mega_attn"]
+    # The replacement is installed on the module upstream reads at call time.
+    assert stub.permute_on_load is permute_patch.patched
+    originals = getattr(permute_patch.patched, permute_patch.marker, None)
+    assert originals is not None and target in originals
+    assert originals[target] is permute_patch.original
+    records = [r for r in permute_patch.registry if r.target == target]
+    assert records, "the loader patch did not register a PatchRecord"
+    record = records[-1]
+    assert record.kind == "module"
+    assert record.affected_versions == SUPPORTED_RANGE
+    assert record.remove_when.strip() and record.reason.strip()
+
+
+def test_wo_a_scale_mode_classifies_layouts(tensor_gate) -> None:
+    torch = tensor_gate.torch
+    classify = tensor_gate.module._wo_a_scale_mode
+    weight = torch.ones((4, 128), dtype=torch.float8_e4m3fn)
+    assert classify(weight, None) == "none"
+    assert classify(weight, torch.ones((4, 1))) == "per_channel"
+    assert classify(weight, torch.ones((4,))) == "per_channel"
+    assert classify(weight, torch.ones((4, 4), dtype=torch.uint8)) == "mxfp8_block"
+    for bad in (torch.ones((4, 2)), torch.ones((4, 4), dtype=torch.int32)):
+        with pytest.raises(
+            AssertionError, match="unrecognised wo_a weight_scale layout"
+        ):
+            classify(weight, bad)
+
+
+def test_dequant_fp8_per_channel_multiplies_rows(tensor_gate) -> None:
+    torch = tensor_gate.torch
+    raw = torch.tensor([[1.0, 2.0], [3.0, 4.0]]).to(torch.float8_e4m3fn)
+    scale = torch.tensor([[0.5], [2.0]], dtype=torch.float32)
+    out = tensor_gate.module._dequant_fp8_per_channel(raw, scale)
+    assert out.dtype == torch.bfloat16
+    assert torch.equal(out, (raw.float() * scale).to(torch.bfloat16))
+    # The [rows] spelling dequantizes identically.
+    flat = tensor_gate.module._dequant_fp8_per_channel(raw, scale.reshape(-1))
+    assert torch.equal(flat, out)
+
+
+def _o_proj_fp8_instance(module, torch, *, weight_scale):
+    """Build the minimal layer state ``_o_proj`` reads, with an fp8 wo_a."""
+    instance = module.PPUDeepseekV4MegaAttnAttention()
+    instance._output_channelwise = True
+    weight = torch.ones((4, 128), dtype=torch.float8_e4m3fn)
+    instance.wo_a = SimpleNamespace(weight=weight, weight_scale=weight_scale)
+    instance._wo_b_proj = lambda z: z
+    data = torch.ones((2, 1, 128), dtype=torch.float8_e4m3fn)
+    attn_out = module.QuantizedActivation(
+        data=data,
+        scale=torch.ones((2, 1, 1), dtype=torch.float32),
+        orig_dtype=torch.bfloat16,
+        orig_shape=data.shape,
+        quant_key=module.kMxfp8Dynamic,
+    )
+    return instance, attn_out, weight
+
+
+def test_o_proj_per_channel_scale_dequantizes_by_row(tensor_gate) -> None:
+    torch = tensor_gate.torch
+    scale = torch.tensor([[0.5], [2.0], [1.0], [4.0]], dtype=torch.float32)
+    instance, attn_out, weight = _o_proj_fp8_instance(
+        tensor_gate.module, torch, weight_scale=scale
+    )
+    out = instance._o_proj(attn_out, None)
+    o = (attn_out.data.float() * attn_out.scale).to(torch.bfloat16)
+    grouped = (weight.float() * scale).to(torch.bfloat16).view(1, 4, 128)
+    expected = (
+        torch.bmm(o.transpose(0, 1), grouped.transpose(1, 2))
+        .transpose(0, 1)
+        .contiguous()
+        .flatten(1)
+    )
+    assert out.shape == (2, 4)
+    assert torch.equal(out, expected)
+    assert "wo_a_scale_mode=%s scale_permute=%s" in tensor_gate.logs[-1][0]
+    assert tensor_gate.logs[-1][1][-3:] == ("per_channel", "skipped", True)
+
+
+def test_o_proj_per_channel_rejects_unknown_scale_layout(tensor_gate) -> None:
+    torch = tensor_gate.torch
+    instance, attn_out, _ = _o_proj_fp8_instance(
+        tensor_gate.module, torch, weight_scale=torch.ones((4, 2))
+    )
+    with pytest.raises(AssertionError, match="unrecognised wo_a weight_scale layout"):
+        instance._o_proj(attn_out, None)
+
+
+def test_o_proj_block_scale_still_uses_mxfp8_helper(tensor_gate) -> None:
+    torch = tensor_gate.torch
+    calls = []
+
+    def fake_dequant(weight, scale):
+        calls.append((tuple(weight.shape), tuple(scale.shape), scale.dtype))
+        return weight.to(torch.bfloat16)
+
+    tensor_gate.monkeypatch.setattr(
+        tensor_gate.module, "dequant_mxfp8_to_bf16", fake_dequant
+    )
+    block_scale = torch.ones((4, 4), dtype=torch.uint8)
+    instance, attn_out, _ = _o_proj_fp8_instance(
+        tensor_gate.module, torch, weight_scale=block_scale
+    )
+    out = instance._o_proj(attn_out, None)
+    assert out.shape == (2, 4)
+    assert calls == [((4, 128), (4, 4), torch.uint8)]
+    assert tensor_gate.logs[-1][1][-3:] == ("mxfp8_block", "applied", True)
+
+
+def test_perchannel_loader_fix_source_is_pinned() -> None:
+    """Source-level guards for the pieces the offline tier cannot execute."""
+    from tests.support.source import ROOT
+
+    patch_source = (
+        ROOT / "vllm_sail/patch/enhancement/deepseek_v41_fused_layout.py"
+    ).read_text()
+    # Patch the *consumer* module: upstream holds a by-value alias.
+    assert "vllm.models.deepseek_v41.nvidia.flash_mla_mega_attn" in patch_source
+    assert '"permute_on_load"' in patch_source
+    assert 'return "skip"' in patch_source
+    # The new module is installed with the rest of the enhancement category.
+    init_source = (ROOT / "vllm_sail/patch/enhancement/__init__.py").read_text()
+    assert "deepseek_v41_fused_layout" in init_source
+
+    model_source = (
+        ROOT / "vllm_sail/models/deepseek_v41/flash_mla_mega_attn.py"
+    ).read_text()
+    # Definition + the single call site in the 1-byte branch.
+    assert model_source.count("_dequant_fp8_per_channel(") == 2
+    assert "_SCALE_PER_CHANNEL" in model_source
+    assert "_SCALE_MXFP8_BLOCK" in model_source
+    assert "wo_a_scale_mode=%s scale_permute=%s" in model_source
+    # The block recipe stays reachable and is still the delegated default.
+    assert "dequant_mxfp8_to_bf16(weight, weight_scale)" in model_source
