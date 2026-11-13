@@ -33,6 +33,7 @@ BOOL_DEFAULTS = {
     "NVTX_VFA_DUMP_SEQLEN": False,
     "FUSED_NORM_ROPE_ATTN": False,
     "PPU_KV_MXFP8": False,
+    "PPU_FUSED_OUTPUT_CHANNELWISE": False,
 }
 BACKENDS = ("MOE_BACKEND", "DENSE_BACKEND")
 # String env vars with a non-None default.

@@ -55,6 +55,7 @@ if TYPE_CHECKING:
     VLLM_SAIL_NVTX_VFA_DUMP_SEQLEN: bool = False
     VLLM_SAIL_FUSED_NORM_ROPE_ATTN: bool = False
     VLLM_SAIL_PPU_KV_MXFP8: bool = False
+    VLLM_SAIL_PPU_FUSED_OUTPUT_CHANNELWISE: bool = False
     VLLM_DEEPEPLL_RECV_HOOK: bool = True
     VLLM_GDN_DECODE_KERNEL: str = "auto"
 
@@ -79,6 +80,7 @@ if TYPE_CHECKING:
     VLLM_PPU_NVTX_VFA_DUMP_SEQLEN: bool = False
     VLLM_PPU_FUSED_NORM_ROPE_ATTN: bool = False
     VLLM_PPU_PPU_KV_MXFP8: bool = False
+    VLLM_PPU_PPU_FUSED_OUTPUT_CHANNELWISE: bool = False
 
 _TRUTHY = ("true", "1", "yes", "on")
 
@@ -242,6 +244,17 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Read once per process by the dsv41_kv_record patch, which also prints
     # the forensic line "[VLLM_SAIL] kv_mxfp8=<bool> kv_bytes_per_token=<n>".
     "VLLM_SAIL_PPU_KV_MXFP8": _bool("VLLM_SAIL_PPU_KV_MXFP8", False),
+    # Output-scale granularity of the same fused kernel. False (default) ->
+    # per-32 packed UE8M0 scales, what the baseline per-32 FlashMLA build
+    # emits. True -> channel-wise (per WV group / per token) FP32 scales,
+    # which only a wheel built with FLASHMLA_FUSED_OUTPUT_CHANNELWISE=1 can
+    # produce: the granularity is a compile-time constant inside FlashMLA
+    # (``csrc/ppu/sparse/fused_v41.h``), not something the runtime can probe,
+    # so this switch must be paired with the matching wheel. A mismatch is
+    # caught by the kernel's own TORCH_CHECK and re-raised with a hint.
+    "VLLM_SAIL_PPU_FUSED_OUTPUT_CHANNELWISE": _bool(
+        "VLLM_SAIL_PPU_FUSED_OUTPUT_CHANNELWISE", False
+    ),
     # -- Distributed MoE ---------------------------------------------------
     # DeepEP low-latency deferred recv hook. The hook only pays off on backends
     # that can overlap the deferred receive with other compute; setting this to
