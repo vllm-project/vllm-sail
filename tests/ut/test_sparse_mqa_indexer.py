@@ -310,7 +310,7 @@ def installed(adapter, modules, patch_utils_module):
                 module_name,
                 target[len(module_name) + 1 :],
                 reason="Reject duplicate sparse-indexer installation.",
-                affected_versions=">=0.32.0,<0.33.0",
+                affected_versions=">=0.32.0,<0.34.0",
                 remove_when="The platform exposes a sparse-indexer provider hook.",
             )(fn)
     with pytest.raises(RuntimeError, match="already"):

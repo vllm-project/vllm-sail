@@ -86,7 +86,7 @@ def installed_indexer(modules, patch_utils_module):
                 consumer_name,
                 "dsa_indexer_uses_fp4",
                 reason="Reject duplicate capability rebinding.",
-                affected_versions=">=0.32.0,<0.33.0",
+                affected_versions=">=0.32.0,<0.34.0",
                 remove_when="The consumer resolves the provider dynamically.",
             )(lambda config: False)
         return provider.dsa_indexer_uses_fp4, calls

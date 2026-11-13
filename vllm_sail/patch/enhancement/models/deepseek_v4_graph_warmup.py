@@ -26,7 +26,7 @@ _REMOVE_WHEN = (
     _RUNNER,
     "GPUModelRunner._warmup_and_capture",
     reason="Mark graph warmups so the V4 short-context path initializes captured JITs.",
-    affected_versions=">=0.32.0,<0.33.0",
+    affected_versions=">=0.32.0,<0.34.0",
     remove_when=_REMOVE_WHEN,
 )
 def warmup_and_capture(self, *args, **kwargs):
@@ -38,7 +38,7 @@ def warmup_and_capture(self, *args, **kwargs):
     _MANAGER,
     "CudaGraphManager.capture",
     reason="V2 runner graph warmup must initialize the omitted V4 query path too.",
-    affected_versions=">=0.32.0,<0.33.0",
+    affected_versions=">=0.32.0,<0.34.0",
     remove_when=_REMOVE_WHEN,
 )
 def capture(self, *args, **kwargs):
@@ -64,7 +64,7 @@ def _run_graph_warmup(original, self, args, kwargs):
         "runs it. DeepGEMM then loads a new shape inside capture and raises "
         "HGGC_ERROR_STREAM_CAPTURE_UNSUPPORTED. Warm that omitted path first."
     ),
-    affected_versions=">=0.32.0,<0.33.0",
+    affected_versions=">=0.32.0,<0.34.0",
     remove_when=_REMOVE_WHEN,
 )
 def indexer_forward(
