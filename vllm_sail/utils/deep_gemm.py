@@ -227,6 +227,7 @@ _fp4_mqa_avg_logits_impl: Callable[..., Any] | None = None
 _fp4_paged_mqa_avg_logits_impl: Callable[..., Any] | None = None
 _get_paged_mqa_logits_metadata_impl: Callable[..., Any] | None = None
 _tf32_hc_prenorm_gemm_impl: Callable[..., Any] | None = None
+_mega_mhc_impl: Callable[..., Any] | None = None
 
 # auxiliary
 _get_mn_major_tma_aligned_tensor_impl: Callable[..., Any] | None = None
@@ -275,6 +276,7 @@ def _lazy_init() -> None:
     global _fp4_mqa_avg_logits_impl, _fp4_paged_mqa_avg_logits_impl
     global _get_paged_mqa_logits_metadata_impl
     global _tf32_hc_prenorm_gemm_impl
+    global _mega_mhc_impl
     global _get_mn_major_tma_aligned_tensor_impl
     global _get_mk_alignment_for_contiguous_layout_impl
     global _transform_sf_into_required_layout_impl
@@ -318,6 +320,7 @@ def _lazy_init() -> None:
         or _fp4_paged_mqa_avg_logits_impl is not None
         or _get_paged_mqa_logits_metadata_impl is not None
         or _tf32_hc_prenorm_gemm_impl is not None
+        or _mega_mhc_impl is not None
         or _get_mk_alignment_for_contiguous_layout_impl is not None
         or _transform_sf_into_required_layout_impl is not None
         or _moe_align_block_size_impl is not None
@@ -353,6 +356,7 @@ def _lazy_init() -> None:
         _dg, "get_paged_mqa_logits_metadata", None
     )
     _tf32_hc_prenorm_gemm_impl = getattr(_dg, "tf32_hc_prenorm_gemm", None)
+    _mega_mhc_impl = getattr(_dg, "mega_mhc", None)
     _get_mn_major_tma_aligned_tensor_impl = getattr(
         _dg, "get_mn_major_tma_aligned_tensor", None
     )
@@ -903,11 +907,11 @@ def int8_paged_mqa_logits(
     """Compute INT8 MQA logits using paged KV-cache.
 
     Args:
-        q_fp8: Query tensor of shape [B, next_n, H, D]. Casted to
-            `torch.float8_e4m3fn` by caller.
-        kv_cache_fp8: Paged KV-cache in packed FP8+scale layout with shape
-            [num_blocks, block_size, 1, D+4], dtype `torch.uint8`. The last
-            4 bytes per (block,pos) store the `float` dequant scale.
+        q_fp8: Legacy argument name for INT8 Q of shape [B, next_n, H, D],
+            dtype `torch.int8`; the Q scale is folded into `weights`.
+        kv_cache_fp8: Legacy argument name for the packed INT8 cache with shape
+            [num_blocks, block_size, 1, D+4], dtype `torch.uint8`. Each page
+            stores an INT8 value plane followed by an FP32 scale plane.
         weights: Tensor of shape [B * next_n, H], dtype `torch.float32`.
         context_lens: Tensor of shape [B], dtype int32; effective context length
             for each batch element.
@@ -1479,6 +1483,25 @@ def fp8_paged_mqa_logits_torch(
     return logits
 
 
+def has_mega_mhc() -> bool:
+    """Return `True` if the installed DeepGEMM exposes the Mega mHC kernel."""
+    _lazy_init()
+    return _mega_mhc_impl is not None
+
+
+def mega_mhc(*args: Any, **kwargs: Any) -> None:
+    """Run the PPU DeepGEMM Mega mHC kernel with caller-owned output tensors.
+
+    Mirrors ``vllm.utils.deep_gemm.mega_mhc`` but resolves the symbol through
+    the PPU-aware wrapper, so a missing kernel fails with the PPU-specific
+    "outdated DeepGEMM" message instead of the upstream one.
+    """
+    _lazy_init()
+    if _mega_mhc_impl is None:
+        _missing(*args, **kwargs)
+    _mega_mhc_impl(*args, **kwargs)
+
+
 __all__ = [
     "calc_diff",
     "DeepGemmQuantScaleFMT",
@@ -1531,6 +1554,8 @@ __all__ = [
     "get_col_major_tma_aligned_tensor",
     "get_mk_alignment_for_contiguous_layout",
     "moe_align_block_size",
+    "has_mega_mhc",
+    "mega_mhc",
     "has_fused_act_quant",
     "has_masked_fused_act_quant",
     "get_activation_mode",

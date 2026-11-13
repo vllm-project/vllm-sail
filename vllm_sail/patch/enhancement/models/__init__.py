@@ -18,6 +18,9 @@ Modules, and why each is import-on-install like the rest of the framework:
 * ``deepseek_v4`` — selects the plugin FlashMLA subclass only on PPU; the
   quantization-specific weights mapper remains plugin-local so CUDA behavior
   is unchanged.
+* ``deepseek_v41_mega_mhc`` — routes the V4.1 Mega mHC kernel to the PPU
+  DeepGEMM build, which supports ZW-M890P instead of the upstream SM 10.x
+  family.
 * ``glm5_next_mtp`` — quantization support for the GLM-5.3-Flash MTP draft:
   ``SupportsQuant`` in ``Glm5NextMTP``'s bases, a ``hf_to_vllm_mapper`` that
   strips the checkpoint's tower prefix (``model.language_model.layers.N.`` ->
@@ -38,6 +41,8 @@ Modules, and why each is import-on-install like the rest of the framework:
 * ``moe_marlin_gate`` — VLLM_PPU_ENABLE_MOE_MARLIN default-off gate.
 """
 
+# Capture the shared Q alias for V4.1 before V4 patches it to avoid duplicate registration.
+from vllm_sail.patch.enhancement.models import deepseek_v41_int8  # noqa: F401, I001
 from vllm_sail.patch.enhancement.models import (
     deepseek_mtp,  # noqa: F401
     deepseek_v2,  # noqa: F401
@@ -48,6 +53,7 @@ from vllm_sail.patch.enhancement.models import (
     deepseek_v41,  # noqa: F401
     deepseek_v41_engram,  # noqa: F401
     deepseek_v41_indexer,  # noqa: F401
+    deepseek_v41_mega_mhc,  # noqa: F401
     glm5_next,  # noqa: F401
     glm5_next_mtp,  # noqa: F401
     kimi_k3,  # noqa: F401
