@@ -64,6 +64,21 @@ _ORACLE_ALIAS_CONSUMERS = {
             "vllm.model_executor.layers.quantization.quark.quark_moe",
         ),
     },
+    "w4a8_int8": {
+        # compressed_tensors_moe_w4a8_int8 captures these three oracle aliases at
+        # module scope, so they must be rebound after PPU registration.
+        # make_w4a8_int8_moe_quant_config is intentionally absent: it is not
+        # patched, so a captured alias stays valid.
+        "convert_to_w4a8_int8_moe_format": (
+            "vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe.compressed_tensors_moe_w4a8_int8",
+        ),
+        "make_w4a8_int8_moe_kernel": (
+            "vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe.compressed_tensors_moe_w4a8_int8",
+        ),
+        "select_w4a8_int8_moe_backend": (
+            "vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe.compressed_tensors_moe_w4a8_int8",
+        ),
+    },
     "mxfp4": {
         "backend_to_kernel_cls": (
             "vllm.model_executor.layers.quantization.mxfp4",
