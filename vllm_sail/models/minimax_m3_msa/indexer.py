@@ -41,6 +41,7 @@ from vllm.v1.attention.backend import (
 from vllm_sail.models.minimax_m3_msa.adapter import require_sail_msa_ops
 from vllm_sail.models.minimax_m3_msa.common import (
     PAGE_SIZE,
+    PlanWorkspacePool,
     clamp_topk_to_causal,
     flat_page_table,
     plan_device,
@@ -121,6 +122,7 @@ class MiniMaxM3IndexerSailMSAMetadataBuilder(MiniMaxM3IndexerTritonMetadataBuild
         self.score_dtype = selection.score_dtype
         self.indexer_fp8 = selection.indexer_fp8
         self._ops = require_sail_msa_ops()
+        self._plans = PlanWorkspacePool()
 
     def build(
         self,
@@ -139,6 +141,17 @@ class MiniMaxM3IndexerSailMSAMetadataBuilder(MiniMaxM3IndexerTritonMetadataBuild
         qo_lens = (qsl_cpu[1:] - qsl_cpu[:-1]).to(torch.int32)
         kv_lens = seq_lens[:num_reqs].cpu().to(torch.int32)
 
+        device = plan_device(seq_lens)
+        workspace = self._plans.get(
+            num_tokens=int(qo_lens.sum()),
+            max_qo_len=max(int(qo_lens.max()), 1),
+            num_qo_heads=self.num_index_heads,
+            num_kv_heads=1,
+            kv_block_num=0,
+            output_maxscore=True,
+            use_fp8_kvcache=self.indexer_fp8,
+            device=device,
+        )
         plan = self._ops.fmha_sail_plan(
             qo_lens,
             kv_lens,
@@ -152,7 +165,8 @@ class MiniMaxM3IndexerSailMSAMetadataBuilder(MiniMaxM3IndexerTritonMetadataBuild
             use_fp8_kvcache=self.indexer_fp8,
             # OnlyScore: no output and no split-KV reduction.
             num_kv_splits=1,
-            device=plan_device(seq_lens),
+            device=device,
+            given_workspace=workspace,
         )
         has_mixed_prefill, _, batch_size, first_plan, second_plan = plan
         if batch_size != num_reqs:
@@ -217,7 +231,7 @@ class MiniMaxM3IndexerSailMSAImpl(MiniMaxM3IndexerImpl):
             )
         self.score_dtype = selection.score_dtype
         self._ops = require_sail_msa_ops()
-        logger.info_once(
+        logger.warning_once(
             "MiniMax M3 indexer: SAIL OnlyScore + top-k "
             "[indexer_kv_dtype=%s, score_dtype=%s]",
             self.indexer_kv_dtype,

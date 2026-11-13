@@ -29,6 +29,71 @@ def plan_device(t: torch.Tensor) -> int:
     return index if index is not None else torch.cuda.current_device()
 
 
+class PlanWorkspacePool:
+    """Private ``fmha_sail_plan`` workspace for one metadata builder.
+
+    ``fmha_sail_plan`` slices all of a plan's metadata (per-request lens and
+    offsets, page indptr, tile worklists) out of a single process-wide buffer
+    per device and only ever grows it. This plugin keeps two plans alive at
+    once -- the indexer's OnlyScore plan and the sparse attend plan -- and vLLM
+    builds every layer's metadata before the model runs, so the second plan
+    overwrites the first one's lengths in place; the indexer then walks its K
+    pages with the attend plan's segment lens and leaves its score buffer
+    (intermittent illegal memory access). Each builder hands the planner its
+    own buffer to keep the plans independent.
+
+    Sizes come from ``allocate_graph_workspace``, the library's own bound for
+    ``batch`` rows of ``max_qo_len`` tokens. Fed the step's real batch it
+    assumes every row is ``max_qo_len`` long, so one long prefill chunk in a
+    decode batch inflates it by up to ``num_reqs`` times, and this memory is
+    outside vLLM's profiling. The bound is taken for the fewest
+    ``max_qo_len`` rows covering ``num_tokens`` instead: the same tile config
+    as the plan, at most twice the tokens it needs. ``_bounds`` memoises it
+    so the (throwaway) sizing allocation happens once per key.
+    """
+
+    def __init__(self) -> None:
+        self._workspace: torch.Tensor | None = None
+        self._bounds: dict[tuple[int, int], int] = {}
+
+    def get(
+        self,
+        *,
+        num_tokens: int,
+        max_qo_len: int,
+        num_qo_heads: int,
+        num_kv_heads: int,
+        kv_block_num: int,
+        output_maxscore: bool,
+        use_fp8_kvcache: bool,
+        device: int,
+    ) -> torch.Tensor:
+        rows = -(-max(num_tokens, 1) // max_qo_len)
+        key = (rows, max_qo_len)
+        need = self._bounds.get(key)
+        if need is None:
+            from msa_for_sail.api import allocate_graph_workspace
+
+            need = allocate_graph_workspace(
+                rows,
+                num_qo_heads,
+                num_kv_heads=num_kv_heads,
+                max_qo_len=max_qo_len,
+                page_size=PAGE_SIZE,
+                kv_block_num=kv_block_num,
+                num_kv_splits=1,
+                device=device,
+                output_maxscore=output_maxscore,
+                use_fp8_kvcache=use_fp8_kvcache,
+            ).numel()
+            self._bounds[key] = need
+        if self._workspace is None or self._workspace.numel() < need:
+            self._workspace = torch.empty(
+                need, dtype=torch.uint8, device=torch.device("cuda", device)
+            )
+        return self._workspace
+
+
 def query_lens(query_start_loc: torch.Tensor, num_reqs: int) -> torch.Tensor:
     """Per-request query lengths ``[num_reqs]`` int32 from the cumulative map."""
     qsl = query_start_loc[: num_reqs + 1].to(torch.int32)

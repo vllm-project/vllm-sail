@@ -79,20 +79,42 @@ def _compile_lock():
         os.close(fd)
 
 
+def _plan_variant(plan: dict[str, Any]) -> tuple:
+    """The sub-plan fields ``fmha_sail`` picks its compiled variant from."""
+    return (
+        plan.get("qo_tile_size"),
+        plan.get("kv_tile_size"),
+        plan.get("pack_factor"),
+        int(plan.get("max_qo_len", 0)) <= 64,
+        plan.get("workspace_o") is not None,  # split-KV
+    )
+
+
 def _signature_part(value: Any) -> Any:
     if isinstance(value, torch.Tensor):
         return str(value.dtype)
-    if isinstance(value, bool | int | str | torch.dtype) or value is None:
+    if isinstance(value, bool | str | torch.dtype) or value is None:
         return value
+    if isinstance(value, int):
+        # Lens, page and head counts: never a variant selector.
+        return "int"
+    if isinstance(value, dict):
+        return _plan_variant(value)
+    if isinstance(value, tuple):
+        # ``fmha_sail_plan`` result: (mixed, split, batch, decode, prefill).
+        return tuple(_plan_variant(v) for v in value if isinstance(v, dict))
     return type(value).__name__
 
 
 def _compile_signature(args: tuple[Any, ...], kwargs: dict[str, Any]) -> tuple:
-    """Coarse identity of a JIT call: what can select a distinct variant.
+    """Identity of a JIT call: what can select a distinct compiled module.
 
-    Scalar arguments (flags, splits, scales) and tensor dtypes are kept; shapes
-    and contents are not, because the variants are selected by dtype/flag
-    configuration, not by the batch shape.
+    ``fmha_sail`` picks its variant from the q dtype, the output flags and the
+    plan's tile/pack/split fields; the tiles follow the batch lengths, so a new
+    step can need an unbuilt variant at an unchanged dtype. The plan and top-k
+    entry points build one module each. Shapes and integers are left out: they
+    vary every step without selecting a variant, and each new key costs every
+    TP worker a turn on the shared lock.
     """
     parts = [_signature_part(value) for value in args]
     parts.extend((name, _signature_part(kwargs[name])) for name in sorted(kwargs))

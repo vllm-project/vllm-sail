@@ -37,6 +37,7 @@ from vllm.v1.kv_cache_interface import AttentionSpec
 from vllm_sail.models.minimax_m3_msa.adapter import require_sail_msa_ops
 from vllm_sail.models.minimax_m3_msa.common import (
     PAGE_SIZE,
+    PlanWorkspacePool,
     flat_page_table,
     plan_device,
 )
@@ -102,6 +103,7 @@ class MiniMaxM3SparseSailMSAMetadataBuilder(MiniMaxM3SparseMetadataBuilder):
             )
         self.use_fp8_kv = self.selection.attend_fp8
         self._ops = require_sail_msa_ops()
+        self._plans = PlanWorkspacePool()
 
     def build(
         self,
@@ -119,6 +121,17 @@ class MiniMaxM3SparseSailMSAMetadataBuilder(MiniMaxM3SparseMetadataBuilder):
         qo_lens = (qsl_cpu[1:] - qsl_cpu[:-1]).to(torch.int32)
         kv_lens = seq_lens[:num_reqs].cpu().to(torch.int32)
 
+        device = plan_device(seq_lens)
+        workspace = self._plans.get(
+            num_tokens=int(qo_lens.sum()),
+            max_qo_len=max(int(qo_lens.max()), 1),
+            num_qo_heads=self.num_q_heads,
+            num_kv_heads=self.num_kv_heads,
+            kv_block_num=self.topk_blocks,
+            output_maxscore=False,
+            use_fp8_kvcache=self.use_fp8_kv,
+            device=device,
+        )
         plan = self._ops.fmha_sail_plan(
             qo_lens,
             kv_lens,
@@ -132,7 +145,8 @@ class MiniMaxM3SparseSailMSAMetadataBuilder(MiniMaxM3SparseMetadataBuilder):
             # Sparse rows attend at most topk_blocks pages, so one KV pass per
             # row needs no split; this also keeps the plan workspace minimal.
             num_kv_splits=1,
-            device=plan_device(seq_lens),
+            device=device,
+            given_workspace=workspace,
         )
         has_mixed_prefill, _, batch_size, first_plan, second_plan = plan
         if batch_size != num_reqs:
@@ -201,7 +215,7 @@ class MiniMaxM3SparseSailMSAImpl(MiniMaxM3SparseImpl):
         # the layer allocate/emit it (same as the NVIDIA CUTLASS decode path).
         self.use_cutlass_decode = self.use_fp8_kv
         self._ops = require_sail_msa_ops()
-        logger.info_once(
+        logger.warning_once(
             "MiniMax M3 sparse attention: SAIL sparse fmha "
             "[kv_cache_dtype=%s, topk=%d]",
             kv_cache_dtype,
@@ -214,6 +228,8 @@ class MiniMaxM3SparseSailMSAImpl(MiniMaxM3SparseImpl):
         query: torch.Tensor,
         kv_cache: torch.Tensor,
         output: torch.Tensor,
+        *,
+        query_fp8: torch.Tensor | None = None,
     ) -> torch.Tensor:
         attn_metadata = get_forward_context().attn_metadata
         if not isinstance(attn_metadata, dict):
@@ -228,18 +244,24 @@ class MiniMaxM3SparseSailMSAImpl(MiniMaxM3SparseImpl):
         assert topk is not None
 
         hd = self.head_size
-        q = query[:num_tokens].view(-1, self.num_heads, hd)
+        # The insert kernel emits an E4M3 query when fp8 attend is selected:
+        # as ``query_fp8`` on vLLM main (``query`` stays uninitialised), as
+        # ``query`` itself on the 0.33 release. Either way it is quantised
+        # with ``_q_scale_float``.
+        src = query if query_fp8 is None else query_fp8
+        q = src[:num_tokens].view(-1, self.num_heads, hd)
+        q_is_fp8 = q.element_size() == 1
+        q_scale = float(getattr(layer, "_q_scale_float", 1.0)) if q_is_fp8 else 1.0
         out = output[:num_tokens].view(-1, self.num_heads, hd)
 
         kv = kv_cache
         if self.use_fp8_kv:
             # vLLM stores fp8 pages as uint8; K and V share the page's last dim.
             kv = kv.view(self.kv_cache_fp8_dtype)
-            # The fused insert kernel emits a model-dtype query on PPU, but
-            # SAIL's fp8 sparse attend needs q and k in one E4M3 dtype. K/V are
-            # inserted at unit scale (the checkpoint scales are not applied), so
-            # the query is quantised at unit scale too.
-            q = q.to(self.kv_cache_fp8_dtype)
+            if not q_is_fp8:
+                # Model-dtype query: K/V are inserted at unit scale, so
+                # quantise the query at unit scale too.
+                q = q.to(self.kv_cache_fp8_dtype)
         k_cache, v_cache = kv.split(hd, dim=-1)
         # The cache interleaves K|V in the page's last dim, so the split views
         # jump by 2*hd between tokens. SAIL's HND layout assumes a packed
@@ -258,10 +280,10 @@ class MiniMaxM3SparseSailMSAImpl(MiniMaxM3SparseImpl):
             kv_block_indexes=topk[:num_tokens],
             out=out,
             sm_scale=self.scale,
-            # Unit scale on both dtypes: bf16 needs none, and fp8 K/V and the
-            # query above are quantised without checkpoint scales. fmha_sail
-            # folds q_scale * k_scale into the softmax scale.
-            q_scale=1.0,
+            # K/V pages are inserted at unit scale, so only the query's
+            # dequantisation scale enters; fmha_sail folds q_scale * k_scale
+            # into the softmax scale.
+            q_scale=q_scale,
             output_o=True,
             output_maxscore=False,
         )
