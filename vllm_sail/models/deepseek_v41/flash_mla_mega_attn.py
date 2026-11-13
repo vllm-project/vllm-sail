@@ -258,6 +258,56 @@ def _dequant_fused_output(data: torch.Tensor, scale: torch.Tensor) -> torch.Tens
     return (data.to(torch.float32) * scale_expanded).to(torch.bfloat16)
 
 
+#: ``wo_a.weight_scale`` layouts; see :func:`_wo_a_scale_mode`.
+_SCALE_NONE = "none"
+_SCALE_PER_CHANNEL = "per_channel"
+_SCALE_MXFP8_BLOCK = "mxfp8_block"
+
+
+def _wo_a_scale_mode(weight: torch.Tensor, scale: torch.Tensor | None) -> str:
+    """Classify the ``wo_a`` weight-scale layout; unknown layouts raise.
+
+    ``_o_proj`` reads ``wo_a`` directly, bypassing the quant method's GEMM, so
+    it has to dequantize by itself and must know which recipe the scale uses.
+    Two layouts exist on PPU:
+
+    * ``per_channel`` — one FP32 multiplier per output row (``[rows]`` or
+      ``[rows, 1]``), what an FP8 weight-per-channel checkpoint
+      (``fp8_channelwise_layers``, ``CompressedTensorsW8A8Fp8`` with
+      ``QuantizationStrategy.CHANNEL``) loads. Dequantization is ``w * s``.
+    * ``mxfp8_block`` — UE8M0 bytes, one per 32-element K block
+      (``[rows, K // 32]``), the MXFP8 layout ``dequant_mxfp8_to_bf16``
+      consumes (``2 ** (byte - 127)`` per block).
+
+    Anything else has never been verified against this class, so it raises
+    instead of letting a broadcasting helper emit finite-looking garbage.
+    """
+    if scale is None:
+        return _SCALE_NONE
+    rows = weight.shape[0]
+    if scale.dtype == torch.float32 and scale.numel() == rows:
+        return _SCALE_PER_CHANNEL
+    if scale.dtype == torch.uint8 and scale.shape == (
+        rows,
+        weight.shape[1] // _QUANT_GROUP,
+    ):
+        return _SCALE_MXFP8_BLOCK
+    raise AssertionError(
+        f"unrecognised wo_a weight_scale layout: shape={tuple(scale.shape)} "
+        f"dtype={scale.dtype} weight.shape={tuple(weight.shape)}; expected "
+        f"FP32 [rows] / [rows, 1] (per-channel) or uint8 "
+        f"[rows, K // {_QUANT_GROUP}] (MXFP8 block)"
+    )
+
+
+def _dequant_fp8_per_channel(weight: torch.Tensor, scale: torch.Tensor) -> torch.Tensor:
+    """``w[i, :] * scale[i]`` for a per-channel FP8 weight shard."""
+    rows = weight.shape[0]
+    return (weight.to(torch.float32) * scale.reshape(rows, 1).to(torch.float32)).to(
+        torch.bfloat16
+    )
+
+
 def fused_gate(vllm_config) -> tuple[bool, str]:
     """Whether the PPU fused norm-rope path may serve this configuration.
 
@@ -424,13 +474,27 @@ class PPUDeepseekV4MegaAttnAttention(DeepseekV4MegaAttnAttention):
         weight_scale = getattr(self.wo_a, "weight_scale", None)
         data, scale = attn_out.data, attn_out.scale
         dim = data.shape[2] if data.ndim == 3 else None
+        # Classified before the ledger so an unrecognised layout fails with its
+        # own message instead of a later, vaguer one. The 2D contract is
+        # asserted below; a 3D weight has no scale recipe to name.
+        scale_mode = (
+            _wo_a_scale_mode(weight, weight_scale) if weight.ndim == 2 else "unknown"
+        )
+        # Which load-time side of the K-axis permutation this shard took:
+        # per-channel scales skip it (a per-row value is invariant under it),
+        # MXFP8 block scales are indexed by it and keep it. Reported so the run
+        # ledger states the path actually taken instead of inferring it.
+        permute_label = {
+            _SCALE_PER_CHANNEL: "skipped",
+            _SCALE_MXFP8_BLOCK: "applied",
+        }.get(scale_mode, "n/a")
         logger.info_once(
             "[vllm_sail] fused norm-rope O_PROJ first call: "
             "wo_a.weight.shape=%s dtype=%s | wo_a.weight_scale.shape=%s "
             "dtype=%s | einsum_recipe=%s o_proj_block_size=%s | "
             "attn_out.data.shape=%s dtype=%s | attn_out.scale.shape=%s "
             "dtype=%s | n_local_groups=%s n_wv_group=%s o_lora_rank=%s D=%s "
-            "output_channelwise=%s",
+            "wo_a_scale_mode=%s scale_permute=%s | output_channelwise=%s",
             tuple(weight.shape),
             weight.dtype,
             tuple(weight_scale.shape) if weight_scale is not None else None,
@@ -445,6 +509,8 @@ class PPUDeepseekV4MegaAttnAttention(DeepseekV4MegaAttnAttention):
             self.n_wv_group,
             self.o_lora_rank,
             dim,
+            scale_mode,
+            permute_label,
             self._output_channelwise,
         )
 
@@ -521,15 +587,29 @@ class PPUDeepseekV4MegaAttnAttention(DeepseekV4MegaAttnAttention):
 
         if weight.element_size() == 1:
             # Defensive branch: emulation dequant-at-load disabled or a
-            # checkpoint variant kept wo_a quantized. Same helper the
-            # vllm_sail baseline V4.1 class uses.
-            if weight.dtype != torch.float8_e4m3fn or weight_scale is None:
+            # checkpoint variant kept wo_a quantized. The formula follows the
+            # scale layout, not the weight dtype alone: an FP32 per-channel
+            # multiplier is not the MXFP8 block recipe (2 ** (byte - 127) per
+            # 32-element block), and broadcasting that helper over a 1-column
+            # scale would be silently wrong rather than loud.
+            if weight.dtype != torch.float8_e4m3fn:
                 raise AssertionError(
-                    f"1-byte wo_a weight must be float8_e4m3fn with a "
-                    f"weight_scale, got dtype={weight.dtype} "
-                    f"scale={'None' if weight_scale is None else weight_scale.dtype}"
+                    f"1-byte wo_a weight must be float8_e4m3fn, got {weight.dtype}"
                 )
-            weight = dequant_mxfp8_to_bf16(weight, weight_scale)
+            if scale_mode == _SCALE_PER_CHANNEL:
+                weight = _dequant_fp8_per_channel(weight, weight_scale)
+            elif scale_mode == _SCALE_MXFP8_BLOCK:
+                weight = dequant_mxfp8_to_bf16(weight, weight_scale)
+            else:
+                scale_info = (
+                    "None"
+                    if weight_scale is None
+                    else f"{tuple(weight_scale.shape)} {weight_scale.dtype}"
+                )
+                raise AssertionError(
+                    f"1-byte wo_a weight needs a quantized scale layout, got "
+                    f"scale_mode={scale_mode} (weight_scale={scale_info})"
+                )
         if weight.dtype != torch.bfloat16:
             raise AssertionError(
                 f"wo_a weight must be BF16 after load-time dequant, got {weight.dtype}"
