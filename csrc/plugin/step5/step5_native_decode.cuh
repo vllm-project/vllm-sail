@@ -2,7 +2,6 @@
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 // Ported from vllm-step5-dsa-890p-20261110/step5_sparse_decode.cu.
 #include <ATen/cuda/CUDAContext.h>
-#include <c10/cuda/CUDAException.h>
 #include <c10/cuda/CUDAGuard.h>
 #include <hggc_runtime.h>
 #include <algorithm>
@@ -10,6 +9,7 @@
 #include <cmath>
 #include <optional>
 #include "step5_native_device.cuh"
+#include "step5_runtime.h"
 namespace step5_native_decode {
 using namespace step5_dsa_native;
 constexpr int kMaxSplits = 32, kMergeWarps = 4, kSingleWarpRows = 16, kDirectRows = 4096;
@@ -363,9 +363,9 @@ void run(const at::Tensor& q, const at::Tensor& cache, const at::Tensor& regions
   p.rows = rows; p.heads = heads; p.slots = slots; p.splits = splits; p.groups = cache.size(1); p.rows_per_request = p.groups * query_len;
   p.qs = q.stride(0); p.qh = q.stride(1); p.os = out.stride(0); p.oh = out.stride(1); p.rs = regions.stride(0);
   p.gs = gate ? gate->stride(0) : 0; p.gh = gate ? gate->stride(1) : 0; p.clear_inactive = clear_inactive || gate.has_value(); p.scale = scale;
-  const auto stream = at::cuda::getCurrentCUDAStream();
+  const auto stream = get_current_cuda_stream(q.get_device());
   if (single) launch_single_row(p, stream); else if (rows >= kDirectRows) launch<2, true>(p, stream);
   else if (rows <= kSingleWarpRows) launch<1>(p, stream); else launch<2>(p, stream);
-  C10_CUDA_KERNEL_LAUNCH_CHECK();
+  step5_runtime::check(hggcGetLastError());
 }
 }  // namespace step5_native_decode

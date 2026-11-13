@@ -70,8 +70,8 @@ def test_native_plugin_sources_do_not_include_cuda_sdk_headers() -> None:
 )
 def test_native_plugin_sources_use_hggc_runtime_identifiers(path: str) -> None:
     source = (ROOT / path).read_text(encoding="utf-8")
-    # SAIL PyTorch retains at::cuda, CUDAGuard, C10_CUDA_CHECK and the CUDA
-    # dispatch key. Raw CUDA runtime APIs, types and enums need sailify instead.
+    # SAIL PyTorch retains CUDAGuard and the CUDA dispatch key. Raw CUDA
+    # runtime APIs, types and enums need sailify instead.
     # Ignore diagnostic strings and comments, including historical CUDA names.
     code = re.sub(
         r'R"(?P<delimiter>[^\s()\\]{0,16})\(.*?\)(?P=delimiter)"'
@@ -81,6 +81,14 @@ def test_native_plugin_sources_use_hggc_runtime_identifiers(path: str) -> None:
         flags=re.DOTALL,
     )
     assert re.findall(r"\bcuda[A-Z]\w*\b", code) == []
+    if "step5" in Path(path).parts:
+        # CUDAStream and CUDA error enums are distinct from HGGC's types in
+        # SDK 2.2. Use the existing stable stream getter and HGGC checks.
+        assert not re.search(
+            r"\bC10_CUDA_(?:CHECK|KERNEL_LAUNCH_CHECK)\s*\("
+            r"|\bat::cuda::getCurrentCUDAStream\s*\(",
+            code,
+        )
 
 
 @pytest.mark.parametrize(
