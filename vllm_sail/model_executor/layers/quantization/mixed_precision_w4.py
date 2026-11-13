@@ -192,8 +192,14 @@ class W4AInt8MoEMethod(FusedMoEMethodBase):
         self.quant_config = quant_config
         self.ep_size = moe.ep_size
         self.ep_rank = moe.ep_rank
-        self.backend = None
-        self.experts_cls = None
+        # PPU MODIFICATION: begin — MK-only attributes must NOT exist on the
+        # legacy path. Upstream FusedMoEMethodBase.is_monolithic does
+        # `if self.moe_kernel is None: if hasattr(self, "experts_cls"):
+        # return self.experts_cls.is_monolithic()`. Initialising experts_cls=None
+        # unconditionally makes hasattr True and crashes legacy (non-DeepEP)
+        # deployments with None.is_monolithic(). Only create backend/experts_cls
+        # when the MK path is actually assembled. moe_kernel itself is owned by
+        # the base __init__ (None), so it is intentionally not touched here.
         if self._mk_enabled():
             # Resolve after plugin installation, never capture an unpatched
             # oracle callable while quantization configs are being registered.
@@ -208,6 +214,7 @@ class W4AInt8MoEMethod(FusedMoEMethodBase):
                 weight_key=kInt4W4A8StaticChannelSym,
                 activation_key=kInt8DynamicTokenSym,
             )
+        # PPU MODIFICATION: end
 
     def _mk_enabled(self) -> bool:
         """Whether to assemble the modular-kernel path (DeepEP low-latency).

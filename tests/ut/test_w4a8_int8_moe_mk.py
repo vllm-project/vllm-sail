@@ -862,3 +862,122 @@ def test_native_masked_int4_numeric_matches_dense_reference():
     convention equals DeepGemm pack_standard_int4_weight (B3 must confirm).
     """
     pytest.skip("requires PPU 810E + DeepGemm native masked; run on na131t-swu110")
+
+
+# ---------------------------------------------------------------------------
+# R5 regression guard: legacy must NOT create MK-only attributes
+# (upstream FusedMoEMethodBase.is_monolithic uses hasattr(self, "experts_cls"))
+# ---------------------------------------------------------------------------
+
+
+def _is_monolithic_contract(obj):
+    """Replica of upstream fused_moe_method_base.py:135-141 is_monolithic.
+
+    Kept here so the legacy contract is testable without importing vLLM. The
+    real source is AST-checked separately to ensure the contract still holds.
+    """
+    if obj.moe_kernel is None:
+        if hasattr(obj, "experts_cls"):
+            return obj.experts_cls.is_monolithic()
+        return False
+    return obj.moe_kernel.is_monolithic
+
+
+def _run_init(mk_enabled: bool):
+    init = function(
+        MIXED_W4,
+        "W4AInt8MoEMethod.__init__",
+        {"super": lambda: SimpleNamespace(__init__=lambda moe: None)},
+    )
+    moe = SimpleNamespace(
+        ep_size=8, ep_rank=0,
+        moe_parallel_config=_parallel_config(mk_enabled, mk_enabled),
+    )
+    obj = SimpleNamespace(moe=moe, _mk_enabled=lambda: mk_enabled, moe_kernel=None)
+    init(obj, SimpleNamespace(), moe)
+    return obj
+
+
+def test_legacy_init_does_not_create_experts_cls_or_backend():
+    obj = _run_init(mk_enabled=False)
+    assert not hasattr(obj, "experts_cls"), (
+        "legacy must not create experts_cls: upstream is_monolithic does "
+        "hasattr(self,'experts_cls') and would call None.is_monolithic()"
+    )
+    assert not hasattr(obj, "backend")
+
+
+def test_legacy_is_monolithic_returns_false_without_raising():
+    obj = _run_init(mk_enabled=False)
+    assert _is_monolithic_contract(obj) is False
+
+
+def test_experts_cls_none_would_crash_is_monolithic():
+    """Demonstrates the regression the fix prevents (None.is_monolithic())."""
+    obj = SimpleNamespace(moe_kernel=None, experts_cls=None)
+    with pytest.raises(AttributeError):
+        _is_monolithic_contract(obj)
+
+
+def _register_chain(monkeypatch, dotted: str):
+    parts = dotted.split(".")
+    for i in range(1, len(parts) + 1):
+        name = ".".join(parts[:i])
+        if name not in sys.modules:
+            monkeypatch.setitem(sys.modules, name, ModuleType(name))
+
+
+def test_mk_init_creates_experts_cls(monkeypatch):
+    oracle_pkg = "vllm.model_executor.layers.fused_moe.oracle"
+    _register_chain(monkeypatch, oracle_pkg)
+    oracle = ModuleType(f"{oracle_pkg}.w4a8_int8")
+    oracle.select_w4a8_int8_moe_backend = lambda **kw: ("BATCHED", "EXPERTS_CLS")
+    monkeypatch.setitem(sys.modules, f"{oracle_pkg}.w4a8_int8", oracle)
+    setattr(sys.modules[oracle_pkg], "w4a8_int8", oracle)
+
+    qu_name = "vllm.model_executor.layers.quantization.utils.quant_utils"
+    _register_chain(monkeypatch, qu_name)
+    qu = sys.modules[qu_name]
+    qu.kInt4W4A8StaticChannelSym = "W4"
+    qu.kInt8DynamicTokenSym = "A8"
+
+    obj = _run_init(mk_enabled=True)
+    assert obj.experts_cls == "EXPERTS_CLS"
+    assert obj.backend == "BATCHED"
+
+
+def test_init_assigns_mk_attrs_only_inside_mk_branch():
+    node = definition(ROOT / MIXED_W4, "W4AInt8MoEMethod.__init__")
+    # direct children of __init__ must not assign self.experts_cls / self.backend
+    for stmt in node.body:
+        if isinstance(stmt, ast.Assign):
+            for t in stmt.targets:
+                if isinstance(t, ast.Attribute) and isinstance(t.value, ast.Name):
+                    assert t.attr not in {"experts_cls", "backend"}, (
+                        f"self.{t.attr} assigned unconditionally in __init__"
+                    )
+    # the assignments must live under an `if self._mk_enabled():` block
+    mk_ifs = [
+        n for n in node.body
+        if isinstance(n, ast.If) and "_mk_enabled" in ast.unparse(n.test)
+    ]
+    assert mk_ifs, "__init__ must gate MK attrs behind if self._mk_enabled()"
+    inner = ast.unparse(mk_ifs[0])
+    assert "self.experts_cls" in inner and "self.backend" in inner
+
+
+def test_upstream_is_monolithic_still_uses_hasattr():
+    """Guard the upstream contract this fix relies on (skip if no vLLM source)."""
+    import os
+
+    root = os.environ.get("VLLM_SOURCE_ROOT")
+    if not root:
+        pytest.skip("set VLLM_SOURCE_ROOT to check upstream is_monolithic contract")
+    from pathlib import Path
+
+    p = Path(root) / "vllm/model_executor/layers/fused_moe/fused_moe_method_base.py"
+    if not p.is_file():
+        pytest.skip(f"upstream source not found at {p}")
+    node = definition(p, "FusedMoEMethodBase.is_monolithic")
+    src = ast.unparse(node)
+    assert "hasattr(self, 'experts_cls')" in src or 'hasattr(self, "experts_cls")' in src
