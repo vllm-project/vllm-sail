@@ -21,7 +21,7 @@ def test_register_rebinds_preloaded_consumers_once_without_loading_others(
 
     monkeypatch.setattr(moe_backends, "_registered", False)
     monkeypatch.setitem(sys.modules, "vllm_sail.patch.utils", patch_utils_module)
-    backend_names = ("unquantized", "fp8", "int8", "mxfp4", "int_wna16")
+    backend_names = ("unquantized", "fp8", "int8", "w4a8_int8", "mxfp4", "int_wna16")
     imports = []
     replacements = []
     expected_targets = []

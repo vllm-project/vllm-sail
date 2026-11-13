@@ -16,6 +16,7 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
 )
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
+    TopKWeightAndReduceDelegate,
     TopKWeightAndReduceNoOP,
 )
 from vllm.model_executor.layers.fused_moe.utils import (
@@ -36,6 +37,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8Static128BlockSym,
     kFp8StaticChannelSym,
     kInt4Static32,
+    kInt4W4A8StaticChannelSym,
     kInt8DynamicTokenSym,
     kInt8StaticChannelSym,
     kMxfp4Dynamic,
@@ -1482,4 +1484,271 @@ class PPUDeepGemmExpertsMXFP4W4A8(mk.FusedMoEExpertsModular):
             inv_perm=inv_perm,
             expert_map=expert_map,
             output=output,
+        )
+
+
+def _w4a8_pad_to_multiple_of_16(value: int) -> int:
+    """Pad ``value`` up to a multiple of 16 (acext expanded-row requirement)."""
+    return value + (16 - value % 16) % 16
+
+
+def _w4a8_batched_row_plan(
+    expert_num_tokens: list[int], capacity: int
+) -> tuple[list[int], list[bool], int]:
+    """Reference plan for the expert-major flattening of a BatchedExperts buffer.
+
+    Pure Python so the layout contract is unit-testable without torch or a
+    device. ``apply`` builds the same mapping on-device with
+    ``arange(E).repeat_interleave(capacity)``; this function is the specification
+    that mapping is checked against.
+
+    Args:
+        expert_num_tokens: valid token count per local expert (length E).
+        capacity: padded tokens per expert slot (T), identical for every expert.
+
+    Returns:
+        ``(row_expert_ids, row_is_valid, num_valid)`` for the ``E * capacity``
+        flattened rows, ordered expert-major: row ``e * capacity + t`` belongs to
+        local expert ``e`` and is valid iff ``t < expert_num_tokens[e]``.
+    """
+    row_expert_ids: list[int] = []
+    row_is_valid: list[bool] = []
+    for expert_id, num_tokens in enumerate(expert_num_tokens):
+        for slot in range(capacity):
+            row_expert_ids.append(expert_id)
+            row_is_valid.append(slot < num_tokens)
+    return row_expert_ids, row_is_valid, sum(row_is_valid)
+
+
+class PPUDeepGemmExpertsW4A8Int8(mk.FusedMoEExpertsModular):
+    """MK experts for INT4-per-channel weights x INT8-per-token activations.
+
+    Naming note: the public backend name is ``ppu_deep_gemm_w4a8_int8`` and the
+    oracle enum member is ``BATCHED_PPU_DEEPGEMM``, but the GEMM itself is
+    provided by **acext** ``fusedmoe_wrapper(use_int8_w4a8=True)`` — the same JIT
+    kernel the legacy ``W4AInt8MoEMethod.apply`` already uses. DeepGemm exposes no
+    INT4-per-channel x INT8-activation entry point (only W4A16 and MXFP4 x FP8),
+    so this class is the MK/DeepEP assembly shell around the acext kernel, not a
+    DeepGemm native INT4 kernel.
+
+    Layout: DeepEP low-latency dispatch produces ``BatchedExperts``
+    ``[E, T, K]`` plus a device-side ``expert_num_tokens``. acext consumes a 2-D
+    ``[M, K]`` buffer with ``topk_ids``/``topk_weights``. Because the batched
+    buffer is already expert-major and contiguous, the conversion is a zero-copy
+    ``reshape`` plus a synthetic top-k=1 routing table — no permute kernel and no
+    host synchronisation (``expert_num_tokens_cpu`` is None on this path, so any
+    ``.item()`` would both stall decode and break CUDA-graph capture).
+
+    Weight application: ``finalize_weight_and_reduce_impl`` returns
+    ``TopKWeightAndReduceDelegate`` because sail's DeepEP LL combine applies the
+    routing weights (``prepare_finalize/deepep_ll.py`` asserts Delegate). The
+    wrapper is therefore fed **ones** so weights are applied exactly once.
+    """
+
+    def __init__(
+        self,
+        moe_config: FusedMoEConfig,
+        quant_config: FusedMoEQuantConfig,
+        max_num_tokens: int,
+        num_dispatchers: int,
+    ):
+        super().__init__(
+            moe_config=moe_config,
+            quant_config=quant_config,
+            max_num_tokens=max_num_tokens,
+            num_dispatchers=num_dispatchers,
+        )
+
+    @property
+    def expects_unquantized_inputs(self) -> bool:
+        # acext quantizes activations to INT8 per token inside the kernel, so
+        # prepare must defer input quantization and dispatch BF16/FP16.
+        return True
+
+    @staticmethod
+    def activation_format() -> mk.FusedMoEActivationFormat:
+        return mk.FusedMoEActivationFormat.BatchedExperts
+
+    @staticmethod
+    def _supports_current_device() -> bool:
+        from vllm_sail.model_executor.layers.fused_moe.experts.acext import (
+            is_acext_supported,
+        )
+
+        return is_acext_supported()
+
+    @staticmethod
+    def _supports_no_act_and_mul() -> bool:
+        return False
+
+    @staticmethod
+    def _supports_quant_scheme(
+        weight_key: QuantKey | None,
+        activation_key: QuantKey | None,
+    ) -> bool:
+        SUPPORTED_W_A = [
+            (kInt4W4A8StaticChannelSym, kInt8DynamicTokenSym),
+        ]
+        return (weight_key, activation_key) in SUPPORTED_W_A
+
+    @staticmethod
+    def _supports_activation(activation: MoEActivation) -> bool:
+        return activation == MoEActivation.SILU
+
+    @staticmethod
+    def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:
+        return not (
+            moe_parallel_config.use_fi_nvl_two_sided_kernels
+            or moe_parallel_config.use_fi_nvl_one_sided_kernels
+        )
+
+    @staticmethod
+    def _supports_bias() -> bool:
+        return False
+
+    def supports_expert_map(self) -> bool:
+        # DeepEP LL already delivers local-expert shards; no extra mapping.
+        return False
+
+    def finalize_weight_and_reduce_impl(self) -> mk.TopKWeightAndReduce:
+        # Weight application and reduction happen in the DeepEP combine kernel.
+        return TopKWeightAndReduceDelegate()
+
+    def moe_problem_size(
+        self,
+        a1: torch.Tensor,
+        w1: torch.Tensor,
+        w2: torch.Tensor,
+        topk_ids: torch.Tensor,
+    ) -> tuple[int, int, int, int, int]:
+        # After the acext view relabel w1 is [E, K, I] and w2 is [E, I, K/2]:
+        # the logical gate+up width is 2*I, not w1.size(1).
+        E, K, intermediate = w1.size()
+        N = 2 * intermediate
+        M = a1.size(1) if a1.dim() == 3 else a1.size(0)
+        return E, M, N, K, topk_ids.size(1)
+
+    def workspace_shapes(
+        self,
+        M: int,
+        N: int,
+        K: int,
+        topk: int,
+        global_num_experts: int,
+        local_num_experts: int,
+        expert_tokens_meta: mk.ExpertTokensMetadata | None,
+        activation: MoEActivation,
+    ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
+        # acext manages its own intermediates, so only the batched output buffer
+        # has to be sized here.
+        assert self.num_dispatchers is not None
+        assert self.max_num_tokens is not None
+        capacity = self.max_num_tokens * self.num_dispatchers
+        return ((0,), (0,), (local_num_experts, capacity, K))
+
+    def apply(
+        self,
+        output: torch.Tensor,
+        hidden_states: torch.Tensor,
+        w1: torch.Tensor,
+        w2: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        activation: MoEActivation,
+        global_num_experts: int,
+        expert_map: torch.Tensor | None,
+        a1q_scale: torch.Tensor | None,
+        a2_scale: torch.Tensor | None,
+        workspace13: torch.Tensor,
+        workspace2: torch.Tensor,
+        expert_tokens_meta: mk.ExpertTokensMetadata | None,
+        apply_router_weight_on_input: bool,
+    ):
+        from vllm_sail.utils.acext import load_acext
+
+        load_acext()
+        from acext import fusedmoe_wrapper, get_enum_from_booleans
+
+        assert activation == MoEActivation.SILU, (
+            f"Only SiLU activation is supported, not {activation}."
+        )
+        assert hidden_states.dim() == 3, (
+            "DeepEP LL batched activations must be [E, T, K], got "
+            f"{tuple(hidden_states.shape)}"
+        )
+        assert expert_tokens_meta is not None
+        expert_num_tokens = expert_tokens_meta.expert_num_tokens
+        assert expert_num_tokens is not None, (
+            "Batched W4A8 requires device-side expert_num_tokens"
+        )
+        # The proven legacy numeric path feeds acext unquantized activations and
+        # lets the kernel do the per-token INT8 quantization. Fail loudly rather
+        # than silently mis-feed a pre-quantized dispatch buffer.
+        assert hidden_states.dtype in (torch.bfloat16, torch.float16), (
+            "PPUDeepGemmExpertsW4A8Int8 expects BF16/FP16 activations (acext "
+            f"quantizes internally), got {hidden_states.dtype}"
+        )
+        assert a1q_scale is None, (
+            "PPUDeepGemmExpertsW4A8Int8 does not consume pre-quantized "
+            "activation scales; enable deferred input quantization"
+        )
+
+        num_local_experts, capacity, K = hidden_states.shape
+        assert w1.size(0) == num_local_experts and w1.size(1) == K, (
+            f"acext w13 layout mismatch: w1={tuple(w1.shape)} vs "
+            f"activations={tuple(hidden_states.shape)}"
+        )
+
+        device = hidden_states.device
+        # Zero the slots DeepEP did not fill so padded rows cannot carry NaN/Inf
+        # into the GEMM. Device-side mask: no host sync, CUDA-graph safe.
+        slots = torch.arange(capacity, device=device)
+        valid = slots.unsqueeze(0) < expert_num_tokens.unsqueeze(1)
+        x = hidden_states * valid.unsqueeze(-1).to(hidden_states.dtype)
+        x = x.reshape(num_local_experts * capacity, K)
+        out = output.reshape(num_local_experts * capacity, K)
+
+        # Synthetic top-k=1 routing: flattened row e*capacity+t belongs to local
+        # expert e. See _w4a8_batched_row_plan for the reference specification.
+        row_expert = torch.arange(
+            num_local_experts, device=device, dtype=torch.int32
+        ).repeat_interleave(capacity)
+        row_ids = row_expert.unsqueeze(1)
+        # Delegate: the DeepEP combine applies the real routing weights, so the
+        # wrapper must not apply them a second time.
+        row_weights = torch.ones(
+            (num_local_experts * capacity, 1), dtype=torch.float32, device=device
+        )
+
+        # Q_type is an explicit constant. Never derive it from quant_config
+        # flags: quant_dtype == torch.int8 makes use_int8_w8a8 True, which would
+        # silently select the W8A8 kernel instead of W4A8.
+        Q_type = get_enum_from_booleans(
+            use_fp8_w8a8=False,
+            use_int8_w8a8=False,
+            use_int8_w8a16=False,
+            use_int4_w4a16=False,
+            use_fp8_w8a16=False,
+            use_int8_w4a8=True,
+        )
+
+        # ep_rank=0 / ep_size=1: w1/w2 are already local-expert shards, so acext
+        # must not filter experts a second time.
+        fusedmoe_wrapper(
+            x,
+            w1,
+            w2,
+            row_weights,
+            row_ids,
+            out,
+            _w4a8_pad_to_multiple_of_16(num_local_experts * capacity),
+            self.quant_config.w1_scale,
+            self.quant_config.w2_scale,
+            None,
+            None,
+            None,
+            None,
+            0,
+            1,
+            Q_type,
         )

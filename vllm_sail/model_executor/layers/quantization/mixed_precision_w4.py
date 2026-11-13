@@ -9,6 +9,7 @@ from vllm.model_executor.layers.fused_moe import (
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
+    FusedMoEQuantDesc,
 )
 from vllm.model_executor.layers.fused_moe.fused_moe_method_base import (
     FusedMoEMethodBase,
@@ -28,9 +29,12 @@ from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tenso
 from vllm.model_executor.layers.quantization.compressed_tensors.utils import (
     should_ignore_layer,
 )
-from vllm.model_executor.layers.quantization.utils.quant_utils import is_layer_skipped
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    GroupShape,
+    is_layer_skipped,
+)
 from vllm.model_executor.models.utils import WeightsMapper
-from vllm.model_executor.utils import set_weight_attrs
+from vllm.model_executor.utils import replace_parameter, set_weight_attrs
 
 if TYPE_CHECKING:
     from vllm.model_executor.layers.fused_moe.runner.shared_experts import SharedExperts
@@ -188,6 +192,36 @@ class W4AInt8MoEMethod(FusedMoEMethodBase):
         self.quant_config = quant_config
         self.ep_size = moe.ep_size
         self.ep_rank = moe.ep_rank
+        self.backend = None
+        self.experts_cls = None
+        if self._mk_enabled():
+            # Resolve after plugin installation, never capture an unpatched
+            # oracle callable while quantization configs are being registered.
+            from vllm.model_executor.layers.fused_moe.oracle import w4a8_int8 as oracle
+            from vllm.model_executor.layers.quantization.utils.quant_utils import (
+                kInt4W4A8StaticChannelSym,
+                kInt8DynamicTokenSym,
+            )
+
+            self.backend, self.experts_cls = oracle.select_w4a8_int8_moe_backend(
+                config=self.moe,
+                weight_key=kInt4W4A8StaticChannelSym,
+                activation_key=kInt8DynamicTokenSym,
+            )
+
+    def _mk_enabled(self) -> bool:
+        """Whether to assemble the modular-kernel path (DeepEP low-latency).
+
+        Eligibility comes from FusedMoEParallelConfig fields that are already
+        fixed when FusedMoEConfig is built, so it never depends on
+        get_current_vllm_config() being available at RoutedExperts construction
+        time. Non-DeepEP deployments keep the original direct-acext path.
+        """
+        parallel_config = self.moe.moe_parallel_config
+        return (
+            parallel_config.use_deepep_ll_kernels
+            and parallel_config.use_batched_activation_format
+        )
 
     def create_weights(
         self,
@@ -268,10 +302,69 @@ class W4AInt8MoEMethod(FusedMoEMethodBase):
         # [E, intermediate, hidden_size // 2]
         layer.w2_weight = torch.nn.Parameter(w2_weight, requires_grad=False)
 
+        if not self._mk_enabled():
+            return
+
+        from vllm.model_executor.layers.fused_moe.oracle import w4a8_int8 as oracle
+
+        # acext consumes the checkpoint pack directly; the PPU branch of the
+        # patched conversion is a pass-through that preserves the 6-tuple shape.
+        (
+            w13,
+            w2,
+            w13_scale,
+            w2_scale,
+            _unused1,
+            _unused2,
+        ) = oracle.convert_to_w4a8_int8_moe_format(
+            layer.w13_weight,
+            layer.w2_weight,
+            layer.w13_weight_scale,
+            layer.w2_weight_scale,
+            group_size=-1,
+        )
+        # Keep the original parameter names: the modular kernel reads
+        # layer.w13_weight / layer.w2_weight, so introducing new names here
+        # would leave the kernel on stale tensors.
+        replace_parameter(layer, "w13_weight", w13)
+        replace_parameter(layer, "w2_weight", w2)
+        replace_parameter(layer, "w13_weight_scale", w13_scale)
+        replace_parameter(layer, "w2_weight_scale", w2_scale)
+
+        self.moe_quant_config = self.get_fused_moe_quant_config(layer)
+        assert self.moe_quant_config is not None
+        self.moe_kernel = oracle.make_w4a8_int8_moe_kernel(
+            moe_quant_config=self.moe_quant_config,
+            moe_config=self.moe,
+            experts_cls=self.experts_cls,
+            routing_tables=layer._expert_routing_tables(),
+        )
+        self.moe_kernel.fused_experts.process_weights_after_loading(layer)
+
     def get_fused_moe_quant_config(
         self, layer: torch.nn.Module
     ) -> FusedMoEQuantConfig | None:
-        return None
+        if not self._mk_enabled():
+            return None
+        # Activations stay unquantized on the wire: acext does the dynamic
+        # per-token INT8 quantization inside the kernel, exactly like the legacy
+        # path. PER_TOKEN keeps block_shape None so sail's DeepEP LL factory
+        # does not switch to a pre-quantized INT8 dispatch this kernel cannot
+        # consume. Weights are already packed INT4 with per-channel scales.
+        return FusedMoEQuantConfig(
+            _a1=FusedMoEQuantDesc(dtype=None, shape=GroupShape.PER_TOKEN),
+            _a2=FusedMoEQuantDesc(dtype=None, shape=GroupShape.PER_TOKEN),
+            _w1=FusedMoEQuantDesc(
+                dtype=None,
+                shape=GroupShape.PER_CHANNEL,
+                scale=layer.w13_weight_scale,
+            ),
+            _w2=FusedMoEQuantDesc(
+                dtype=None,
+                shape=GroupShape.PER_CHANNEL,
+                scale=layer.w2_weight_scale,
+            ),
+        )
 
     def apply(
         self,
@@ -282,6 +375,21 @@ class W4AInt8MoEMethod(FusedMoEMethodBase):
         shared_experts: "SharedExperts | None",
         shared_experts_input: torch.Tensor | None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        if self.moe_kernel is not None:
+            return self.moe_kernel.apply(
+                x,
+                layer.w13_weight,
+                layer.w2_weight,
+                topk_weights,
+                topk_ids,
+                activation=layer.activation,
+                global_num_experts=layer.global_num_experts,
+                expert_map=layer.expert_map,
+                apply_router_weight_on_input=layer.apply_router_weight_on_input,
+                shared_experts=shared_experts,
+                shared_experts_input=shared_experts_input,
+            )
+
         from vllm_sail.utils.acext import load_acext
 
         load_acext()
