@@ -994,6 +994,132 @@ def test_real_checkpoint_slice_shape_integrity():
         assert meta[name]["dtype"] in ("int8", "uint8")
 
 
+# ---------------------------------------------------------------------------
+# gate_first concat order, locked on A1c real-checkpoint evidence (challenger):
+#   layer0  gate_first cos +0.999841 norm 0.9995 g_l2 0.0178  -> pass
+#   layer20 gate_first cos +0.999827 norm 1.0002 g_l2 0.0186  -> pass
+#   up_first cos 0.9963 / 0.9967, g_l2 0.086 / 0.082          -> rejected
+# w13 is [E, 2I, K/2] with gate in the FIRST I rows, up in the second I; the
+# silu_mul epilogue applies SiLU to the first group_size columns. CPU-only.
+# ---------------------------------------------------------------------------
+
+
+def _silu(x):
+    import math
+
+    return x / (1.0 + math.exp(-x))
+
+
+def _silu_mul_gate_first(row, group_size):
+    """SiLU(first half) * second half — the confirmed checkpoint convention."""
+    return [_silu(row[i]) * row[group_size + i] for i in range(group_size)]
+
+
+def _silu_mul_up_first(row, group_size):
+    """The rejected alternative: SiLU(second half) * first half."""
+    return [_silu(row[group_size + i]) * row[i] for i in range(group_size)]
+
+
+def test_gate_first_and_up_first_are_discriminating():
+    """The two orders must differ, so the gate_first lock is not vacuous."""
+    row = [1.0, 2.0, 3.0, 4.0]
+    g, u = _silu_mul_gate_first(row, 2), _silu_mul_up_first(row, 2)
+    assert g != u
+    # gate_first: SiLU(1)*3, SiLU(2)*4
+    assert abs(g[0] - _silu(1.0) * 3.0) < 1e-12
+    assert abs(g[1] - _silu(2.0) * 4.0) < 1e-12
+    # up_first would pair SiLU(3)*1, SiLU(4)*2 — wrong per A1c
+    assert abs(u[0] - _silu(3.0) * 1.0) < 1e-12
+
+
+def test_gate_first_matches_a1c_evidence_over_up_first():
+    """A1c: gate_first cos ~0.9998 vs up_first ~0.9963 on real weights.
+
+    Reproduces the ORDERING of the two candidates' agreement with a gate_first
+    ground truth on synthetic rows: gate_first is exact (cos 1), up_first is
+    not. The real-weight cos/g_l2 numbers are the challenger's on-card oracle.
+    """
+    import math
+    import random
+
+    rng = random.Random(31)
+    I = 8
+    rows = [[rng.uniform(-3, 3) for _ in range(2 * I)] for _ in range(16)]
+
+    def cos(a, b):
+        dot = sum(x * y for x, y in zip(a, b))
+        na = math.sqrt(sum(x * x for x in a))
+        nb = math.sqrt(sum(y * y for y in b))
+        return dot / (na * nb) if na and nb else 0.0
+
+    gate_cos, up_cos = [], []
+    for row in rows:
+        truth = _silu_mul_gate_first(row, I)
+        gate_cos.append(cos(truth, _silu_mul_gate_first(row, I)))
+        up_cos.append(cos(truth, _silu_mul_up_first(row, I)))
+    assert all(abs(c - 1.0) < 1e-12 for c in gate_cos)
+    assert max(up_cos) < 0.999, "up_first must be clearly worse than gate_first"
+
+
+def test_native_silu_mul_group_size_is_half_width():
+    """group_size = N//2 pins SiLU to the first half == gate (gate_first)."""
+    node = definition(ROOT / EXPERTS, f"{NATIVE}.apply")
+    src = ast.unparse(node)
+    assert "int8_persistent_masked_m_silu_mul_quant" in src
+    assert "group_size=workspace1.shape[-1] // 2" in src
+
+
+def test_native_path_never_swaps_gate_up_halves():
+    """No half reordering anywhere in the native weight/apply path."""
+    forbidden = {"flip", "fliplr", "flipud", "roll", "reverse", "argsort"}
+    for method in ("apply", "process_weights_after_loading"):
+        node = definition(ROOT / EXPERTS, f"{NATIVE}.{method}")
+        used = {
+            a.attr
+            for a in ast.walk(node)
+            if isinstance(a, ast.Attribute) and a.attr in forbidden
+        }
+        assert not used, f"{method} reorders gate/up halves: {used}"
+
+
+def test_w13_is_fused_gate_up_with_n_twice_intermediate():
+    """create_weights builds w13 [E, 2I, K/2] (gate+up fused, gate first)."""
+    node = definition(ROOT / MIXED_W4, "W4AInt8MoEMethod.create_weights")
+    src = ast.unparse(node)
+    assert "2 * intermediate_size_per_partition" in src
+    assert "hidden_size // self.quant_config.pack_factor" in src
+    # w2 stays [E, hidden, I/2] — not fused, no factor 2 on hidden
+    assert "intermediate_size_per_partition // self.quant_config.pack_factor" in src
+
+
+def test_tinv_does_not_touch_gate_up_row_order():
+    """T^-1 permutes only the K axis (bytes within K32 groups), never N rows.
+
+    gate_first is an N-axis (row) convention; T/T^-1 are K-axis byte
+    permutations, so the two fixes are orthogonal and must not interfere.
+    """
+    node = definition(ROOT / EXPERTS, "_w4a8_undo_checkpoint_T")
+    src = ast.unparse(node)
+    # reshape/transpose act on trailing dims only; lead dims (E, N) preserved
+    assert "*lead" in src
+    assert "transpose(-3, -2)" in src
+    T, Tinv = _T(), _Tinv()
+    # a full w13-like row set: N rows each K/2 bytes; row order unchanged
+    import random
+
+    rng = random.Random(5)
+    N, k_half = 6, 32
+    rows = [[rng.randint(0, 255) for _ in range(k_half)] for _ in range(N)]
+    flat = [b for row in rows for b in row]
+    out = Tinv(flat)
+    recovered = [out[i * k_half:(i + 1) * k_half] for i in range(N)]
+    # each row is independently permuted; row identity/order preserved
+    assert len(recovered) == N
+    for i in range(N):
+        assert sorted(recovered[i]) == sorted(rows[i])
+        assert T(recovered[i]) == rows[i]
+
+
 def test_native_moe_problem_size_from_weight_shard():
     node = definition(ROOT / EXPERTS, f"{NATIVE}.moe_problem_size")
     src = ast.unparse(node)
