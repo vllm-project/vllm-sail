@@ -40,10 +40,12 @@ EXPECTED_MODULES = {
     "deepseek_v4_cache",
     "deepseek_v4_metadata",
     "deepseek_v4_compressor",
+    "deepseek_v4_graph_warmup",
     "deepseek_v41",
     "deepseek_v41_engram",
     "deepseek_v41_indexer",
     "deepseek_v41_int8",
+    "deepseek_v41_mega_mhc",
     "glm5_next",
     "glm5_next_mtp",
     "kimi_k3",
@@ -53,6 +55,7 @@ EXPECTED_MODULES = {
     "qwen3_fused_quant",
     "qwen3_moe",
     "qwen3_next",
+    "qwen4_qsa_quant",
     "step3p5_mtp",
 }
 

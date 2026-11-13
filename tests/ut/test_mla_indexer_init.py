@@ -7,8 +7,8 @@ from types import SimpleNamespace as NS
 
 import pytest
 
-from tests.support.source import assert_accepts_upstream_keywords
 from tests.support.modules import load_patch
+from tests.support.source import assert_accepts_upstream_keywords
 
 PATCH = "vllm_sail/patch/enhancement/attention/mla_indexer.py"
 TARGET = "vllm.v1.attention.backends.mla.indexer"
@@ -23,7 +23,16 @@ class Tensor:
 
 @pytest.fixture
 def builder_factory(modules, patch_utils_module):
-    def make(*, ppu, fp4=True, n_head=64, q_head_dim=128):
+    def make(
+        *,
+        ppu,
+        fp4=True,
+        n_head=64,
+        q_head_dim=128,
+        capability=89,
+        text_heads=32,
+        kpool=1,
+    ):
         calls = []
 
         class Builder:
@@ -36,9 +45,19 @@ def builder_factory(modules, patch_utils_module):
                 )
                 self.device = "ppu:0"
                 self.indexer_uses_fp4 = fp4
-                self.supports_varlen = True
+                self.supports_varlen = provider._supports_varlen_paged_mqa_logits()
                 self.num_sms = 3
                 self.scheduler_metadata_buffer = NS(shape=("upstream",))
+                self.vllm_config = NS(
+                    model_config=NS(
+                        hf_config=NS(model_type="multimodal_wrapper"),
+                        hf_text_config=NS(
+                            index_n_heads=text_heads,
+                            index_head_dim=128,
+                            index_kpool=kpool,
+                        ),
+                    )
+                )
 
             @staticmethod
             def _split_indexer_prefill_chunks(*args, **kwargs):
@@ -48,6 +67,9 @@ def builder_factory(modules, patch_utils_module):
                 return NS(decode=None)
 
             def update_draft_decode_metadata(self, metadata):
+                return None
+
+            def _prepare_decode_tensors(self, *args, **kwargs):
                 return None
 
         modules(
@@ -61,7 +83,7 @@ def builder_factory(modules, patch_utils_module):
             "vllm.platforms",
             current_platform=NS(
                 is_ppu=lambda: ppu,
-                is_device_capability=lambda capability: capability == 89,
+                is_device_capability=lambda cap: cap == capability,
             ),
         )
         modules(
@@ -76,6 +98,7 @@ def builder_factory(modules, patch_utils_module):
             get_paged_mqa_logits_metadata=lambda *args, **kwargs: None,
             dsa_indexer_uses_fp4=lambda config: False,
             _supports_flattened_device_query_lens=lambda: "upstream-query-lengths",
+            _supports_varlen_paged_mqa_logits=lambda: True,
         )
         modules(
             "vllm_sail.utils.deep_gemm",
@@ -88,7 +111,33 @@ def builder_factory(modules, patch_utils_module):
             "vllm_sail.patch.utils",
             patch_value=patch_utils_module.patch_value,
         )
-        load_patch(PATCH)
+        originals = {
+            name: getattr(provider, name)
+            for name in (
+                "_supports_varlen_paged_mqa_logits",
+                "_supports_flattened_device_query_lens",
+            )
+        }
+        upstream_chunker = Builder._split_indexer_prefill_chunks
+        installed = load_patch(PATCH)
+        # The sparse subclass already converts its BF16 budget into the
+        # dense chunker's FP32 units. Preserve the shared upstream function.
+        assert Builder._split_indexer_prefill_chunks is upstream_chunker
+        for name, original in originals.items():
+            replacement = getattr(installed, name)
+            assert getattr(provider, name) is replacement
+            assert (
+                patch_utils_module.original_of(replacement, TARGET + "." + name)
+                is original
+            )
+            with pytest.raises(RuntimeError, match="already"):
+                patch_utils_module.patch(
+                    TARGET,
+                    name,
+                    reason="Reject a second query-layout override.",
+                    affected_versions=">=0.33.0,<0.34.0",
+                    remove_when="The platform exposes query-layout capabilities.",
+                )(lambda: False)
         return provider.DeepseekV32IndexerMetadataBuilder, calls
 
     return make
@@ -99,7 +148,7 @@ def test_ppu_fp4_constructor_delegates_then_adds_fork_state(builder_factory):
     builder = builder_cls("config", block_table_width=29, device="ppu:0")
 
     assert calls == [(("config",), {"block_table_width": 29, "device": "ppu:0"})]
-    assert builder.supports_varlen is False
+    assert builder.supports_varlen is True
     assert builder.indexer_n_head == 64
     assert builder.indexer_q_head_dim == 128
     assert builder.num_sms == 7
@@ -108,15 +157,36 @@ def test_ppu_fp4_constructor_delegates_then_adds_fork_state(builder_factory):
     assert builder.scheduler_metadata_buffer.device == "ppu:0"
 
 
-def test_ppu_fp8_constructor_keeps_upstream_buffer(builder_factory):
+def test_ppu_fp8_constructor_keeps_geometry_and_reserves_sail_schedule(builder_factory):
     builder_cls, _ = builder_factory(ppu=True, fp4=False)
     builder = builder_cls("config")
 
-    assert builder.supports_varlen is False
-    assert builder.indexer_n_head == 0
-    assert builder.indexer_q_head_dim == 0
+    assert builder.supports_varlen is True
+    assert builder.indexer_n_head == 64
+    assert builder.indexer_q_head_dim == 128
     assert builder.num_sms == 7
-    assert builder.scheduler_metadata_buffer.shape == ("upstream",)
+    assert builder.scheduler_metadata_buffer.shape == (7 * 8 + 1, 2)
+
+
+def test_legacy_indexer_derives_missing_geometry_from_model_config(builder_factory):
+    builder_cls, _ = builder_factory(ppu=True, fp4=False, n_head=None, q_head_dim=None)
+    builder = builder_cls("config")
+    assert builder.indexer_n_head == 32
+    assert builder.indexer_q_head_dim == 128
+
+
+def test_glm_kpool_metadata_matches_padded_query_heads(builder_factory):
+    builder_cls, _ = builder_factory(
+        ppu=True,
+        fp4=False,
+        n_head=None,
+        q_head_dim=None,
+        text_heads=16,
+        kpool=4,
+    )
+    builder = builder_cls("config")
+    assert builder.indexer_n_head == 32
+    assert builder.indexer_q_head_dim == 128
 
 
 def test_non_ppu_constructor_is_left_untouched(builder_factory):
@@ -128,6 +198,11 @@ def test_non_ppu_constructor_is_left_untouched(builder_factory):
     assert builder.num_sms == 3
     assert builder.scheduler_metadata_buffer.shape == ("upstream",)
     assert not hasattr(builder, "indexer_n_head")
+
+
+def test_legacy_ppu_keeps_non_varlen_layout(builder_factory):
+    builder_cls, _ = builder_factory(ppu=True, fp4=False, capability=80)
+    assert builder_cls("config").supports_varlen is False
 
 
 def test_subclass_constructs_through_the_parent_once(builder_factory):
@@ -155,6 +230,12 @@ def test_subclass_constructs_through_the_parent_once(builder_factory):
         ),
         (
             "attention/mla_indexer",
+            "_prepare_decode_wrapper",
+            "v1/attention/backends/mla/indexer",
+            "DeepseekV32IndexerMetadataBuilder._prepare_decode_tensors",
+        ),
+        (
+            "attention/mla_indexer",
             "_build_wrapper",
             "v1/attention/backends/mla/indexer",
             "DeepseekV32IndexerMetadataBuilder.build",
@@ -164,12 +245,6 @@ def test_subclass_constructs_through_the_parent_once(builder_factory):
             "_update_draft_decode_wrapper",
             "v1/attention/backends/mla/indexer",
             "DeepseekV32IndexerMetadataBuilder.update_draft_decode_metadata",
-        ),
-        (
-            "attention/mla_indexer",
-            "_split_indexer_prefill_chunks_body",
-            "v1/attention/backends/mla/indexer",
-            "DeepseekV32IndexerMetadataBuilder._split_indexer_prefill_chunks",
         ),
     ],
 )

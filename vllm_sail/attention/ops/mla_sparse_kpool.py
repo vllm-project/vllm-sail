@@ -63,6 +63,7 @@ from vllm.v1.worker.workspace import current_workspace_manager
 
 import vllm_sail.envs as ppu_envs
 from vllm_sail.attention.ops.mla_sparse import (
+    _paged_decode_rows,
     _scatter_indexer_int8_cache,
     indexer_k_quant_and_cache_int8,
 )
@@ -73,6 +74,8 @@ if current_platform.is_cuda_alike():
 
 if current_platform.is_ppu():
     from vllm_sail.utils.deep_gemm import (
+        get_num_sms,
+        get_paged_mqa_logits_metadata,
         int8_mqa_logits,
         int8_paged_mqa_logits,
     )
@@ -557,6 +560,37 @@ def _decode_logits_layout(
     return cu, ks, ke
 
 
+def _decode_logits_paged(
+    q, kv_cache, weights, metadata, next_n, max_pool_len, head_dim
+):
+    """Keep INT8 MTP rows aligned with SAIL's next_n=1 paged API."""
+    contexts, tables, _ = _paged_decode_rows(
+        metadata.seq_lens[: q.shape[0]],
+        metadata.block_table,
+        metadata.decode_lens,
+        next_n,
+        metadata.indices,
+        metadata.per_req_decode_lens,
+    )
+    schedule = get_paged_mqa_logits_metadata(
+        contexts,
+        kv_cache.shape[1],
+        get_num_sms(),
+        (1, q.shape[-2], head_dim, torch.int8),
+    )
+    logits = int8_paged_mqa_logits(
+        q.reshape(-1, 1, *q.shape[2:]),
+        kv_cache,
+        weights,
+        contexts,
+        tables,
+        schedule,
+        max_model_len=max_pool_len,
+        clean_logits=False,
+    )
+    return logits, contexts.reshape(q.shape[0], next_n)
+
+
 def _decode_logits_non_paged(
     kv_cache: torch.Tensor,
     padded_q: torch.Tensor,
@@ -946,17 +980,14 @@ def ppu_sparse_attn_indexer_kpool(
             )
             num_rows = num_padded_tokens
         else:
-            # Fixed-length PPU DeepGEMM metadata: decode indices stay None.
-            assert getattr(decode_metadata, "indices", None) is None
-            logits = int8_paged_mqa_logits(
+            logits, seq_lens = _decode_logits_paged(
                 padded_q_quant_decode_tokens,
                 kv_cache_view,
                 padded_weights[:num_padded_tokens],
-                seq_lens,
-                decode_metadata.block_table,
-                decode_metadata.schedule_metadata,
-                max_model_len=max_pool_len,
-                clean_logits=False,
+                decode_metadata,
+                next_n,
+                max_pool_len,
+                head_dim,
             )
             num_rows = logits.shape[0]
 

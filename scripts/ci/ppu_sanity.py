@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: Apache-2.0
-"""Serve the 810E sanity presets sequentially using the installed vLLM SAIL.
+"""Serve PPU sanity presets using the installed vLLM SAIL.
 
 Run inside a prepared device container. This script neither installs packages
 nor allocates machines. Results are a serving sanity check, not an accuracy or
@@ -28,7 +28,7 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
-CATALOG = Path(__file__).with_name("ppu_810e_sanity_models.json")
+CATALOG = Path(__file__).with_name("ppu_sanity_810e.json")
 
 
 def serve_command(preset: dict, checkpoint: Path, port: int) -> list[str]:
@@ -44,7 +44,7 @@ def serve_command(preset: dict, checkpoint: Path, port: int) -> list[str]:
         "--port",
         str(port),
         "--served-model-name",
-        preset["key"],
+        preset.get("served_model_name", preset["key"]),
         *preset["args"],
     ]
 
@@ -78,7 +78,7 @@ def validate_completion(response: dict, model: str) -> None:
         raise ValueError("response has no generated tokens")
 
 
-def runtime_environment() -> dict:
+def runtime_environment(device: str = "810e", catalog_path: Path = CATALOG) -> dict:
     # The script directory is outside the package; cwd is changed before imports.
     import torch
     import vllm
@@ -96,8 +96,9 @@ def runtime_environment() -> dict:
     devices = []
     for index in range(torch.cuda.device_count()):
         capability = tuple(torch.cuda.get_device_capability(index))
-        if capability != (8, 0):
-            raise RuntimeError(f"device {index} is not 810E: {capability}")
+        expected = {"810e": (8, 0), "890": (8, 9)}[device]
+        if capability != expected:
+            raise RuntimeError(f"device {index} is not {device}: {capability}")
         devices.append(
             {
                 "index": index,
@@ -114,7 +115,8 @@ def runtime_environment() -> dict:
         },
         "imports": {"vllm": vllm.__file__, "vllm_sail": vllm_sail.__file__},
         "runner_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
-        "catalog_sha256": hashlib.sha256(CATALOG.read_bytes()).hexdigest(),
+        "catalog_sha256": hashlib.sha256(catalog_path.read_bytes()).hexdigest(),
+        "device_family": device,
         "devices": devices,
         "env": {
             key: os.environ[key]
@@ -171,6 +173,7 @@ def cleanup_signals():
 
 
 def run_preset(preset: dict, checkpoint: Path, args, available_cards: int) -> dict:
+    model_name = preset.get("served_model_name", preset["key"])
     output = args.results_dir / preset["key"]
     output.mkdir()  # A prior run must not be overwritten.
     argv = serve_command(preset, checkpoint, args.port)
@@ -209,6 +212,7 @@ def run_preset(preset: dict, checkpoint: Path, args, available_cards: int) -> di
             TRANSFORMERS_OFFLINE="1",
             VLLM_ENGINE_READY_TIMEOUT_S=str(args.ready_timeout),
         )
+        env.update(preset.get("env", {}))
         result["serve_env"] = {
             key: env[key]
             for key in (
@@ -246,7 +250,7 @@ def run_preset(preset: dict, checkpoint: Path, args, available_cards: int) -> di
                 try:
                     request_json(endpoint + "/health")
                     models = request_json(endpoint + "/v1/models")
-                    if preset["key"] in {m["id"] for m in models["data"]}:
+                    if model_name in {m["id"] for m in models["data"]}:
                         break
                 except (urllib.error.URLError, TimeoutError, OSError):
                     pass
@@ -258,7 +262,7 @@ def run_preset(preset: dict, checkpoint: Path, args, available_cards: int) -> di
 
             def generate(index: int) -> dict:
                 payload = {
-                    "model": preset["key"],
+                    "model": model_name,
                     "messages": [
                         {
                             "role": "user",
@@ -269,7 +273,7 @@ def run_preset(preset: dict, checkpoint: Path, args, available_cards: int) -> di
                             ),
                         }
                     ],
-                    "temperature": 0,
+                    "temperature": preset.get("temperature", 0),
                     "seed": 0,
                     "max_completion_tokens": args.max_tokens,
                 }
@@ -280,7 +284,7 @@ def run_preset(preset: dict, checkpoint: Path, args, available_cards: int) -> di
                     timeout=args.request_timeout,
                 )
                 write_json(output / f"response-{index}.json", response)
-                validate_completion(response, preset["key"])
+                validate_completion(response, model_name)
                 return response
 
             # Exercise a first request and a repeat/burst after warm-up. DP16
@@ -315,6 +319,7 @@ def run_preset(preset: dict, checkpoint: Path, args, available_cards: int) -> di
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--device", choices=("810e", "890"), default="810e")
     parser.add_argument("--models", nargs="+", help="preset keys; default: all")
     parser.add_argument("--list", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
@@ -328,7 +333,8 @@ def main() -> int:
     parser.add_argument("--request-timeout", type=int, default=600)
     parser.add_argument("--max-tokens", type=int, default=4096)
     args = parser.parse_args()
-    catalog = {item["key"]: item for item in json.loads(CATALOG.read_text())}
+    catalog_path = CATALOG.with_name(f"ppu_sanity_{args.device}.json")
+    catalog = {item["key"]: item for item in json.loads(catalog_path.read_text())}
     if args.list:
         for key, preset in catalog.items():
             print(f"{key}\t{preset['cards']} cards\t{preset['checkpoint']}")
@@ -363,7 +369,7 @@ def main() -> int:
 
     signal.signal(signal.SIGTERM, interrupted)
     os.chdir("/tmp")
-    environment = runtime_environment()
+    environment = runtime_environment(args.device, catalog_path)
     write_json(args.results_dir / "environment.json", environment)
     results = []
     for key in keys:

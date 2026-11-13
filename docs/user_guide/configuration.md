@@ -82,6 +82,73 @@ quantization and checkpoint-name mappings. These source adaptations still need
 device, model-load and inference verification; see the
 [verification guide](verification_guide.md).
 
+### MegaMoE
+
+On Zhenwu M890, select MegaMoE with expert parallelism:
+
+```bash
+vllm serve /path/to/deepseek-v41 \
+  --enable-expert-parallel --moe-backend deep_gemm_mega_moe
+```
+
+The mode selects the activation precision for MXFP4 routed expert weights.
+All three modes return BF16 outputs. Install a
+[DeepGEMM-for-sail](https://github.com/t-head/DeepGEMM-for-sail) build exposing
+the selected kernel and its weight transform, where applicable.
+
+| Mode | `VLLM_SAIL_MEGA_MOE_MMA_TYPE` | Activation | Expert dimensions |
+| --- | --- | --- | --- |
+| W4A4 | `mxf4xmxf4` | SwiGLU, SiTU | Hidden ≥ 2048 and divisible by 512. Intermediate divisible by 64. |
+| W4A8 (default) | `fp8xmxfp4` | SwiGLU, SiTU | Hidden divisible by 256. Intermediate divisible by 128. |
+| W4A16 | `bf16xmxfp4` | SiTU | Hidden divisible by 256. Intermediate divisible by 128. |
+
+DeepSeek V4/V4.1 uses SwiGLU and can select W4A4 or W4A8. Kimi K3's native
+latent MoE uses SiTU and requires an eligible MXFP4 checkpoint. The platform
+gate checks hardware and DeepGEMM APIs without a model-name allow-list;
+expert construction checks the actual geometry and activation. Models without
+`moe_intermediate_size` defer the shape check to expert construction. EPLB is
+accepted; transformed weight banks are refreshed each step when EPLB is active.
+Restart the server to replace checkpoint weights
+with W4A8 or W4A16, whose transformed banks are bound by CUDA graphs. Shared
+experts run as a separate MLP.
+
+Upstream DeepSeek uses GateLinear with fused top-k for small local batches.
+Larger local batches require a DeepGEMM build exposing `bf16_mega_gate`.
+
+`VLLM_SAIL_MOE_BACKEND=deepgemm` continues to select the ordinary PPU DeepGEMM
+expert backend. Use the CLI selection above for MegaMoE.
+
+Indexer precision is independent of the expert mode. On M890, DeepSeek V4
+and V4.1 default to MXFP4 indexer Q/K with BF16 scoring weights. GLM-5 and
+GLM-5-Next retain their FP8 indexers with FP32 scoring weights; GLM-5-Next
+uses the legacy FP8 DeepGEMM API and pads its query heads to at least 32.
+On Zhenwu 810E, the GLM indexer uses INT8. Selecting MXFP4 indexer cache
+explicitly is supported only for DeepSeek V4/V4.1 on M890. These format
+rules do not enable MegaMoE for GLM's ordinary FusedMoE path.
+
+The v0.33 integration retains upstream's `SparseAttnIndexer` for dense
+scoring, including candidate masking. V4/V4.1 query producers use the selected
+operator's `weights_dtype` contract. The separate candidate-only
+`SparseMQAIndexer` path can be enabled for DeepSeek V4.1 on M890 with
+`--attention-config '{"indexer_sparse_logits":true,"indexer_kv_dtype":"mxfp4"}'`.
+It requires the SAIL DeepGEMM sparse APIs, the `deep_select==1.0.0` wheel,
+`VLLM_SAIL_USE_DEEPSELECT=1` (default), and top-k backend `auto` or
+`deep_select`. The candidate-source layer still uses dense scoring; later
+indexers score only its candidate blocks and return request-local token indices.
+
+This path requires 32 indexer heads, head dimension 128, candidate blocks of
+8/16/32 positions, and a power-of-two candidate count yielding 4–4096 sparse
+blocks divisible by four. Top-k must fit the candidate width and be at most
+4096; upstream DeepSelect row-alignment constraints still apply. Context
+parallelism and non-MXFP4 indexer caches are rejected. Missing or disabled
+dependencies fail at startup instead of silently selecting dense scoring.
+Keep the option disabled to use the dense indexer. PPU inference correctness
+and performance for the candidate-only path still require device validation.
+
+Prefill chunking retains upstream's chunker and BF16 budget conversion for the
+sparse backend. The PPU sparse builder includes SAIL's physical row padding in
+that budget; the dense path keeps the conservative upstream FP32 budget.
+
 ## Compatibility controls
 
 For FP8/BF16 conversion and recipe selection, see [Online quantization](online_quantization.md).

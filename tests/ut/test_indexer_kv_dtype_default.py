@@ -16,13 +16,18 @@ class AttentionConfig:
         return default if self.indexer_kv_dtype == "auto" else self.indexer_kv_dtype
 
 
-def config(value):
-    return NS(attention_config=AttentionConfig(value))
+def config(value, model_type="deepseek_v4"):
+    return NS(
+        attention_config=AttentionConfig(value),
+        model_config=NS(hf_text_config=NS(model_type=model_type)),
+    )
 
 
 @pytest.fixture
 def installed_indexer(modules, patch_utils_module):
-    def load(capability, *, ppu=True):
+    def load(
+        capability, *, ppu=True, consumer_name="vllm.models.deepseek_v41.attention"
+    ):
         calls = []
         platform = NS(
             is_ppu=lambda: ppu, is_device_capability=lambda cap: capability == cap
@@ -50,6 +55,9 @@ def installed_indexer(modules, patch_utils_module):
             def update_draft_decode_metadata(self, metadata):
                 raise AssertionError("not refreshing draft metadata in dtype test")
 
+            def _prepare_decode_tensors(self, *args, **kwargs):
+                raise AssertionError("not preparing decode tensors in dtype test")
+
         def upstream(value):
             calls.append(value)
             return "upstream"
@@ -61,13 +69,37 @@ def installed_indexer(modules, patch_utils_module):
             get_paged_mqa_logits_metadata=lambda *args, **kwargs: None,
             dsa_indexer_uses_fp4=upstream,
             _supports_flattened_device_query_lens=lambda: False,
+            _supports_varlen_paged_mqa_logits=lambda: False,
             DSA_INDEXER_KV_DTYPES=("fp8", "mxfp4"),
         )
+        consumer = modules(consumer_name, dsa_indexer_uses_fp4=upstream)
         patch = load_patch("vllm_sail/patch/enhancement/attention/mla_indexer.py")
         assert provider.dsa_indexer_uses_fp4 is patch.dsa_indexer_uses_fp4
+        assert consumer.dsa_indexer_uses_fp4 is patch.dsa_indexer_uses_fp4
+        target = f"{consumer_name}.dsa_indexer_uses_fp4"
+        assert (
+            patch_utils_module.original_of(consumer.dsa_indexer_uses_fp4, target)
+            is upstream
+        )
+        with pytest.raises(RuntimeError, match="already"):
+            patch_utils_module.patch(
+                consumer_name,
+                "dsa_indexer_uses_fp4",
+                reason="Reject duplicate capability rebinding.",
+                affected_versions=">=0.33.0,<0.34.0",
+                remove_when="The consumer resolves the provider dynamically.",
+            )(lambda config: False)
         return provider.dsa_indexer_uses_fp4, calls
 
     return load
+
+
+def test_preloaded_sparse_metadata_uses_ppu_fp4_capability(installed_indexer):
+    uses_fp4, calls = installed_indexer(
+        89, consumer_name="vllm.v1.attention.backends.mla.sparse_indexer"
+    )
+    assert uses_fp4(config("mxfp4", "deepseek_v41")) is True
+    assert calls == []
 
 
 @pytest.mark.parametrize(
@@ -92,6 +124,27 @@ def test_mxfp4_stays_rejected_below_sm_89(installed_indexer):
     uses_fp4, _ = installed_indexer(80)
     with pytest.raises(ValueError, match="requires capability sm_89"):
         uses_fp4(config("mxfp4"))
+
+
+@pytest.mark.parametrize(
+    "model_type", ["deepseek_v4", "deepseek_v41", "deepseek_v41_text"]
+)
+def test_mxfp4_default_is_available_to_both_deepseek_producers(
+    installed_indexer, model_type
+):
+    uses_fp4, _ = installed_indexer(89)
+    assert uses_fp4(config("auto", model_type)) is True
+
+
+@pytest.mark.parametrize("model_type", ["glm5", "glm5_next", "deepseek_v3", "kimi_k3"])
+def test_fixed_fp8_models_do_not_inherit_deepseek_mxfp4_metadata(
+    installed_indexer, model_type
+):
+    uses_fp4, _ = installed_indexer(89)
+    assert uses_fp4(config("auto", model_type)) is False
+    assert uses_fp4(config("fp8", model_type)) is False
+    with pytest.raises(ValueError, match="requires DeepSeek V4 or V4.1"):
+        uses_fp4(config("mxfp4", model_type))
 
 
 def test_non_ppu_delegates_to_upstream(installed_indexer):

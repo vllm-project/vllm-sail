@@ -87,6 +87,10 @@ def installed(monkeypatch, patch_utils_module):
     platform.is_device_capability = lambda cap: cap == platform.capability
     module("vllm.platforms", current_platform=platform)
     module(
+        "vllm.logger",
+        init_logger=lambda name: types.SimpleNamespace(info_once=lambda *a, **k: None),
+    )
+    module(
         "torch",
         float32="fp32",
         uint8="uint8",
@@ -94,7 +98,9 @@ def installed(monkeypatch, patch_utils_module):
         bfloat16="bf16",
         ops=types.SimpleNamespace(
             vllm=types.SimpleNamespace(
-                ppu_deepseek_v4_dequant_gather=operation("gather810")
+                ppu_deepseek_v4_dequant_gather=operation("gather810"),
+                ppu_deepseek_v41_mxfp8_dequant_gather=operation("gather810_mxfp8"),
+                ppu_deepseek_v41_nvfp4_dequant_gather=operation("gather810_nvfp4"),
             )
         ),
     )
@@ -117,9 +123,11 @@ def installed(monkeypatch, patch_utils_module):
         tokens_per_state: int = 2
         block_size: int = 256
         page_size_padded: int | None = 17280
+        block_stride_alignment: int | None = None
 
     class Cache:
         compress_ratio = 2
+        sparse_logits = False
         n_head = 64
         q_head_dim = 128
 
@@ -129,6 +137,7 @@ def installed(monkeypatch, patch_utils_module):
     class Indexer:
         def __init__(self, cache):
             self.k_cache, self.n_head, self.head_dim = cache, 64, 128
+            self.use_fp4_kv = False
 
     class Embedding:
         lookup = operation("lookup_upstream")
@@ -136,6 +145,15 @@ def installed(monkeypatch, patch_utils_module):
     nvidia = type("NvidiaAttention", (), {})
     ppu = type("PPUAttention", (), {})
     module(BASE + ".nvidia.flashmla", DeepseekV4FlashMLAAttention=nvidia)
+    module(
+        BASE + ".nvidia.flash_mla_mega_attn",
+        DeepseekV4MegaAttnAttention=type("NvidiaMegaAttention", (), {}),
+    )
+    module(
+        PLUGIN + ".flash_mla_mega_attn",
+        PPUDeepseekV4MegaAttnAttention=type("PPUMegaAttention", (), {}),
+        fused_gate=lambda config: (False, "INT8 baseline fixture"),
+    )
     sharing = types.SimpleNamespace(available=True, calls=[])
 
     def can_share(layout, block_size=32):
@@ -145,9 +163,22 @@ def installed(monkeypatch, patch_utils_module):
     class Engram:
         _create_embedding = operation("embedding_upstream")
 
+    checkpoint = {}
+
+    def safetensors_metadata(model, revision=None):
+        calls.append(("safetensors_metadata", (model,), {"revision": revision}))
+        return checkpoint
+
+    module(
+        "vllm.transformers_utils.config",
+        get_safetensors_params_metadata=safetensors_metadata,
+    )
+
     config = types.SimpleNamespace(
         quant_config=types.SimpleNamespace(get_name=lambda: "compressed-tensors"),
         model_config=types.SimpleNamespace(
+            model="/ckpt/v41-w8a8",
+            revision=None,
             hf_config=types.SimpleNamespace(
                 model_type="deepseek_v41",
                 quantization_config={
@@ -173,7 +204,7 @@ def installed(monkeypatch, patch_utils_module):
                         },
                     },
                 },
-            )
+            ),
         ),
         engram_config=types.SimpleNamespace(
             cpu_offload=True, dp_shared_memory=True, use_thp=False
@@ -242,6 +273,10 @@ def installed(monkeypatch, patch_utils_module):
     )
     module(PLUGIN + ".ops.latent_store", rope_quant_insert=operation("store810"))
     module(PLUGIN + ".ops.engram_lookup", lookup=operation("lookup810"))
+    module(
+        PLUGIN + ".ops.cache_gather",
+        register_ops=operation("register_v41_gather"),
+    )
 
     def load(name, relative):
         spec = importlib.util.spec_from_file_location(name, ROOT / relative)
@@ -278,6 +313,7 @@ def installed(monkeypatch, patch_utils_module):
         nvidia=nvidia,
         sharing=sharing,
         config=config,
+        checkpoint=checkpoint,
         resolve=resolve,
     )
 
@@ -381,6 +417,7 @@ def test_selector_cache_and_engram(installed, cap):
 def test_fp8_main_cache_decoding_does_not_enable_int8(
     installed, record_bytes, ppu, cap, use_fnuz
 ):
+    """Only 810E software-decodes, and each record width keeps its own kernel."""
     state = installed
     state.config.quant_config = None
     state.platform.ppu, state.platform.capability = ppu, cap
@@ -388,15 +425,18 @@ def test_fp8_main_cache_decoding_does_not_enable_int8(
     assert state.patch._uses_int8() is False
     cache = types.SimpleNamespace(dtype="uint8", shape=(2, 64, record_bytes))
     args = (0, cache, 2, None, 4, 64, 3)
-    selected = ppu and not use_fnuz and record_bytes in (528, 584)
+    selected = ppu and cap == (8, 0) and not use_fnuz
+    software = {584: "gather810", 528: "gather810_mxfp8", 288: "gather810_nvfp4"}
     consumer = state.modules[BASE + ".nvidia.prefill"].dequantize_and_gather_k_cache
     assert consumer(*args, use_fnuz=use_fnuz) == (
-        "gather810" if selected else "gather_upstream"
+        software[record_bytes] if selected else "gather_upstream"
     )
     assert state.calls[-1][1] == args
     assert state.calls[-1][2] == (
         {} if selected else dict(use_fnuz=use_fnuz, max_gather_len=None)
     )
+    if selected and record_bytes in (528, 288):
+        assert state.calls[-2][0] == "register_v41_gather"
     assert state.patch.fused_indexer_q_rope_quant(*range(6)) == "q_upstream"
     assert state.patch.indexer_k_norm_rope_store(*range(8), False) == "k_upstream"
 
@@ -418,16 +458,8 @@ def test_int8_main_cache_keeps_584_byte_contract(installed, record_bytes):
         )
 
 
-@pytest.mark.parametrize(
-    "record_bytes,fp8_dim,bf16_dim,scale_dim,quant_block",
-    [(528, 512, 0, 16, 32), (584, 448, 64, 8, 64)],
-)
-def test_software_main_cache_launch_preserves_plane_geometry(
-    record_bytes, fp8_dim, bf16_dim, scale_dim, quant_block
-):
+def _planar_dispatch(calls):
     from tests.support.source import function
-
-    calls = []
 
     class Kernel:
         def __getitem__(self, grid):
@@ -436,15 +468,18 @@ def test_software_main_cache_launch_preserves_plane_geometry(
 
             return launch
 
-    dispatch = function(
+    return function(
         "vllm_sail/models/deepseek_v4/ops/cache.py",
         "_dequantize_and_gather_k_cache_triton",
         {"_dequantize_and_gather_k_kernel_sm80": Kernel()},
     )
+
+
+def test_software_main_cache_launch_preserves_plane_geometry():
+    calls = []
+    dispatch = _planar_dispatch(calls)
     out = types.SimpleNamespace(stride=lambda dim: (102400, 1024)[dim])
-    cache = types.SimpleNamespace(
-        shape=(4, 64, record_bytes), stride=lambda dim: 64 * record_bytes + 512
-    )
+    cache = types.SimpleNamespace(shape=(4, 64, 584), stride=lambda dim: 64 * 584 + 512)
     seq_lens = types.SimpleNamespace(shape=(2,))
     table = types.SimpleNamespace(shape=(2, 4))
     dispatch(out, cache, seq_lens, None, table, 64, 3)
@@ -453,19 +488,36 @@ def test_software_main_cache_launch_preserves_plane_geometry(
     assert args == (out, 102400, 1024, cache, seq_lens, table, 3, None)
     assert kwargs == dict(
         max_blocks_per_seq=4,
-        fp8_dim=fp8_dim,
-        bf16_dim=bf16_dim,
-        scale_dim=scale_dim,
-        quant_block=quant_block,
+        fp8_dim=448,
+        bf16_dim=64,
+        scale_dim=8,
+        quant_block=64,
         cache_block_size=64,
-        token_data_size=fp8_dim + bf16_dim * 2,
-        block_stride=64 * record_bytes + 512,
+        token_data_size=576,
+        block_stride=64 * 584 + 512,
         output_dim=512,
         fp8_max=448.0,
-        n_quant_blocks=fp8_dim // quant_block,
+        n_quant_blocks=7,
     )
-    cache.shape = (4, 64, 132)
-    with pytest.raises(ValueError, match="528- or 584-byte"):
+    assert not calls
+
+
+@pytest.mark.parametrize("record_bytes", [528, 288, 132])
+def test_software_planar_gather_rejects_interleaved_records(record_bytes):
+    """The planar V4 kernel must never silently read a V4.1 interleaved record.
+
+    Regression guard for the 528B branch that reused the planar address formula
+    and misread every token's values and scales.
+    """
+    calls = []
+    dispatch = _planar_dispatch(calls)
+    out = types.SimpleNamespace(stride=lambda dim: (102400, 1024)[dim])
+    cache = types.SimpleNamespace(
+        shape=(4, 64, record_bytes), stride=lambda dim: 64 * record_bytes + 512
+    )
+    seq_lens = types.SimpleNamespace(shape=(2,))
+    table = types.SimpleNamespace(shape=(2, 4))
+    with pytest.raises(ValueError, match="584-byte V4 record"):
         dispatch(out, cache, seq_lens, None, table, 64, 3)
     assert not calls
 
@@ -528,6 +580,36 @@ def test_int8_engram_factory_and_non_quant_isolation(installed, cap, shared, use
     assert (
         state.modules[BASE + ".common.engram"].can_share_engram_tables(layout) is False
     )
+
+
+def test_w8a8_engram_follows_checkpoint_table_dtype(installed):
+    # W8A8 Linear exports may keep Engram as MXFP8 (E4M3 + E8M0 block scales).
+    state = installed
+    state.checkpoint.update(
+        {
+            "layers.1.engram.embed.weight": {"dtype": "I8"},
+            "layers.1.engram.embed.scale": {"dtype": "F32"},
+            "model.layers.14.engram.embed.weight": {"dtype": "F8_E4M3"},
+            "model.layers.14.engram.embed.scale": {"dtype": "F8_E8M0"},
+            "__metadata__": {"format": "pt"},
+        }
+    )
+    layout = types.SimpleNamespace(
+        layer_ids=[1, 14, 30],
+        num_embeddings=[123, 456, 789],
+        head_dim=256,
+        primes=[[[60, 63]], [[200, 256]], [[300, 489]]],
+    )
+    assert state.engram._create_embedding(None, layout, 0) == "embedding810"
+    assert state.calls[-1][2]["weight_dtype"] == "int8"
+    assert state.engram._create_embedding(None, layout, 1) == "embedding_upstream"
+    # Unknown tables (no safetensors headers) keep the model-level W8A8 decision.
+    assert state.engram._create_embedding(None, layout, 2) == "embedding810"
+    probes = [call for call in state.calls if call[0] == "safetensors_metadata"]
+    assert probes == [("safetensors_metadata", ("/ckpt/v41-w8a8",), {"revision": None})]
+    state.config.quant_config = None
+    state.resolve()
+    assert state.engram._create_embedding(None, layout, 0) == "embedding_upstream"
 
 
 @pytest.mark.parametrize(
@@ -806,6 +888,7 @@ def sparse_indexer(installed):
     from tests.support.source import function
 
     state = installed
+    state.config.model_config.max_model_len = 32
     state.config.parallel_config = types.SimpleNamespace(
         decode_context_parallel_size=1,
         prefill_context_parallel_size=1,
@@ -879,6 +962,8 @@ def sparse_indexer(installed):
         candidate_blocks=None,
         candidate_block_size=0,
         candidate_write=False,
+        compress_ratio=1,
+        max_model_len=32,
     ):
         indexer = Indexer.__new__(Indexer)
         cache = types.SimpleNamespace(prefix="v41.indexer", kv_cache=object())
@@ -889,19 +974,50 @@ def sparse_indexer(installed):
             "scale",
             2,
             128,
-            32,
+            max_model_len,
             32,
             object(),
             use_fp4_cache=use_fp4_cache,
             candidate_blocks=candidate_blocks,
             candidate_block_size=candidate_block_size,
             candidate_write=candidate_write,
+            compress_ratio=compress_ratio,
         )
         return indexer
 
     return types.SimpleNamespace(
         construct=construct, calls=calls, namespace=namespace, warmups=warmups
     )
+
+
+@pytest.mark.parametrize("ppu", [False, True])
+@pytest.mark.parametrize("fp4_cache", [False, True])
+def test_dense_indexer_owns_the_ppu_weights_dtype(
+    installed, sparse_indexer, ppu, fp4_cache
+):
+    installed.platform.ppu = ppu
+    indexer = sparse_indexer.construct(use_fp4_cache=fp4_cache)
+    if ppu:
+        assert indexer.weights_dtype == ("bf16" if fp4_cache else "fp32")
+    else:
+        assert not hasattr(indexer, "weights_dtype")
+
+
+@pytest.mark.parametrize(
+    "runtime_len,ratio,caller_bound,expected",
+    [
+        (257, 2, 128, 129),
+        (256, 2, 128, 128),
+        (257, 1, 257, 257),
+        (257, 2, 144, 144),
+    ],
+)
+def test_sparse_indexer_window_uses_ceil_without_shrinking_explicit_bounds(
+    sparse_indexer, installed, runtime_len, ratio, caller_bound, expected
+):
+    installed.config.model_config.max_model_len = runtime_len
+    indexer = sparse_indexer.construct(compress_ratio=ratio, max_model_len=caller_bound)
+    assert indexer.max_model_len == expected
 
 
 @pytest.mark.parametrize("ppu,contract", [(True, True), (True, False), (False, True)])
@@ -1005,6 +1121,7 @@ def test_indexer_wrapper_forwards_inputs_to_custom_op(
             candidates,
             8,
             candidate_write,
+            indexer.topk_backend,
         )
     ]
 

@@ -18,6 +18,9 @@ Modules, and why each is import-on-install like the rest of the framework:
 * ``deepseek_v4`` — selects the plugin FlashMLA subclass only on PPU; the
   quantization-specific weights mapper remains plugin-local so CUDA behavior
   is unchanged.
+* ``deepseek_v41_mega_mhc`` — routes the V4.1 Mega mHC kernel to the PPU
+  DeepGEMM build, which supports ZW-M890P instead of the upstream SM 10.x
+  family.
 * ``glm5_next_mtp`` — quantization support for the GLM-5.3-Flash MTP draft:
   ``SupportsQuant`` in ``Glm5NextMTP``'s bases, a ``hf_to_vllm_mapper`` that
   strips the checkpoint's tower prefix (``model.language_model.layers.N.`` ->
@@ -45,10 +48,12 @@ from vllm_sail.patch.enhancement.models import (
     deepseek_v4,  # noqa: F401
     deepseek_v4_cache,  # noqa: F401
     deepseek_v4_compressor,  # noqa: F401
+    deepseek_v4_graph_warmup,  # noqa: F401
     deepseek_v4_metadata,  # noqa: F401
     deepseek_v41,  # noqa: F401
     deepseek_v41_engram,  # noqa: F401
     deepseek_v41_indexer,  # noqa: F401
+    deepseek_v41_mega_mhc,  # noqa: F401
     glm5_next,  # noqa: F401
     glm5_next_mtp,  # noqa: F401
     kimi_k3,  # noqa: F401
@@ -57,5 +62,6 @@ from vllm_sail.patch.enhancement.models import (
     moe_marlin_gate,  # noqa: F401
     qwen3_moe,  # noqa: F401
     qwen3_next,  # noqa: F401
+    qwen4_qsa_quant,  # noqa: F401
     step3p5_mtp,  # noqa: F401
 )

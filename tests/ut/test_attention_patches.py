@@ -107,10 +107,6 @@ _ATTENTION_TARGETS = (
     ),
     (
         "vllm.v1.attention.backends.mla.indexer",
-        "DeepseekV32IndexerMetadataBuilder._split_indexer_prefill_chunks",
-    ),
-    (
-        "vllm.v1.attention.backends.mla.indexer",
         "DeepseekV32IndexerMetadataBuilder.__init__",
     ),
     (

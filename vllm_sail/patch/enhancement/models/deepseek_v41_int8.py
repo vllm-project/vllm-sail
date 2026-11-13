@@ -104,17 +104,51 @@ def dequantize_and_gather_k_cache(out, k_cache, seq_lens, gather_lens, block_tab
             out, k_cache, seq_lens, gather_lens, block_table, block_size, offset,
         )
     # PPU MODIFICATION: begin
-    # Decode PPU FP8/MXFP8 main caches in software without enabling INT8 Q/K.
-    # Match existing layouts; delegate FNUZ, NVFP4 and non-PPU platforms.
+    # Software-decode the packed records only where Triton cannot compile the
+    # upstream hardware fp8 bitcast: Zhenwu 810E (capability 8.0). ZW-M890P
+    # (8.9) and non-PPU platforms keep the upstream dispatcher, which already
+    # selects one kernel per record width.
+    # Each width needs its own kernel: the 584B V4 record is planar (whole value
+    # plane, then whole scale plane) while the 528B/288B V4.1 records are
+    # interleaved (each token's scales follow its own values). Sharing the
+    # planar kernel with an interleaved record silently misreads every token.
+    # ``max_gather_len`` only sizes the upstream grid, so the fixed-width
+    # software grid below does not need it.
     if (
         current_platform.is_ppu()
+        and current_platform.is_device_capability((8, 0))
         and not use_fnuz
         and k_cache.dtype == torch.uint8
-        and k_cache.shape[-1] in (528, 584)
     ):
-        return torch.ops.vllm.ppu_deepseek_v4_dequant_gather(
-            out, k_cache, seq_lens, gather_lens, block_table, block_size, offset,
-        )
+        record_bytes = k_cache.shape[-1]
+        if record_bytes == 584:
+            return torch.ops.vllm.ppu_deepseek_v4_dequant_gather(
+                out,
+                k_cache,
+                seq_lens,
+                gather_lens,
+                block_table,
+                block_size,
+                offset,
+            )
+        if record_bytes in (528, 288):
+            from vllm_sail.models.deepseek_v41.ops.cache_gather import register_ops
+
+            register_ops()
+            operation = (
+                torch.ops.vllm.ppu_deepseek_v41_mxfp8_dequant_gather
+                if record_bytes == 528
+                else torch.ops.vllm.ppu_deepseek_v41_nvfp4_dequant_gather
+            )
+            return operation(
+                out,
+                k_cache,
+                seq_lens,
+                gather_lens,
+                block_table,
+                block_size,
+                offset,
+            )
     # PPU MODIFICATION: end
     return _gather(out, k_cache, seq_lens, gather_lens, block_table, block_size,
                    offset, use_fnuz=use_fnuz, max_gather_len=max_gather_len)

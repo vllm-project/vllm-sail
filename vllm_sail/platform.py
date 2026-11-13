@@ -244,9 +244,33 @@ class PPUPlatform(NvmlCudaPlatform):
         normalize_expert_dtype(vllm_config)
 
         if vllm_config.kernel_config.moe_backend == "deep_gemm_mega_moe":
-            raise ValueError(
-                "PPU DeepGEMM does not support MegaMoE; select ppu_deep_gemm or auto."
+            from vllm_sail import envs as sail_envs
+            from vllm_sail.utils.deep_gemm_mega import check_mega_moe_supported
+
+            config = vllm_config.model_config.hf_text_config
+            mma_type = sail_envs.VLLM_SAIL_MEGA_MOE_MMA_TYPE
+            if getattr(config, "expert_dtype", "fp4") != "fp4":
+                raise ValueError(
+                    "SAIL MegaMoE requires MXFP4 experts (expert_dtype=fp4)."
+                )
+
+            import torch
+
+            # Models without moe_intermediate_size in their config skip the
+            # shape gate here; the expert-layer check re-runs it with the real
+            # geometry.
+            check_mega_moe_supported(
+                torch.device("cuda", torch.cuda.current_device()),
+                config.hidden_size,
+                getattr(config, "moe_intermediate_size", None),
+                mma_type,
             )
+            # This is an early gate with config-level sizes; every model re-runs
+            # the hardware/shape/activation/API checks at expert construction
+            # with its real (latent, padded) geometry. Kimi, for instance,
+            # builds its experts on routed_expert_hidden_size and padded
+            # dimensions that differ from the config-level hidden size.
+            logger.info_once("SAIL DeepGEMM MegaMoE selected MMA type %s.", mma_type)
 
         compilation_config = vllm_config.compilation_config
         attention_config = vllm_config.attention_config

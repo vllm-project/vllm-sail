@@ -48,7 +48,10 @@ def kpool(modules):
                 return "upstream-fp8", self.dcp_world_size, topk_backend
 
         modules(
-            "vllm.models.glm5next.nvidia.sparse_indexer", SparseAttnIndexerKpool=Indexer
+            "vllm.models.glm5next.nvidia.sparse_indexer",
+            SparseAttnIndexerKpool=Indexer,
+            fp8_fp4_mqa_logits=lambda *args, **kwargs: "prefill",
+            fp8_fp4_paged_mqa_logits=lambda *args, **kwargs: "decode",
         )
         for name in (
             "vllm.models.glm5next.sparse_indexer",
