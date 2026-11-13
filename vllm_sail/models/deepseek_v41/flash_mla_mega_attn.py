@@ -13,9 +13,11 @@ through ``flash_mla_cuda``). This module mirrors the upstream layer for PPU:
   without the fused API never breaks module import or the selector);
 * the PPU API allocates and *returns* ``(out_fp8, out_sf, ...)`` instead of
   writing in place into caller-provided buffers, so results are copied into
-  the pre-allocated ``QuantizedActivation`` token slices (same MN-major
-  packed-UE8M0 scale layout on both sides; ``copy_`` is element-correct even
-  when the per-chunk aligned strides differ);
+  the pre-allocated ``QuantizedActivation`` token slices (``copy_`` is
+  element-correct even when the per-chunk aligned strides differ). The scale
+  side of that contract has two arms, selected per call by
+  ``VLLM_SAIL_FUSED_ATTN_PER_TOKEN_SCALE`` — see "PR#59 output scale arms"
+  below;
 * ``backend_cls`` stays ``FLASHMLA_SPARSE_DSV41`` (identical metadata and KV
   geometry per upstream's own note) and ``packed_kv_cache_dtype`` defaults to
   ``fp8_ds_mla``: the fused decode kernel reads the 528B V4.1 MXFP8 record for
@@ -75,22 +77,53 @@ output slots (TP8: 8 local heads zero-padded to 64); under TP8
 weight-shape assertion below fails loudly printing n_local_groups /
 n_wv_group / weight.shape / data.shape — never a silent 1-group slice.
 
+PR#59 output scale arms (FlashMLA-for-sail 7bce34f, "add channel-wise output and
+runtime format selection"): PR#59 keeps every public Python signature and adds a
+second output FP8 scale format, chosen at call time by ``num_per_channels``.
+``out_fp8``'s physical layout is unchanged in both arms (32-element chunks
+interleaved across the 8 heads of a WV group); only the scale differs.
+
+* default, ``VLLM_SAIL_FUSED_ATTN_PER_TOKEN_SCALE=0`` — the PR#54 contract:
+  ``num_per_channels=32`` with ``use_tma_aligned_col_major_sf=round_sf=
+  use_packed_ue8m0=True``. ``out_sf`` is int32 ``[T, G, D/128]``, four UE8M0
+  bytes per word, MN-major. Byte-identical behaviour to the pre-PR#59 wheel.
+* opt-in, ``VLLM_SAIL_FUSED_ATTN_PER_TOKEN_SCALE=1`` — ``num_per_channels=4096``
+  (= ``WV_GROUP_SIZE * _HEAD_DIM_V``) with all three flags **False**. ``out_sf``
+  is a contiguous **float32** ``[T, G, 1]`` holding the exact dequantization
+  scale ``max(1e-4, amax)/448`` per token and WV group, so ``_o_proj``
+  multiplies instead of unpacking UE8M0. The kernel hard-requires SM89 for this
+  arm (``TORCH_CHECK(!per_token_scale || minor == 9)``) and rejects mixed flag
+  combinations; ``fused_gate`` closes with ``gate-per-token-cap`` on 8.0.
+
+Because the two arms need different scale buffers, ``_alloc_attn_out`` is
+overridden to allocate the float32 ``[T, G, 1]`` buffer (tagged
+``kFp8DynamicTokenSym``) for the per-token arm and to delegate to upstream
+``alloc_mega_attn_output`` otherwise. ``_o_proj`` and ``_dequant_fused_output``
+are format-aware and assert the arm's dtype/shape loudly; there is no silent
+fallback and no re-quantization of the FP32 scale back to UE8M0 (that would
+discard the precision the arm exists to keep). The switch is read live, so an
+A/B run flips only the environment variable on one code tree and one wheel.
+
 Selection is gated by ``fused_gate`` (env switch, KV-record switch, platform,
-capability, the opt-in NVFP4 capability/top-k checks, wheel capability probe,
-V4.1 head/group topology); the selector patch in
-``vllm_sail/patch/enhancement/models/deepseek_v41.py`` logs which gate closed
-when the class is not chosen.
+capability, the opt-in NVFP4 and per-token-scale capability checks, the NVFP4
+top-k check, wheel capability probe, V4.1 head/group topology); the selector
+patch in ``vllm_sail/patch/enhancement/models/deepseek_v41.py`` logs which gate
+closed when the class is not chosen.
 """
 
 from __future__ import annotations
 
 import importlib.util
+from dataclasses import replace
 
 import torch
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fusion.quant_activation import QuantizedActivation
 from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
     dequant_mxfp8_to_bf16,
+)
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    kFp8DynamicTokenSym,
 )
 from vllm.models.deepseek_v41.common.ops import (
     combine_topk_swa_indices,
@@ -103,6 +136,7 @@ from vllm.models.deepseek_v41.nvidia.flash_mla_mega_attn import (
     _ROPE_DIM,
     DeepseekV4MegaAttnAttention,
     _token_slice,
+    alloc_mega_attn_output,
 )
 from vllm.models.deepseek_v41.sparse_mla import DeepseekV4FlashMLABackend
 from vllm.platforms import current_platform
@@ -117,11 +151,17 @@ logger = init_logger(__name__)
 #: major == 8 && (minor == 0 || minor == 9); minor 9 -> arch 89, else 80).
 _PPU_FUSED_CAPABILITIES = ((8, 0), (8, 9))
 
-#: v1.1: the fused kernel always emits per-32 packed UE8M0 output scales, so
-#: the PPU o_proj contract is the per-32 recipe without TMA-aligned scales
-#: (mirrors vllm_sail/models/deepseek_v41/flashmla.py and the SM100 MXFP8 bmm
-#: kernel's fixed recipe in vllm .../mxfp8/deep_gemm.py:26).
+#: v1.1: the default fused output arm emits per-32 packed UE8M0 scales, so the
+#: PPU o_proj contract is the per-32 recipe without TMA-aligned scales (mirrors
+#: vllm_sail/models/deepseek_v41/flashmla.py and the SM100 MXFP8 bmm kernel's
+#: fixed recipe in vllm .../mxfp8/deep_gemm.py:26). The PPU ``_o_proj`` below
+#: never calls ``fp8_einsum`` — it dequantizes and runs a BF16 bmm — so this
+#: recipe is inert here and stays pinned for both PR#59 output scale arms.
 _PPU_EINSUM_RECIPE = (1, 1, 32)
+
+#: PR#59 per-token arm: one FP32 scale spans a whole WV group's output row, so
+#: the kernel's ``num_per_channels`` must equal that row's width (8 * 512).
+_PER_TOKEN_SCALE_GROUP = WV_GROUP_SIZE * _HEAD_DIM_V
 
 _API = None  # lazy flash_mla.fused_norm_rope_attn_rope_cast module handle
 
@@ -136,16 +176,83 @@ def _fused_api():
     return _API
 
 
-def _dequant_fused_output(data: torch.Tensor, scale: torch.Tensor) -> torch.Tensor:
-    """Exact BF16 dequantization of the fused kernel's packed-MXFP8 output.
+def _per_token_scale() -> bool:
+    """Whether the fused kernel should emit PR#59 per-token FP32 output scales.
 
-    ``data``: ``[T, G, D]`` float8_e4m3fn. ``scale``: ``[T, G, D // 128]``
-    int32, each word holding four UE8M0 bytes, one per 32-dim block, in
-    little-endian byte order (byte j covers dims ``[128*i + 32*j, +32)``).
-    e4m3 (3-bit mantissa) times a power of two is exact in fp32 and in bf16,
-    so this dequantization introduces no rounding of its own.
+    Read live (not cached in ``__init__``) so an A/B run flips only the
+    environment variable: the same code tree, wheel and process layout serve
+    both arms.
+    """
+    return bool(ppu_envs.VLLM_SAIL_FUSED_ATTN_PER_TOKEN_SCALE)
+
+
+def _output_scale_args() -> dict:
+    """The four PR#59 output-format arguments for the selected arm.
+
+    Single source of truth for both kernel call sites: the kernel rejects any
+    mixture of ``num_per_channels`` and the three format flags, so they must
+    never be set independently.
+    """
+    if _per_token_scale():
+        return {
+            "num_per_channels": _PER_TOKEN_SCALE_GROUP,
+            "use_tma_aligned_col_major_sf": False,
+            "round_sf": False,
+            "use_packed_ue8m0": False,
+        }
+    return {
+        "num_per_channels": _QUANT_GROUP,
+        "use_tma_aligned_col_major_sf": True,
+        "round_sf": True,
+        "use_packed_ue8m0": True,
+    }
+
+
+def _call_fused(entry: str, **kwargs):
+    """Call a fused entry point, naming the wheel requirement on a format error.
+
+    A pre-PR#59 wheel hard-checks ``num_per_channels == 32`` and reports only
+    the failed condition. Re-raise that case with the actionable requirement;
+    never swallow or fall back, so a mis-selected arm cannot pass unnoticed.
+    """
+    try:
+        return getattr(_fused_api(), entry)(**kwargs)
+    except RuntimeError as exc:
+        if _per_token_scale() and "num_per_channels" in str(exc):
+            raise RuntimeError(
+                "VLLM_SAIL_FUSED_ATTN_PER_TOKEN_SCALE=1 needs a FlashMLA-for-sail "
+                "PR#59 (7bce34f) or newer flash_mla wheel: the installed wheel "
+                "rejected num_per_channels="
+                f"{_PER_TOKEN_SCALE_GROUP}. Rebuild flash_mla from PR#59, or set "
+                "VLLM_SAIL_FUSED_ATTN_PER_TOKEN_SCALE=0 for the per-32 arm."
+            ) from exc
+        raise
+
+
+def _dequant_fused_output(data: torch.Tensor, scale: torch.Tensor) -> torch.Tensor:
+    """Exact BF16 dequantization of the fused kernel's FP8 output.
+
+    ``data``: ``[T, G, D]`` float8_e4m3fn, whose layout is identical in both
+    PR#59 arms. ``scale`` selects the arm by dtype:
+
+    * int32 ``[T, G, D // 128]`` — per-32 packed UE8M0, each word holding four
+      UE8M0 bytes, one per 32-dim block, in little-endian byte order (byte j
+      covers dims ``[128*i + 32*j, +32)``). e4m3 (3-bit mantissa) times a power
+      of two is exact in fp32 and in bf16, so this introduces no rounding.
+    * float32 ``[T, G, 1]`` — PR#59 per-token arm, the exact dequantization
+      scale ``max(1e-4, amax)/448`` for the whole ``D``-wide WV group row, so
+      it broadcasts over ``D``. The product is rounded to BF16 exactly once,
+      the same single rounding the per-32 arm performs.
     """
     tokens, groups, dim = data.shape
+    if scale.dtype == torch.float32:
+        if scale.shape != (tokens, groups, 1):
+            raise AssertionError(
+                f"fused per-token output scale shape {tuple(scale.shape)} != "
+                f"expected {(tokens, groups, 1)} for data shape "
+                f"{tuple(data.shape)}"
+            )
+        return (data.to(torch.float32) * scale).to(torch.bfloat16)
     if scale.shape != (tokens, groups, dim // 128):
         raise AssertionError(
             f"fused output scale shape {tuple(scale.shape)} != expected "
@@ -195,6 +302,14 @@ def fused_gate(vllm_config) -> tuple[bool, str]:
             f"(ZW-M890P), got {cap.major}.{cap.minor}; the 288B NVFP4 record is "
             f"written with the e2m1 PTX conversion, which SAIL supports on 8.9 "
             f"only"
+        )
+    per_token = ppu_envs.VLLM_SAIL_FUSED_ATTN_PER_TOKEN_SCALE
+    if per_token and (cap.major, cap.minor) != (8, 9):
+        return False, (
+            f"gate-per-token-cap: VLLM_SAIL_FUSED_ATTN_PER_TOKEN_SCALE=1 needs "
+            f"capability 8.9 (ZW-M890P), got {cap.major}.{cap.minor}; the PR#59 "
+            f"per-token FP32 output scale is hard-checked to SM89 "
+            f"(!per_token_scale || minor == 9)"
         )
     if importlib.util.find_spec("flash_mla") is None:
         return False, "gate-wheel: flash_mla not installed"
@@ -251,7 +366,8 @@ def fused_gate(vllm_config) -> tuple[bool, str]:
         f"all gates open: cap={cap.major}.{cap.minor} tp={tp_size} "
         f"local_heads={n_local_heads} padded_heads="
         f"{64 if n_local_heads <= 64 else 128} "
-        f"compressed_kv={'nvfp4_288B' if nvfp4 else 'mxfp8_528B'}"
+        f"compressed_kv={'nvfp4_288B' if nvfp4 else 'mxfp8_528B'} "
+        f"output_scale={'per_token_fp32' if per_token else 'per32_ue8m0'}"
     )
 
 
@@ -288,6 +404,16 @@ class PPUDeepseekV4MegaAttnAttention(DeepseekV4MegaAttnAttention):
                 "page_block_size*528). Re-measure accuracy and decode latency "
                 "against the 528B arm."
             )
+        if _per_token_scale():
+            logger.warning_once(
+                "[vllm_sail] PR#59 per-token FP32 output scales opted in "
+                "(num_per_channels=%d, float32 [tokens, n_wv_group, 1] instead "
+                "of packed UE8M0). Requires a FlashMLA-for-sail PR#59 (7bce34f) "
+                "or newer wheel and capability 8.9. The scale is exact rather "
+                "than power-of-two rounded, so accuracy is expected to differ "
+                "from the default arm: measure it, do not assume it.",
+                _PER_TOKEN_SCALE_GROUP,
+            )
 
     @classmethod
     def is_available_for(cls, vllm_config) -> bool:
@@ -305,6 +431,30 @@ class PPUDeepseekV4MegaAttnAttention(DeepseekV4MegaAttnAttention):
         if ppu_envs.VLLM_SAIL_PPU_KV_NVFP4:
             return "nvfp4_ds_mla"
         return "fp8_ds_mla"
+
+    def _alloc_attn_out(
+        self, num_tokens: int, hidden_states: torch.Tensor
+    ) -> QuantizedActivation:
+        """Allocate the step buffer pair matching the selected PR#59 arm.
+
+        The default arm keeps upstream's MN-major int32 packed-UE8M0 buffer
+        unchanged. The per-token arm needs a contiguous float32
+        ``[num_tokens, n_wv_group, 1]`` scale instead: the kernel indexes it as
+        ``token * stride(0) + group * stride(1)``, and ``copy_`` from the
+        kernel's own float32 output would fail against an int32 buffer of a
+        different width. The key changes with the layout so any consumer other
+        than this class's ``_o_proj`` fails loudly instead of misreading the
+        scale as packed UE8M0.
+        """
+        out = alloc_mega_attn_output(num_tokens, self.n_wv_group, hidden_states.device)
+        if not _per_token_scale():
+            return out
+        scale = torch.empty(
+            (num_tokens, self.n_wv_group, 1),
+            dtype=torch.float32,
+            device=hidden_states.device,
+        )
+        return replace(out, scale=scale, quant_key=kFp8DynamicTokenSym)
 
     # ---- output projection (v1.1, PPU emulation reality) -------------------
 
@@ -364,9 +514,13 @@ class PPUDeepseekV4MegaAttnAttention(DeepseekV4MegaAttnAttention):
             raise AssertionError(
                 f"fused attn_out.data dtype must be float8_e4m3fn, got {data.dtype}"
             )
-        if scale.dtype != torch.int32:
+        per_token = _per_token_scale()
+        expected_scale_dtype = torch.float32 if per_token else torch.int32
+        if scale.dtype != expected_scale_dtype:
             raise AssertionError(
-                f"fused attn_out.scale dtype must be int32 (packed UE8M0), "
+                f"fused attn_out.scale dtype must be {expected_scale_dtype} "
+                f"({'per-token FP32' if per_token else 'packed UE8M0'} arm, "
+                f"VLLM_SAIL_FUSED_ATTN_PER_TOKEN_SCALE={int(per_token)}), "
                 f"got {scale.dtype}"
             )
         if data.ndim != 3 or data.shape[1] != self.n_wv_group:
@@ -376,12 +530,18 @@ class PPUDeepseekV4MegaAttnAttention(DeepseekV4MegaAttnAttention):
                 f"[n_local_groups={groups}, o_lora_rank={self.o_lora_rank}]"
             )
         dim = data.shape[2]
-        if scale.shape != (data.shape[0], data.shape[1], dim // 128):
+        expected_scale_shape = (
+            (data.shape[0], data.shape[1], 1)
+            if per_token
+            else (data.shape[0], data.shape[1], dim // 128)
+        )
+        if scale.shape != expected_scale_shape:
             raise AssertionError(
                 f"fused attn_out.scale shape {tuple(scale.shape)} != expected "
-                f"{(data.shape[0], data.shape[1], dim // 128)} "
+                f"{expected_scale_shape} "
                 f"[n_local_groups={groups}, n_wv_group={self.n_wv_group}, "
-                f"data.shape={tuple(data.shape)}]"
+                f"data.shape={tuple(data.shape)}, "
+                f"VLLM_SAIL_FUSED_ATTN_PER_TOKEN_SCALE={int(per_token)}]"
             )
         if weight.ndim != 2:
             raise AssertionError(
@@ -494,7 +654,8 @@ class PPUDeepseekV4MegaAttnAttention(DeepseekV4MegaAttnAttention):
                     int(ppu_envs.VLLM_SAIL_PPU_KV_NVFP4),
                     expected,
                 )
-        out_fp8, out_sf, _lse = _fused_api().decode(
+        out_fp8, out_sf, _lse = _call_fused(
+            "decode",
             enable_q_norm=False,  # V4.1 norms qr before wq_b
             rms_norm_eps=0.0,
             token_positions=positions_int32,
@@ -502,10 +663,7 @@ class PPUDeepseekV4MegaAttnAttention(DeepseekV4MegaAttnAttention):
             rope_dim=_ROPE_DIM,
             cos_sin_cache=self.rotary_emb.cos_sin_cache,
             n_wv_group=self.n_wv_group,
-            num_per_channels=_QUANT_GROUP,
-            use_tma_aligned_col_major_sf=True,
-            round_sf=True,
-            use_packed_ue8m0=True,
+            **_output_scale_args(),
             q=q,
             k_cache=swa_kv_cache.unsqueeze(-2),
             indices_in_kvcache=indices,
@@ -622,7 +780,8 @@ class PPUDeepseekV4MegaAttnAttention(DeepseekV4MegaAttnAttention):
                 top_k,
                 self.swa_cache_layer.kv_cache.shape[-1],
             )
-            out_fp8, out_sf, _max_logits, _lse = _fused_api().prefill(
+            out_fp8, out_sf, _max_logits, _lse = _call_fused(
+                "prefill",
                 enable_q_norm=False,
                 rms_norm_eps=0.0,
                 token_positions=positions_int32[qs:qe],
@@ -630,10 +789,7 @@ class PPUDeepseekV4MegaAttnAttention(DeepseekV4MegaAttnAttention):
                 rope_dim=_ROPE_DIM,
                 cos_sin_cache=self.rotary_emb.cos_sin_cache,
                 n_wv_group=self.n_wv_group,
-                num_per_channels=_QUANT_GROUP,
-                use_tma_aligned_col_major_sf=True,
-                round_sf=True,
-                use_packed_ue8m0=True,
+                **_output_scale_args(),
                 q=q[qs:qe],
                 kv=kv_ws.view(-1, 1, q.shape[-1]),
                 indices=combined_indices.unsqueeze(1),
