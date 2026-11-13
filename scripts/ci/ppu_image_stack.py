@@ -107,10 +107,10 @@ def package_versions():
     return versions
 
 
-def constraints_text(versions):
+def constraints_text(versions, protected_packages=PROTECTED_PACKAGES):
     return "".join(
         f"{name}==={versions[name]}\n" if name in versions else f"{name}<0\n"
-        for name in PROTECTED_PACKAGES
+        for name in protected_packages
     )
 
 
@@ -212,11 +212,20 @@ def main():
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--constraints", type=Path)
     parser.add_argument("--require-ppu-headers", action="store_true")
+    parser.add_argument("--allow-runtime-package-updates", action="store_true")
     args = parser.parse_args()
     capture = args.command in ("capture", "prepare")
     if capture and args.constraints is None:
         parser.error(f"{args.command} requires --constraints")
     before = {} if capture else json.loads(args.output.read_text())
+    updatable_packages = (
+        ["deep-gemm", "tokenspeed-mla"]
+        if capture and args.allow_runtime_package_updates
+        else before.get("updatable_packages", [])
+    )
+    protected_packages = tuple(
+        name for name in PROTECTED_PACKAGES if name not in updatable_packages
+    )
     replaced = args.command == "prepare" or before.get("stack_source") == "image+torch"
     if args.command == "prepare":
         install_torch(args.sdk)
@@ -235,13 +244,21 @@ def main():
         args.sdk,
         Path(torch.__file__).parent,
         str(torch.__version__),
-        package_versions(),
+        {
+            name: version
+            for name, version in package_versions().items()
+            if name in protected_packages
+        },
     )
+    if updatable_packages:
+        observed["updatable_packages"] = updatable_packages
     if replaced:
         observed.update(stack_source="image+torch", **TORCH_OVERRIDE)
     if capture:
         args.output.write_text(json.dumps(observed, sort_keys=True, indent=2) + "\n")
-        args.constraints.write_text(constraints_text(observed["packages"]))
+        args.constraints.write_text(
+            constraints_text(observed["packages"], protected_packages)
+        )
         for key in (
             "stack_source",
             "fingerprint_kind",

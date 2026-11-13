@@ -651,6 +651,86 @@ def test_accuracy_script_uses_writable_results_with_read_only_source() -> None:
     )
 
 
+def test_accuracy_installs_runtime_dependencies_from_the_tested_checkout() -> None:
+    text = ACCURACY.read_text()
+    requirements = '-r "${ROOT_DIR}/requirements/ppu.txt"'
+    assert text.index('ppu_image_stack.py" capture') < text.index(requirements)
+    assert text.index(requirements) < text.index('ppu_image_stack.py" verify')
+    assert text.index('ppu_image_stack.py" verify') < text.index(
+        'log "platform self-check"'
+    )
+    assert "--allow-runtime-package-updates" in text
+    assert "set -Eeuo pipefail" in text
+    assert "PIP_INDEX_URL=" not in text
+    steps = _workflow(ACCURACY_WORKFLOW)["jobs"]["accuracy"]["steps"]
+    checkout = next(step for step in steps if step.get("uses") == "actions/checkout@v4")
+    assert checkout["with"]["ref"] == "${{ inputs.pr_head_sha || github.sha }}"
+    assert "source=${source_dir},target=/source,readonly" in RUNTIME.read_text()
+
+
+@pytest.mark.parametrize("pip_exit_code", [0, 23])
+def test_accuracy_dependency_install_preserves_runner_settings_and_fails_closed(
+    tmp_path: Path, pip_exit_code: int
+) -> None:
+    text = ACCURACY.read_text()
+    install = text.index(
+        'log "install tested-branch runtime and accuracy dependencies"'
+    )
+    check = text.index('log "platform self-check"')
+    source = tmp_path / "release checkout"
+    constraints = tmp_path / "image-constraints.txt"
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            """
+set -Eeuo pipefail
+log() { :; }
+python() {
+    printf 'CALL\n%s\n%s\n' "${PIP_INDEX_URL}" "${PIP_CONSTRAINT}"
+    printf '%s\n' "$@"
+    if [[ "$1" == "-m" && "$2" == "pip" ]]; then
+        return "${PIP_EXIT_CODE}"
+    fi
+    return 0
+}
+"""
+            + text[install:check],
+        ],
+        env={
+            **os.environ,
+            "ROOT_DIR": str(source),
+            "RESULTS_DIR": str(tmp_path),
+            "PIP_INDEX_URL": "runner-package-index",
+            "PIP_CONSTRAINT": str(constraints),
+            "PIP_EXIT_CODE": str(pip_exit_code),
+        },
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == pip_exit_code, result.stderr
+    calls = [call.splitlines() for call in result.stdout.split("CALL\n")[1:]]
+    assert calls[0] == [
+        "runner-package-index",
+        str(constraints),
+        "-m",
+        "pip",
+        "install",
+        "-r",
+        str(source / "requirements/ppu.txt"),
+        "-r",
+        str(source / "requirements/dev.txt"),
+        "evalscope==1.14.1",
+    ]
+    assert len(calls) == (1 if pip_exit_code else 3)
+    if not pip_exit_code:
+        assert calls[1][2] == "-c"
+        assert calls[2][2:4] == [
+            str(source / "scripts/ci/ppu_image_stack.py"),
+            "verify",
+        ]
+
+
 def test_accuracy_script_seeds_reviewed_goldens_into_the_writable_tree() -> None:
     """Without the seed every run reports "created" and never compares."""
     text = ACCURACY.read_text()

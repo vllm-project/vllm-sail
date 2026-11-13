@@ -628,7 +628,10 @@ def test_image_stack_rejects_empty_sdk(image_stack, tmp_path):
         image_stack.tree_digest(tmp_path)
 
 
-def test_image_stack_cli_capture_verify_and_refuse_mutation(tmp_path):
+@pytest.mark.parametrize("allow_runtime_updates", [False, True])
+def test_image_stack_cli_capture_verify_and_refuse_mutation(
+    tmp_path, allow_runtime_updates
+):
     sdk = tmp_path / "sdk"
     sdk.mkdir()
     (sdk / "hgcc").write_bytes(b"compiler")
@@ -641,6 +644,10 @@ def test_image_stack_cli_capture_verify_and_refuse_mutation(tmp_path):
     dist = site / "torch-2.13.0.dist-info"
     dist.mkdir()
     (dist / "METADATA").write_text("Name: torch\nVersion: 2.13.0\n")
+    gemm = site / "deep_gemm.dist-info"
+    gemm.mkdir()
+    old_gemm = "Name: deep-gemm\nVersion: 1.1.0+v0.1.0.ppu2.2.0\n"
+    (gemm / "METADATA").write_text(old_gemm)
     output = tmp_path / "stack.json"
     constraints = tmp_path / "constraints.txt"
     script = ROOT / "scripts/ci/ppu_image_stack.py"
@@ -663,13 +670,51 @@ def test_image_stack_cli_capture_verify_and_refuse_mutation(tmp_path):
             cwd=tmp_path,
         )
 
-    captured = run("capture", "--constraints", str(constraints))
+    extra = ["--allow-runtime-package-updates"] if allow_runtime_updates else []
+    captured = run("capture", "--constraints", str(constraints), *extra)
     assert captured.returncode == 0, captured.stderr
     assert "stack_source=image" in captured.stdout
-    assert "torch===2.13.0" in constraints.read_text()
+    constraint_lines = constraints.read_text().splitlines()
+    assert "torch===2.13.0" in constraint_lines
+    assert "flash-attn<0" in constraint_lines
+    snapshot = json.loads(output.read_text())
+    if allow_runtime_updates:
+        assert snapshot["updatable_packages"] == ["deep-gemm", "tokenspeed-mla"]
+        assert "deep-gemm" not in snapshot["packages"]
+        assert not any(line.startswith("deep-gemm") for line in constraint_lines)
+        assert "tokenspeed-mla<0" not in constraint_lines
+    else:
+        assert "updatable_packages" not in snapshot
+        assert "deep-gemm===1.1.0+v0.1.0.ppu2.2.0" in constraint_lines
+        assert "tokenspeed-mla<0" in constraint_lines
     verified = run("verify")
     assert verified.returncode == 0, verified.stderr
     assert "stack_unchanged=true" in verified.stdout
+
+    (gemm / "METADATA").write_text("Name: deep-gemm\nVersion: 1.1.0+v1.1.0.ppu2.2.0\n")
+    tokenspeed = site / "tokenspeed_mla.dist-info"
+    tokenspeed.mkdir()
+    (tokenspeed / "METADATA").write_text("Name: tokenspeed-mla\nVersion: 0.1.2\n")
+    updated = run("verify")
+    if allow_runtime_updates:
+        assert updated.returncode == 0, updated.stderr
+    else:
+        assert updated.returncode != 0
+        assert "image stack changed: packages" in updated.stderr
+    (gemm / "METADATA").write_text(old_gemm)
+    (tokenspeed / "METADATA").unlink()
+    tokenspeed.rmdir()
+
+    (dist / "METADATA").write_text("Name: torch\nVersion: 2.14.0\n")
+    replaced = run("verify")
+    assert replaced.returncode != 0
+    assert "image stack changed: packages" in replaced.stderr
+    (dist / "METADATA").write_text("Name: torch\nVersion: 2.13.0\n")
+    (torch / "__init__.py").write_text('__version__ = "2.13.0"\nchanged = True\n')
+    replaced_tree = run("verify")
+    assert replaced_tree.returncode != 0
+    assert "image stack changed: torch_sha256" in replaced_tree.stderr
+    (torch / "__init__.py").write_text('__version__ = "2.13.0"\n')
     (sdk / "hgcc").write_bytes(b"changed")
     refused = run("verify")
     assert refused.returncode != 0

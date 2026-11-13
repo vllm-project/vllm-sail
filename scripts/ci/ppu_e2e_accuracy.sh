@@ -91,7 +91,7 @@ python "${ROOT_DIR}/scripts/ci/ppu_wheel_manifest.py" verify "${WHEELS_DIR}"
 export PIP_CONSTRAINT="${RESULTS_DIR}/image-constraints.txt"
 python "${ROOT_DIR}/scripts/ci/ppu_image_stack.py" capture \
     --sdk /usr/local/PPU_SDK --output "${RESULTS_DIR}/image-stack.json" \
-    --constraints "${PIP_CONSTRAINT}"
+    --constraints "${PIP_CONSTRAINT}" --allow-runtime-package-updates
 
 # ------------------------------------------------------------------
 log "install wheels"
@@ -106,13 +106,11 @@ mapfile -t sail_wheels < <(
 python -m pip install --no-deps --force-reinstall "${vllm_wheels[0]}"
 python -m pip install --no-deps --force-reinstall "${sail_wheels[0]}"
 
-# Install test dependencies (pytest, etc.)
-PIP_INDEX_URL=https://mirrors.aliyun.com/pypi/simple/ \
-    python -m pip install -r "${ROOT_DIR}/requirements/dev.txt"
-
-# Install accuracy evaluation dependencies (not in dev.txt, needs a real device)
-PIP_INDEX_URL=https://mirrors.aliyun.com/pypi/simple/ \
-    python -m pip install "evalscope==1.14.1"
+log "install tested-branch runtime and accuracy dependencies"
+python -m pip install \
+    -r "${ROOT_DIR}/requirements/ppu.txt" \
+    -r "${ROOT_DIR}/requirements/dev.txt" \
+    "evalscope==1.14.1"
 
 # Verify evalscope is importable
 python -c "from evalscope import TaskConfig, run_task; print('evalscope OK')"
