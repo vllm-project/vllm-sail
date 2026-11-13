@@ -147,6 +147,22 @@ Actions instead of the individual PPU build, pin UT, smoke and gate job checks.
 Keep the CPU and vLLM source checks required. Coordinate this ruleset change with
 the switch to on-demand PPU CI, after verifying the commands on the default branch.
 
+### Preview images and Dockerfile checks
+
+The Preview flow consumes wheels from a successful accuracy nightly, assembles
+and verifies an image, and publishes Preview prereleases only; it does not
+replace the official `PPU CI` or a versioned release. Configuration, permissions
+and first-time enablement are documented in the
+[verification guide](docs/user_guide/verification_guide.md#preview-images-and-minimum-regression).
+
+Dockerfile pull requests run `dockerfile-static` automatically; device
+verification requires a maintainer to trigger `dockerfile-ci.yaml` manually from
+the default branch and pass the Environment approval. It consumes existing
+Preview wheels and does not verify the SAIL sources changed by the PR; the result
+is reported as a separate `dockerfile-ppu` status.
+The Preview distribution channel and the `ci-preview` label route above serve
+different purposes and do not share gate results.
+
 ## Reporting issues
 
 Use the bug or feature request template in the repository's Issues tab. Bug
