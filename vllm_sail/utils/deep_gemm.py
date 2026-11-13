@@ -202,6 +202,11 @@ _int8_gemm_nt_impl: Callable[..., Any] | None = None
 _int8_einsum_impl: Callable[..., Any] | None = None
 _int8_grouped_nopad_impl: Callable[..., Any] | None = None
 _int8_grouped_masked_impl: Callable[..., Any] | None = None
+# PPU MODIFICATION: begin — native A8W4 INT8 (INT4-per-channel x INT8-per-token)
+_int8_int4_grouped_masked_impl: Callable[..., Any] | None = None
+_int8_int4_grouped_nopad_impl: Callable[..., Any] | None = None
+_preprocess_a8w4_weight_impl: Callable[..., Any] | None = None
+# PPU MODIFICATION: end
 _bf16_gemm_nt_impl: Callable[..., Any] | None = None
 _bf16_grouped_nopad_impl: Callable[..., Any] | None = None
 _bf16_grouped_masked_impl: Callable[..., Any] | None = None
@@ -255,6 +260,10 @@ def _lazy_init() -> None:
     global _grouped_masked_impl, _fp8_grouped_nopad_impl
     global _int8_gemm_nt_impl, _int8_einsum_impl
     global _int8_grouped_nopad_impl, _int8_grouped_masked_impl
+    # PPU MODIFICATION: begin — native A8W4 INT8
+    global _int8_int4_grouped_masked_impl, _int8_int4_grouped_nopad_impl
+    global _preprocess_a8w4_weight_impl
+    # PPU MODIFICATION: end
     global _bf16_gemm_nt_impl
     global _bf16_grouped_nopad_impl, _bf16_grouped_masked_impl
     global _fp4_grouped_nopad_impl, _fp4_grouped_fused_impl, _fp4_grouped_masked_impl
@@ -320,6 +329,11 @@ def _lazy_init() -> None:
         or _transform_sf_into_required_layout_impl is not None
         or _moe_align_block_size_impl is not None
         or _activation_and_mul_impl is not None
+        # PPU MODIFICATION: begin — native A8W4 INT8
+        or _int8_int4_grouped_masked_impl is not None
+        or _int8_int4_grouped_nopad_impl is not None
+        or _preprocess_a8w4_weight_impl is not None
+        # PPU MODIFICATION: end
     ):
         return
 
@@ -367,6 +381,15 @@ def _lazy_init() -> None:
     _int8_grouped_masked_impl = getattr(
         _dg, "m_grouped_gemm_int8_int8_bf16_nt_masked", None
     )
+    # PPU MODIFICATION: begin — native A8W4 INT8 (INT4-per-channel x INT8-per-token)
+    _int8_int4_grouped_masked_impl = getattr(
+        _dg, "m_grouped_gemm_int8_int4_bf16_nt_masked", None
+    )
+    _int8_int4_grouped_nopad_impl = getattr(
+        _dg, "m_grouped_gemm_int8_int4_bf16_nt_nopad", None
+    )
+    _preprocess_a8w4_weight_impl = getattr(_dg, "preprocess_a8w4_weight", None)
+    # PPU MODIFICATION: end
     _bf16_gemm_nt_impl = getattr(_dg, "gemm_bf16_bf16_bf16_nt", None)
     _bf16_grouped_nopad_impl = getattr(
         _dg, "m_grouped_gemm_bf16_bf16_bf16_nt_nopad", None
@@ -488,6 +511,42 @@ def int8_m_grouped_gemm_nt_masked(*args, **kwargs):
     if _int8_grouped_masked_impl is None:
         return _missing(*args, **kwargs)
     return _int8_grouped_masked_impl(*args, **kwargs)
+
+
+# PPU MODIFICATION: begin — native A8W4 INT8 (INT4-per-channel x INT8-per-token)
+def int8_int4_m_grouped_gemm_nt_masked(*args, **kwargs):
+    """DeepGemm native masked INT4xINT8 GEMM (810E / AC_PPU0010 only).
+
+    a=(lhs int8 [E,m,k], lhs_scales fp32 [E,m,1]); b=(rhs uint8 portable
+    packed signed-INT4 [E,n,k/2] after preprocess_a8w4_weight, rhs_scales
+    fp32 [E,n,1]); out bf16 [E,m,n]; masked_m int32 [E]; expected_m.
+    Requires k%32==0 and n%8==0. Only rows < masked_m[e] are computed.
+    """
+    _lazy_init()
+    if _int8_int4_grouped_masked_impl is None:
+        return _missing(*args, **kwargs)
+    return _int8_int4_grouped_masked_impl(*args, **kwargs)
+
+
+def int8_int4_m_grouped_gemm_nt_nopad(*args, **kwargs):
+    _lazy_init()
+    if _int8_int4_grouped_nopad_impl is None:
+        return _missing(*args, **kwargs)
+    return _int8_int4_grouped_nopad_impl(*args, **kwargs)
+
+
+def preprocess_a8w4_weight(*args, **kwargs):
+    """Apply the device-specific A8W4 INT8 permutation to portable packed weights.
+
+    The model stores portable packed signed-INT4 uint8 [E,n,k/2]; call this
+    after loading so the masked/nopad INT4xINT8 kernels consume the permuted
+    layout. Mirrors deep_gemm.preprocess_a8w4_weight.
+    """
+    _lazy_init()
+    if _preprocess_a8w4_weight_impl is None:
+        return _missing(*args, **kwargs)
+    return _preprocess_a8w4_weight_impl(*args, **kwargs)
+# PPU MODIFICATION: end
 
 
 def bf16_gemm_nt(*args, **kwargs):
@@ -1301,6 +1360,11 @@ __all__ = [
     "bf16_dense_linear",
     "m_grouped_int8_gemm_nt_nopad",
     "int8_m_grouped_gemm_nt_masked",
+    # PPU MODIFICATION: begin — native A8W4 INT8
+    "int8_int4_m_grouped_gemm_nt_masked",
+    "int8_int4_m_grouped_gemm_nt_nopad",
+    "preprocess_a8w4_weight",
+    # PPU MODIFICATION: end
     "m_grouped_bf16_gemm_nt_nopad",
     "bf16_m_grouped_gemm_nt_masked",
     "m_grouped_fp4_gemm_nt_nopad",

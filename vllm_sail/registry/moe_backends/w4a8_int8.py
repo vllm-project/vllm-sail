@@ -2,10 +2,16 @@
 """Register the PPU W4A8-INT8 backend with the upstream w4a8_int8 MoE oracle.
 
 The public backend name is ``ppu_deep_gemm_w4a8_int8`` and the enum member is
-``BATCHED_PPU_DEEPGEMM``, but the expert GEMM is provided by **acext**
-``fusedmoe_wrapper(use_int8_w4a8=True)``: DeepGemm has no INT4-per-channel x
-INT8-activation entry point. See ``PPUDeepGemmExpertsW4A8Int8`` for the layout
-and weight-application contract.
+``BATCHED_PPU_DEEPGEMM``. The default expert GEMM is DeepGemm's native masked
+``m_grouped_gemm_int8_int4_bf16_nt_masked`` (INT4-per-channel x INT8-per-token,
+810E / AC_PPU0010 only), wrapped by ``PPUDeepGemmExpertsW4A8Int8``. Activations
+dispatch as bf16 and are quantized to INT8 per-token inside the experts; sail's
+DeepEP LL prepare accepts ``defer_input_quant`` for raw bf16 dispatch.
+
+The original acext-based shell is retained as ``PPUAcextW4A8Int8Fallback``
+(回退用, NOT selected by default): B1 proved the acext path is structurally
+blocked by the DeepEP LL defer contract. See the experts classes for the layout
+and weight-application contracts.
 
 Only the batched (DeepEP low-latency) format is registered. A Standard-format
 request deliberately falls through to upstream, which rejects it, rather than
@@ -71,21 +77,25 @@ def _get_priority_backends(moe_config: FusedMoEConfig) -> list[W4A8Int8MoeBacken
         if backend is not W4A8Int8MoeBackend.BATCHED_PPU_DEEPGEMM
     ]
 
-    from vllm_sail.model_executor.layers.fused_moe.experts.acext import (
-        is_acext_supported,
-    )
+    from vllm_sail.utils.deep_gemm import is_deep_gemm_supported
 
     requested = ppu_envs.VLLM_SAIL_MOE_BACKEND
-    # The GEMM is acext's W4A8 JIT kernel, so acext availability is the gate.
-    acext_enabled = is_acext_supported() and (not requested or requested == "acext")
+    # The default GEMM is DeepGemm's native masked INT4xINT8, which is 810E-only
+    # (AC_PPU0010 == (8, 0)). The acext fallback class is retained but not
+    # auto-selected here.
+    native_enabled = (
+        is_deep_gemm_supported()
+        and current_platform.is_device_capability((8, 0))
+        and (not requested or requested == "ppu_deep_gemm_w4a8_int8")
+    )
     ppu_backends = []
-    if acext_enabled and not moe_config.has_bias:
+    if native_enabled and not moe_config.has_bias:
         ppu_backends.append(W4A8Int8MoeBackend.BATCHED_PPU_DEEPGEMM)
     logger.info(
-        "vllm-sail: w4a8_int8 MoE priority backends: %s (acext=%s has_bias=%s "
-        "requested=%s)",
+        "vllm-sail: w4a8_int8 MoE priority backends: %s (native_deepgemm=%s "
+        "has_bias=%s requested=%s)",
         [b.name for b in [*ppu_backends, *backends]],
-        acext_enabled,
+        native_enabled,
         moe_config.has_bias,
         requested,
     )
@@ -162,8 +172,8 @@ def select_w4a8_int8_moe_backend(
         )
         if supported:
             logger.info_once(
-                "Using %s W4A8 Int8 MoE backend (acext fusedmoe_wrapper "
-                "use_int8_w4a8=True)",
+                "Using %s W4A8 Int8 MoE backend (DeepGemm native masked "
+                "m_grouped_gemm_int8_int4_bf16_nt_masked)",
                 requested.value,
             )
             return requested, kernel_cls
@@ -177,8 +187,10 @@ def select_w4a8_int8_moe_backend(
     "convert_to_w4a8_int8_moe_format",
     reason=(
         "Upstream packs INT4 weights into the KleidiAI nibble layout for CPU "
-        "experts; acext consumes the checkpoint's [E, N, K/2] int8 pack with "
-        "per-channel scales directly, so PPU must pass the weights through."
+        "experts; the PPU experts consume the checkpoint's [E, N, K/2] int8 "
+        "pack with per-channel scales (native: uint8 view + device permutation; "
+        "fallback: acext view relabel), so PPU must pass the weights through "
+        "and let the experts class transform them."
     ),
     affected_versions=_AFFECTED,
     remove_when=(

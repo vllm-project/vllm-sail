@@ -1,11 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 """W4A8-INT8 (MixedPrecisionW4) modular-kernel wiring, without torch or a device.
 
-Locks the four behaviours the review asked for:
-  1. the legacy branch still returns None and keeps the 16-argument acext call;
+Default backend is DeepGemm native masked INT4xINT8 (PPUDeepGemmExpertsW4A8Int8);
+the original acext shell is retained as PPUAcextW4A8Int8Fallback (回退用, not
+default). Locks:
+  1. the legacy non-MK branch still returns None and keeps the 16-arg acext call;
   2. MK assembly happens only under DeepEP low-latency + batched activations;
-  3. the acext Q_type comes from explicit constants, never from quant_dtype flags;
-  4. weight parameter names match the names the modular kernel reads.
+  3. the fallback acext Q_type comes from explicit constants, never quant flags;
+  4. weight parameter names match the names the modular kernel reads;
+  5. (B2/D6) portable INT4 pack round-trip, construction shape asserts, native
+     masked flow, allow-defer guard, fallback retention, per-token INT8 quant.
 
 Device-dependent numeric checks are marked ``ppu`` and skipped by
 ``tests/conftest.py`` on CPU; a skip is not evidence of a pass.
@@ -283,12 +287,12 @@ def test_mk_conversion_unpacks_six_values():
 
 
 # ---------------------------------------------------------------------------
-# 3. Q_type is an explicit constant in the MK experts too
+# 3. Q_type is an explicit constant in the acext FALLBACK experts
 # ---------------------------------------------------------------------------
 
 
-def test_mk_experts_qtype_is_literal_constants():
-    node = definition(ROOT / EXPERTS, "PPUDeepGemmExpertsW4A8Int8.apply")
+def test_fallback_experts_qtype_is_literal_constants():
+    node = definition(ROOT / EXPERTS, "PPUAcextW4A8Int8Fallback.apply")
     calls = [
         call
         for call in ast.walk(node)
@@ -308,8 +312,8 @@ def test_mk_experts_qtype_is_literal_constants():
     assert not calls[0].args, "no positional flags: they would be order-fragile"
 
 
-def test_mk_experts_never_reads_quant_config_flags_for_qtype():
-    node = definition(ROOT / EXPERTS, "PPUDeepGemmExpertsW4A8Int8.apply")
+def test_fallback_experts_never_reads_quant_config_flags_for_qtype():
+    node = definition(ROOT / EXPERTS, "PPUAcextW4A8Int8Fallback.apply")
     forbidden = {
         "use_int8_w8a8",
         "use_fp8_w8a8",
@@ -583,3 +587,278 @@ def test_acext_w4a8_batched_numeric_matches_dense_reference():
 def test_deepep_ll_combine_applies_weights_exactly_once():
     """Device oracle: ones fed to acext + Delegate combine must equal legacy."""
     pytest.skip("requires PPU + DeepEP LL; run on na131t-swu110")
+
+
+# ---------------------------------------------------------------------------
+# B2 / D6: native masked INT4xINT8, portable pack, allow-defer, fallback
+# ---------------------------------------------------------------------------
+
+DEEPEP_LL = "vllm_sail/model_executor/layers/fused_moe/prepare_finalize/deepep_ll.py"
+NATIVE = "PPUDeepGemmExpertsW4A8Int8"
+FALLBACK = "PPUAcextW4A8Int8Fallback"
+
+
+def _pack():
+    return function(EXPERTS, "_w4a8_pack_int4_reference", {})
+
+
+def _unpack():
+    return function(EXPERTS, "_w4a8_unpack_int4_reference", {})
+
+
+@pytest.mark.parametrize("seed", [0, 1, 2, 7, 42, 123])
+def test_pack_int4_roundtrip_random_groups(seed):
+    """int8[-8,7] -> portable uint8 -> inverse == original (DeepGemm convention)."""
+    import random
+
+    rng = random.Random(seed)
+    pack, unpack = _pack(), _unpack()
+    for _ in range(8):
+        n = rng.choice([2, 4, 16, 32, 64])
+        values = [rng.randint(-8, 7) for _ in range(n)]
+        packed = pack(values)
+        assert len(packed) == n // 2
+        assert all(0 <= b <= 255 for b in packed)
+        assert unpack(packed) == values
+
+
+def test_pack_int4_boundaries_minus8_and_7():
+    pack, unpack = _pack(), _unpack()
+    for v in (-8, -1, 0, 7):
+        assert unpack(pack([v, v])) == [v, v]
+    # signed two's-complement nibbles: -8 -> 0x8, -1 -> 0xF, 7 -> 0x7
+    assert pack([-8, -8]) == [0x88]
+    assert pack([-1, -1]) == [0xFF]
+    assert pack([7, 7]) == [0x77]
+    assert pack([0, 0]) == [0x00]
+
+
+def test_pack_int4_even_low_odd_high():
+    """Even-K element occupies the low nibble, odd-K the high nibble."""
+    pack = _pack()
+    # values[0]=1 (even, low), values[1]=2 (odd, high) -> 0x21
+    assert pack([1, 2]) == [0x21]
+    assert pack([3, -8]) == [0x83]  # low=3, high=-8&0xF=8
+    assert _unpack()([0x21]) == [1, 2]
+
+
+def test_pack_int4_rejects_out_of_range():
+    pack = _pack()
+    for bad in ([8, 0], [0, -9], [16, 1]):
+        with pytest.raises(AssertionError):
+            pack(bad)
+
+
+def test_pack_int4_rejects_odd_length():
+    with pytest.raises(AssertionError):
+        _pack()([1, 2, 3])
+
+
+def test_model_dims_divisibility_qwen38_flash_next():
+    """Actual config.json dims satisfy gemm.hpp:604 (k%32) / :607 (n%8).
+
+    hidden=2560, moe_intermediate=640. gemm1 K=hidden N=2*inter;
+    gemm2 K=inter N=hidden. EP8 -> 64 local routed experts (group count).
+    """
+    hidden, inter = 2560, 640
+    assert hidden % 32 == 0 and (2 * inter) % 8 == 0  # gemm1
+    assert inter % 32 == 0 and hidden % 8 == 0  # gemm2
+    assert 512 % 8 == 0 and 512 // 8 == 64  # global routed -> local under EP8
+
+
+@pytest.mark.parametrize("hidden,inter", [(2561, 640), (2560, 641), (2560, 636)])
+def test_bad_dims_violate_constraints(hidden, inter):
+    """If real dims ever fail this, stop and report — never pad to fit (D6)."""
+    ok = hidden % 32 == 0 and inter % 32 == 0 and (2 * inter) % 8 == 0 and hidden % 8 == 0
+    assert not ok
+
+
+def test_native_init_asserts_shape_constraints():
+    node = definition(ROOT / EXPERTS, f"{NATIVE}.__init__")
+    src = ast.unparse(node)
+    assert "hidden % 32 == 0" in src
+    assert "inter % 32 == 0" in src
+    # ast.unparse drops redundant parens: (2 * inter) % 8 -> 2 * inter % 8
+    assert "inter % 8 == 0" in src
+    assert "hidden % 8 == 0" in src
+    assert "gemm.hpp:604" in src and "gemm.hpp:607" in src
+
+
+def test_fallback_class_retained_and_not_default():
+    tree = ast.parse((ROOT / EXPERTS).read_text())
+    classes = {n.name for n in ast.walk(tree) if isinstance(n, ast.ClassDef)}
+    assert FALLBACK in classes, "acext fallback must be retained, not deleted"
+    assert NATIVE in classes
+    # fallback docstring marks it 回退用
+    fb = next(n for n in ast.walk(tree) if isinstance(n, ast.ClassDef) and n.name == FALLBACK)
+    assert "回退用" in ast.get_docstring(fb)
+    # default registry resolves the native class, not the fallback
+    reg = definition(ROOT / REGISTRY, "backend_to_kernel_cls")
+    rsrc = ast.unparse(reg)
+    assert NATIVE in rsrc
+    assert FALLBACK not in rsrc
+
+
+def _defer_guard_node(method: str):
+    node = definition(ROOT / DEEPEP_LL, method)
+    guards = [
+        n
+        for n in ast.walk(node)
+        if isinstance(n, ast.If)
+        and any(isinstance(s, ast.Raise) for s in n.body)
+    ]
+    assert guards, f"{method} must keep a defer rejection guard"
+    return guards[0].test
+
+
+def _interp_bool(node, ns):
+    """Allowlisted interpreter for the guard's boolean expression (no eval).
+
+    Handles only BoolOp(and/or), Name, Attribute and Constant — the exact
+    expression language of `defer_input_quant and (self.use_*_dispatch or ...)`.
+    """
+    if isinstance(node, ast.BoolOp):
+        vals = [_interp_bool(v, ns) for v in node.values]
+        return all(vals) if isinstance(node.op, ast.And) else any(vals)
+    if isinstance(node, ast.Name):
+        return ns[node.id]
+    if isinstance(node, ast.Attribute):
+        return getattr(_interp_bool(node.value, ns), node.attr)
+    if isinstance(node, ast.Constant):
+        return node.value
+    raise AssertionError(f"unexpected guard expression node: {ast.dump(node)}")
+
+
+@pytest.mark.parametrize("method", ["DeepEPLLPrepareAndFinalize.prepare_async", "DeepEPLLPrepareAndFinalize.prepare"])
+@pytest.mark.parametrize(
+    "defer,fp8,int8,mxfp4,should_raise",
+    [
+        (True, True, False, False, True),
+        (True, False, True, False, True),
+        (True, False, False, True, True),
+        (True, False, False, False, False),  # raw bf16 dispatch: accept
+        (False, True, True, True, False),
+    ],
+)
+def test_allow_defer_guard_only_rejects_quantized_dispatch(method, defer, fp8, int8, mxfp4, should_raise):
+    guard = _defer_guard_node(method)
+    ns = {
+        "defer_input_quant": defer,
+        "self": SimpleNamespace(
+            use_fp8_dispatch=fp8, use_int8_dispatch=int8, use_mxfp4_dispatch=mxfp4
+        ),
+    }
+    assert bool(_interp_bool(guard, ns)) is should_raise
+
+
+def test_prepare_forwards_defer_to_async():
+    node = definition(ROOT / DEEPEP_LL, "DeepEPLLPrepareAndFinalize.prepare")
+    calls = [
+        c
+        for c in ast.walk(node)
+        if isinstance(c, ast.Call) and isinstance(c.func, ast.Attribute) and c.func.attr == "prepare_async"
+    ]
+    assert calls
+    assert any(kw.arg == "defer_input_quant" for kw in calls[0].keywords)
+
+
+def test_native_apply_uses_masked_int4_flow():
+    node = definition(ROOT / EXPERTS, f"{NATIVE}.apply")
+    called = [
+        c.func.id
+        for c in ast.walk(node)
+        if isinstance(c, ast.Call) and isinstance(c.func, ast.Name)
+    ]
+    assert called.count("int8_int4_m_grouped_gemm_nt_masked") == 2  # gemm1 + gemm2
+    assert "per_token_quant_int8" in called  # internal gemm1-input quant
+    assert "int8_persistent_masked_m_silu_mul_quant" in called  # gemm2 pre-step
+    # no acext wrapper in the native path
+    assert "fusedmoe_wrapper" not in called
+
+
+def test_native_expects_unquantized_inputs_true():
+    node = definition(ROOT / EXPERTS, f"{NATIVE}.expects_unquantized_inputs")
+    returns = [n for n in ast.walk(node) if isinstance(n, ast.Return)]
+    assert len(returns) == 1 and returns[0].value.value is True
+
+
+def test_native_process_weights_uint8_view_and_preprocess():
+    node = definition(ROOT / EXPERTS, f"{NATIVE}.process_weights_after_loading")
+    src = ast.unparse(node)
+    assert "view(torch.uint8)" in src
+    assert "preprocess_a8w4_weight" in src
+    assert "replace_parameter" in src
+    assert "torch.int8" in src  # asserts checkpoint dtype
+
+
+def test_native_moe_problem_size_from_weight_shard():
+    node = definition(ROOT / EXPERTS, f"{NATIVE}.moe_problem_size")
+    src = ast.unparse(node)
+    assert "E, N, k_half = w1.size()" in src  # group count = local routed shard
+    assert "K = k_half * 2" in src
+    assert "a1.size(1)" in src and "a1.dim() == 3" in src
+
+
+def test_native_device_gate_is_810e():
+    node = definition(ROOT / EXPERTS, f"{NATIVE}._supports_current_device")
+    src = ast.unparse(node)
+    assert "is_deep_gemm_supported()" in src
+    assert "is_device_capability((8, 0))" in src
+
+
+def test_native_apply_has_no_host_sync():
+    node = definition(ROOT / EXPERTS, f"{NATIVE}.apply")
+    synced = [
+        a.attr
+        for a in ast.walk(node)
+        if isinstance(a, ast.Attribute) and a.attr in {"item", "tolist", "cpu"}
+    ]
+    assert not synced, f"host synchronisation found: {synced}"
+
+
+def test_legacy_relabel_stays_in_non_mk_branch():
+    """R5: the legacy acext view relabel must remain under `not _mk_enabled()`."""
+    node = definition(ROOT / MIXED_W4, "W4AInt8MoEMethod.process_weights_after_loading")
+    # body[0] may be the docstring; the first If is the `not _mk_enabled()` gate
+    first = next(n for n in node.body if isinstance(n, ast.If))
+    assert "not self._mk_enabled()" in ast.unparse(first.test)
+    branch_src = ast.unparse(first)
+    assert "pack_factor" in branch_src and "return" in branch_src
+    # the MK path (after the branch) must NOT relabel; it passes through
+    idx = node.body.index(first)
+    rest_src = ast.unparse(ast.Module(body=node.body[idx + 1:], type_ignores=[]))
+    assert "convert_to_w4a8_int8_moe_format" in rest_src
+    assert "pack_factor" not in rest_src
+
+
+def test_per_token_int8_scale_shape_reference():
+    """Contract of per_token_quant_int8 on a batched [E,T,K] buffer.
+
+    Upstream vllm int8_utils.per_token_quant_int8 reshapes scales to
+    (*shape[:-1], 1) == [E,T,1] and uses scale=amax/127 (matches DeepGemm
+    per_token_cast_to_int8 and the masked lhs_scales [num_groups,m,1]).
+    Pure-Python reference; the triton kernel itself is a PPU/device oracle.
+    """
+    E, T, K = 4, 7, 16
+    shape = (E, T, K)
+    scale_shape = (*shape[:-1], 1)
+    assert scale_shape == (E, T, 1)
+    # amax/127 dequant convention: x ~= x_q * scale
+    row = [0.0] * K
+    row[3] = 2.54  # amax
+    amax = max(abs(v) for v in row) or 1e-10
+    scale = amax / 127
+    xq = round(2.54 * (127 / amax))
+    assert xq == 127
+    assert abs(xq * scale - 2.54) < 1e-6
+
+
+@pytest.mark.ppu
+def test_native_masked_int4_numeric_matches_dense_reference():
+    """Device oracle: native masked INT4xINT8 must match a dense dequant GEMM.
+
+    Requires PPU 810E + DeepGemm + the checkpoint pack convention. Skipped on
+    CPU; a skip is not evidence of a pass. Also verifies the checkpoint nibble
+    convention equals DeepGemm pack_standard_int4_weight (B3 must confirm).
+    """
+    pytest.skip("requires PPU 810E + DeepGemm native masked; run on na131t-swu110")

@@ -30,6 +30,8 @@ from vllm.model_executor.layers.quantization.utils.fp8_utils import (
 from vllm.model_executor.layers.quantization.utils.int8_utils import (
     per_token_quant_int8,
 )
+# PPU MODIFICATION: native W4A8 weight replacement after device permutation
+from vllm.model_executor.utils import replace_parameter
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     kFp8Dynamic128Sym,
@@ -45,6 +47,10 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 )
 from vllm.platforms import current_platform
 from vllm.utils.import_utils import has_deep_gemm
+# PPU MODIFICATION: begin — native W4A8 masked experts expected_m estimation
+from vllm.forward_context import get_forward_context, is_forward_context_available
+from vllm.utils.math_utils import round_up
+# PPU MODIFICATION: end
 
 import vllm_sail.envs as ppu_envs
 from vllm_sail.model_executor.layers.fused_moe.deep_gemm_utils import (
@@ -75,6 +81,10 @@ from vllm_sail.utils.deep_gemm import (
     m_grouped_w4a16_gemm_nt_fused,
     m_grouped_w4a16_gemm_nt_nopad,
     moe_align_block_size,
+    # PPU MODIFICATION: begin — native A8W4 INT8 masked GEMM + weight preprocess
+    int8_int4_m_grouped_gemm_nt_masked,
+    preprocess_a8w4_weight,
+    # PPU MODIFICATION: end
 )
 
 logger = init_logger(__name__)
@@ -1520,29 +1530,58 @@ def _w4a8_batched_row_plan(
     return row_expert_ids, row_is_valid, sum(row_is_valid)
 
 
-class PPUDeepGemmExpertsW4A8Int8(mk.FusedMoEExpertsModular):
-    """MK experts for INT4-per-channel weights x INT8-per-token activations.
+def _w4a8_pack_int4_reference(values: list[int]) -> list[int]:
+    """Pure-Python spec of DeepGemm's portable packed signed-INT4 convention.
 
-    Naming note: the public backend name is ``ppu_deep_gemm_w4a8_int8`` and the
-    oracle enum member is ``BATCHED_PPU_DEEPGEMM``, but the GEMM itself is
-    provided by **acext** ``fusedmoe_wrapper(use_int8_w4a8=True)`` — the same JIT
-    kernel the legacy ``W4AInt8MoEMethod.apply`` already uses. DeepGemm exposes no
-    INT4-per-channel x INT8-activation entry point (only W4A16 and MXFP4 x FP8),
-    so this class is the MK/DeepEP assembly shell around the acext kernel, not a
-    DeepGemm native INT4 kernel.
+    Empirical source: DeepGEMM-for-sail ``tests/quantization.py:12-23``
+    ``pack_standard_int4_weight`` — view int8 as uint8, even-K element takes the
+    low nibble (``& 0x0F``), odd-K element takes the high nibble (``<< 4``), OR
+    them. Signed two's-complement nibbles (zero is 0, -8 is 0x8, 7 is 0x7).
+    No torch/device needed so the convention is unit-testable; the on-device
+    weight path is a byte-preserving ``int8 -> uint8`` view of the checkpoint
+    pack followed by ``preprocess_a8w4_weight`` (device permutation).
+    """
+    assert len(values) % 2 == 0, "INT4 pack requires an even element count"
+    packed: list[int] = []
+    for i in range(0, len(values), 2):
+        assert -8 <= values[i] <= 7 and -8 <= values[i + 1] <= 7
+        lo = values[i] & 0x0F
+        hi = values[i + 1] & 0x0F
+        packed.append(lo | (hi << 4))
+    return packed
 
-    Layout: DeepEP low-latency dispatch produces ``BatchedExperts``
-    ``[E, T, K]`` plus a device-side ``expert_num_tokens``. acext consumes a 2-D
-    ``[M, K]`` buffer with ``topk_ids``/``topk_weights``. Because the batched
-    buffer is already expert-major and contiguous, the conversion is a zero-copy
-    ``reshape`` plus a synthetic top-k=1 routing table — no permute kernel and no
-    host synchronisation (``expert_num_tokens_cpu`` is None on this path, so any
-    ``.item()`` would both stall decode and break CUDA-graph capture).
 
-    Weight application: ``finalize_weight_and_reduce_impl`` returns
-    ``TopKWeightAndReduceDelegate`` because sail's DeepEP LL combine applies the
-    routing weights (``prepare_finalize/deepep_ll.py`` asserts Delegate). The
-    wrapper is therefore fed **ones** so weights are applied exactly once.
+def _w4a8_unpack_int4_reference(packed: list[int]) -> list[int]:
+    """Inverse of :func:`_w4a8_pack_int4_reference` (sign-extend each nibble)."""
+    values: list[int] = []
+    for byte in packed:
+        lo = byte & 0x0F
+        hi = (byte >> 4) & 0x0F
+        values.append(lo if lo < 8 else lo - 16)
+        values.append(hi if hi < 8 else hi - 16)
+    return values
+
+
+class PPUAcextW4A8Int8Fallback(mk.FusedMoEExpertsModular):
+    """回退用（fallback, NOT selected by default）: acext-based W4A8-INT8 experts.
+
+    This is the original S1 assembly shell around **acext**
+    ``fusedmoe_wrapper(use_int8_w4a8=True)``. It is retained as a fallback
+    reference only: B1 proved the acext path is structurally blocked on the
+    current sail DeepEP LL prepare (``expects_unquantized_inputs=True`` ->
+    ``defer_input_quant=True`` -> ``deepep_ll.py`` rejects defer). The default
+    backend now uses :class:`PPUDeepGemmExpertsW4A8Int8` (DeepGemm native masked
+    INT4xINT8). This class is not in the default candidate list; keep it for
+    reference / future manual selection, do not delete.
+
+    Layout: DeepEP low-latency dispatch produces ``BatchedExperts`` ``[E, T, K]``
+    plus a device-side ``expert_num_tokens``. acext consumes a 2-D ``[M, K]``
+    buffer with ``topk_ids``/``topk_weights``; the batched buffer is already
+    expert-major and contiguous, so the conversion is a zero-copy ``reshape``
+    plus a synthetic top-k=1 routing table (no host sync; ``expert_num_tokens_cpu``
+    is None on this path). ``finalize_weight_and_reduce_impl`` returns
+    ``TopKWeightAndReduceDelegate`` because the DeepEP LL combine applies the
+    routing weights; the wrapper is fed **ones** so weights apply exactly once.
     """
 
     def __init__(
@@ -1557,6 +1596,24 @@ class PPUDeepGemmExpertsW4A8Int8(mk.FusedMoEExpertsModular):
             quant_config=quant_config,
             max_num_tokens=max_num_tokens,
             num_dispatchers=num_dispatchers,
+        )
+
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        # 回退用：acext consumes the checkpoint pack after the legacy view
+        # relabel [E, 2I, K/2] -> [E, K, I] (pack_factor = 8 // 4 = 2 for INT4).
+        # Byte-preserving; mirrors the legacy W4AInt8MoEMethod relabel.
+        pack_factor = 2
+        w13 = layer.w13_weight
+        s13 = w13.shape
+        layer.w13_weight = torch.nn.Parameter(
+            w13.view(s13[0], s13[2] * pack_factor, s13[1] // pack_factor),
+            requires_grad=False,
+        )
+        w2 = layer.w2_weight
+        s2 = w2.shape
+        layer.w2_weight = torch.nn.Parameter(
+            w2.view(s2[0], s2[2] * pack_factor, s2[1] // pack_factor),
+            requires_grad=False,
         )
 
     @property
@@ -1751,4 +1808,313 @@ class PPUDeepGemmExpertsW4A8Int8(mk.FusedMoEExpertsModular):
             0,
             1,
             Q_type,
+        )
+
+
+class PPUDeepGemmExpertsW4A8Int8(mk.FusedMoEExpertsModular):
+    """Default MK W4A8 experts: DeepGemm native masked INT4-per-channel x INT8.
+
+    GEMM is ``m_grouped_gemm_int8_int4_bf16_nt_masked`` (810E / AC_PPU0010 only;
+    ``gemm.hpp:600``). Activations dispatch as bf16
+    (``expects_unquantized_inputs=True``); sail's DeepEP LL prepare accepts
+    ``defer_input_quant=True`` for raw bf16 dispatch, and this class quantizes
+    the received ``[E, T, K]`` bf16 buffer to INT8 per-token internally via
+    ``per_token_quant_int8`` (scale ``amax/127``, shape ``[E, T, 1]``), then runs
+    gemm1 masked -> ``int8_persistent_masked_m_silu_mul_quant`` -> gemm2 masked.
+    The masked kernel computes only rows ``< expert_num_tokens[e]``, so padded
+    slots never enter the GEMM — this removes the R6 invalid-row hazard without
+    a zeroing pass or any host sync (``expert_num_tokens_cpu`` stays None).
+
+    Weights: the checkpoint stores portable packed signed-INT4 in an int8
+    container, w13 ``[E, 2I, K/2]`` and w2 ``[E, K, I/2]``, with per-channel
+    fp32 scales ``[E, n, 1]``. ``process_weights_after_loading`` does a
+    byte-preserving ``int8 -> uint8`` view then ``preprocess_a8w4_weight`` (the
+    device-specific permutation; ``gemm.hpp:2039-2040``). The nibble convention
+    (even-K low, odd-K high, signed two's-complement) is taken empirically from
+    DeepGEMM ``tests/quantization.py:12-23`` ``pack_standard_int4_weight`` and
+    locked by a pure-Python UT round-trip; see ``_w4a8_pack_int4_reference``.
+
+    Group count: ``E = w1.size(0)`` is the local routed-expert EP shard. The
+    shared expert is a separate MK module and MTP experts stay bf16
+    (unquantized), so neither enters this routed packed path; ``masked_m`` and
+    the scales are sized by E, never by the global expert count.
+
+    ``finalize_weight_and_reduce_impl`` returns ``TopKWeightAndReduceDelegate``:
+    the DeepEP LL combine applies the routing weights, so the GEMM output stays
+    unweighted bf16 ``[E, T, K]``.
+    """
+
+    def __init__(
+        self,
+        moe_config: FusedMoEConfig,
+        quant_config: FusedMoEQuantConfig,
+        max_num_tokens: int,
+        num_dispatchers: int,
+    ):
+        super().__init__(
+            moe_config=moe_config,
+            quant_config=quant_config,
+            max_num_tokens=max_num_tokens,
+            num_dispatchers=num_dispatchers,
+        )
+        # Shape constraints asserted at construction (gemm.hpp:604 k%32==0,
+        # gemm.hpp:607 n%8==0). gemm1: K=hidden, N=2*inter; gemm2: K=inter,
+        # N=hidden. Values are the model geometry, never padded to fit.
+        hidden = moe_config.hidden_dim
+        inter = moe_config.intermediate_size_per_partition
+        assert hidden % 32 == 0, (
+            f"W4A8 native masked gemm1 K=hidden={hidden} must be a multiple of "
+            "32 (DeepGemm gemm.hpp:604)"
+        )
+        assert inter % 32 == 0, (
+            f"W4A8 native masked gemm2 K=intermediate={inter} must be a "
+            "multiple of 32 (DeepGemm gemm.hpp:604)"
+        )
+        assert (2 * inter) % 8 == 0, (
+            f"W4A8 native masked gemm1 N=2*intermediate={2 * inter} must be a "
+            "multiple of 8 (DeepGemm gemm.hpp:607)"
+        )
+        assert hidden % 8 == 0, (
+            f"W4A8 native masked gemm2 N=hidden={hidden} must be a multiple of "
+            "8 (DeepGemm gemm.hpp:607)"
+        )
+        self.gemm1_clamp_limit = self.activation_config.clamp_limit
+        self.gemm1_alpha = self.activation_config.alpha
+        self.gemm1_beta = self.activation_config.beta
+        self.activation_situ_beta = (
+            moe_config.activation_situ_beta
+            if moe_config.activation_situ_beta is not None
+            else 1.0
+        )
+        self.activation_situ_linear_beta = (
+            moe_config.activation_situ_linear_beta
+            if moe_config.activation_situ_linear_beta is not None
+            else -1.0
+        )
+
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        # Checkpoint pack is portable packed signed-INT4 in an int8 container.
+        # View to uint8 (byte-preserving) then apply the device permutation the
+        # native masked kernel consumes. Per-channel scales are already fp32
+        # [E, n, 1] contiguous from create_weights and are read via quant_config
+        # (captured at construction), so they must NOT be replaced here — a new
+        # tensor object would leave quant_config.w*_scale stale.
+        for name in ("w13_weight", "w2_weight"):
+            weight = getattr(layer, name)
+            assert weight.dtype == torch.int8, (
+                f"W4A8 native expects int8 packed checkpoint weight, got "
+                f"{weight.dtype} for {name}"
+            )
+            permuted = preprocess_a8w4_weight(weight.view(torch.uint8))
+            replace_parameter(layer, name, permuted)
+
+    @property
+    def expects_unquantized_inputs(self) -> bool:
+        # bf16 dispatch; this class quantizes to INT8 per-token internally.
+        return True
+
+    @staticmethod
+    def activation_format() -> mk.FusedMoEActivationFormat:
+        return mk.FusedMoEActivationFormat.BatchedExperts
+
+    @staticmethod
+    def _supports_current_device() -> bool:
+        # Native A8W4 INT8 masked kernel is 810E-only (AC_PPU0010 == (8, 0)).
+        return (
+            is_deep_gemm_supported()
+            and current_platform.is_ppu()
+            and current_platform.is_device_capability((8, 0))
+        )
+
+    @staticmethod
+    def _supports_no_act_and_mul() -> bool:
+        return False
+
+    @staticmethod
+    def _supports_quant_scheme(
+        weight_key: QuantKey | None,
+        activation_key: QuantKey | None,
+    ) -> bool:
+        SUPPORTED_W_A = [
+            (kInt4W4A8StaticChannelSym, kInt8DynamicTokenSym),
+        ]
+        return (weight_key, activation_key) in SUPPORTED_W_A
+
+    @staticmethod
+    def _supports_activation(activation: MoEActivation) -> bool:
+        return activation == MoEActivation.SILU
+
+    @staticmethod
+    def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:
+        return not (
+            moe_parallel_config.use_fi_nvl_two_sided_kernels
+            or moe_parallel_config.use_fi_nvl_one_sided_kernels
+        )
+
+    @staticmethod
+    def _supports_bias() -> bool:
+        return False
+
+    def supports_expert_map(self) -> bool:
+        return False
+
+    def finalize_weight_and_reduce_impl(self) -> mk.TopKWeightAndReduce:
+        return TopKWeightAndReduceDelegate()
+
+    def moe_problem_size(
+        self,
+        a1: torch.Tensor,
+        w1: torch.Tensor,
+        w2: torch.Tensor,
+        topk_ids: torch.Tensor,
+    ) -> tuple[int, int, int, int, int]:
+        # w1 is preprocessed uint8 [E, 2I, K/2]; logical N=2I, K=2*w1.size(2).
+        E, N, k_half = w1.size()
+        K = k_half * 2
+        M = a1.size(1) if a1.dim() == 3 else a1.size(0)
+        return E, M, N, K, topk_ids.size(1)
+
+    def workspace_shapes(
+        self,
+        M: int,
+        N: int,
+        K: int,
+        topk: int,
+        global_num_experts: int,
+        local_num_experts: int,
+        expert_tokens_meta: mk.ExpertTokensMetadata | None,
+        activation: MoEActivation,
+    ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
+        assert self.num_dispatchers is not None
+        assert self.max_num_tokens is not None
+        capacity = self.max_num_tokens * self.num_dispatchers
+        # gemm1 writes bf16 [E, T, N] into workspace13; silu_mul_quant allocates
+        # its own int8 a2q; gemm2 writes the bf16 [E, T, K] output.
+        workspace13 = (local_num_experts, capacity, max(K, N))
+        workspace2 = (0,)
+        output = (local_num_experts, capacity, K)
+        return (workspace13, workspace2, output)
+
+    def estimate_expected_m(
+        self, global_num_experts: int, max_tokens_per_expert: int, topk: int
+    ) -> int:
+        dp_meta = (
+            get_forward_context().dp_metadata
+            if is_forward_context_available()
+            else None
+        )
+        if dp_meta is None:
+            logger.warning_once(
+                "DPMetadata unavailable. Defaulting expected_m to "
+                f"{max_tokens_per_expert}.",
+                scope="local",
+            )
+            return max_tokens_per_expert
+        total_num_tokens = dp_meta.num_tokens_across_dp_cpu.sum().item()
+        total_num_tokens_replicated = total_num_tokens * topk
+        assert global_num_experts != 0
+        estimate = round_up(int(total_num_tokens_replicated // global_num_experts), 16)
+        estimate = max(estimate, 16)
+        estimate = min(max_tokens_per_expert, estimate)
+        return estimate
+
+    def apply(
+        self,
+        output: torch.Tensor,
+        hidden_states: torch.Tensor,
+        w1: torch.Tensor,
+        w2: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        activation: MoEActivation,
+        global_num_experts: int,
+        expert_map: torch.Tensor | None,
+        a1q_scale: torch.Tensor | None,
+        a2_scale: torch.Tensor | None,
+        workspace13: torch.Tensor,
+        workspace2: torch.Tensor,
+        expert_tokens_meta: mk.ExpertTokensMetadata | None,
+        apply_router_weight_on_input: bool,
+    ):
+        from vllm_sail.model_executor.layers.fused_moe.experts.batched_deep_gemm_moe import (
+            int8_persistent_masked_m_silu_mul_quant,
+        )
+
+        assert activation == MoEActivation.SILU, (
+            f"Only SiLU activation is supported, not {activation}."
+        )
+        assert hidden_states.dim() == 3, (
+            "DeepEP LL batched activations must be [E, T, K], got "
+            f"{tuple(hidden_states.shape)}"
+        )
+        assert hidden_states.dtype in (torch.bfloat16, torch.float16), (
+            "PPUDeepGemmExpertsW4A8Int8 expects bf16/fp16 dispatch (quantizes "
+            f"internally), got {hidden_states.dtype}"
+        )
+        assert a1q_scale is None, (
+            "PPUDeepGemmExpertsW4A8Int8 quantizes activations internally; "
+            "prepare must defer input quantization (a1q_scale is None)"
+        )
+        assert expert_tokens_meta is not None
+        expert_num_tokens = expert_tokens_meta.expert_num_tokens
+        assert expert_num_tokens is not None, (
+            "Batched W4A8 requires device-side expert_num_tokens"
+        )
+
+        E, T, K = hidden_states.shape
+        N = w1.size(1)
+        assert w1.dtype == torch.uint8 and w2.dtype == torch.uint8, (
+            "native masked INT4 weights must be preprocessed uint8"
+        )
+        assert w1.size(0) == E and w1.size(2) * 2 == K, (
+            f"w13 layout mismatch: w1={tuple(w1.shape)} vs activations="
+            f"{tuple(hidden_states.shape)}"
+        )
+        # w2 is [E, K, I/2] with I = N//2; gemm2 K=I, N=K.
+        assert w2.size(0) == E and w2.size(1) == K and w2.size(2) * 2 == N // 2, (
+            f"w2 layout mismatch: w2={tuple(w2.shape)}, expected [E, {K}, {N // 4}]"
+        )
+        # Defense-in-depth shape gate (gemm.hpp:604/607) on the actual GEMM dims.
+        assert K % 32 == 0 and (N // 2) % 32 == 0, (
+            f"masked INT4 requires K%32==0: gemm1 K={K}, gemm2 K={N // 2}"
+        )
+        assert N % 8 == 0 and K % 8 == 0, (
+            f"masked INT4 requires N%8==0: gemm1 N={N}, gemm2 N={K}"
+        )
+
+        # Internal per-token INT8 quantization of the bf16 dispatch buffer.
+        a1q, a1q_scale = per_token_quant_int8(hidden_states)
+        workspace1 = _resize_cache(workspace13, (E, T, N))
+        expected_m = self.estimate_expected_m(
+            global_num_experts=global_num_experts,
+            max_tokens_per_expert=T,
+            topk=topk_ids.size(1),
+        )
+
+        int8_int4_m_grouped_gemm_nt_masked(
+            (a1q, a1q_scale),
+            (w1, self.quant_config.w1_scale),
+            workspace1,
+            expert_num_tokens,
+            expected_m,
+        )
+
+        a2q, a2q_scale = int8_persistent_masked_m_silu_mul_quant(
+            workspace1,
+            expert_num_tokens,
+            group_size=workspace1.shape[-1] // 2,
+            swiglu_limit=self.gemm1_clamp_limit,
+            alpha=self.gemm1_alpha,
+            beta=self.gemm1_beta,
+            is_situ=(activation == MoEActivation.SITU),
+            situ_beta=self.activation_situ_beta,
+            situ_linear_beta=self.activation_situ_linear_beta,
+        )
+
+        int8_int4_m_grouped_gemm_nt_masked(
+            (a2q, a2q_scale),
+            (w2, self.quant_config.w2_scale),
+            output,
+            expert_num_tokens,
+            expected_m,
         )

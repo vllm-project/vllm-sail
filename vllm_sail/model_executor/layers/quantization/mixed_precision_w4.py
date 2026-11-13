@@ -282,33 +282,36 @@ class W4AInt8MoEMethod(FusedMoEMethodBase):
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         """for quant model with acext a8w4 preprocessing"""
-        w13_weight = layer.w13_weight
-        w13_weight_shape = w13_weight.shape
-        w13_weight = w13_weight.view(
-            w13_weight_shape[0],
-            w13_weight_shape[2] * self.quant_config.pack_factor,
-            w13_weight_shape[1] // self.quant_config.pack_factor,
-        )
-        # [E, hidden_size, 2 * intermediate // 2]
-        layer.w13_weight = torch.nn.Parameter(w13_weight, requires_grad=False)
-
-        w2_weight = layer.w2_weight
-        w2_weight_shape = w2_weight.shape
-        w2_weight = w2_weight.view(
-            w2_weight_shape[0],
-            w2_weight_shape[2] * self.quant_config.pack_factor,
-            w2_weight_shape[1] // self.quant_config.pack_factor,
-        )
-        # [E, intermediate, hidden_size // 2]
-        layer.w2_weight = torch.nn.Parameter(w2_weight, requires_grad=False)
-
         if not self._mk_enabled():
+            # Legacy direct-acext path: byte-preserving view relabel, unchanged.
+            w13_weight = layer.w13_weight
+            w13_weight_shape = w13_weight.shape
+            w13_weight = w13_weight.view(
+                w13_weight_shape[0],
+                w13_weight_shape[2] * self.quant_config.pack_factor,
+                w13_weight_shape[1] // self.quant_config.pack_factor,
+            )
+            # [E, hidden_size, 2 * intermediate // 2]
+            layer.w13_weight = torch.nn.Parameter(w13_weight, requires_grad=False)
+
+            w2_weight = layer.w2_weight
+            w2_weight_shape = w2_weight.shape
+            w2_weight = w2_weight.view(
+                w2_weight_shape[0],
+                w2_weight_shape[2] * self.quant_config.pack_factor,
+                w2_weight_shape[1] // self.quant_config.pack_factor,
+            )
+            # [E, intermediate, hidden_size // 2]
+            layer.w2_weight = torch.nn.Parameter(w2_weight, requires_grad=False)
             return
 
         from vllm.model_executor.layers.fused_moe.oracle import w4a8_int8 as oracle
 
-        # acext consumes the checkpoint pack directly; the PPU branch of the
-        # patched conversion is a pass-through that preserves the 6-tuple shape.
+        # MK path: the PPU branch of the patched conversion is a pass-through
+        # that preserves the checkpoint's packed [E, N, K/2] int8 shape and the
+        # 6-tuple contract. The selected experts class then applies its own
+        # weight transform (native: uint8 view + preprocess_a8w4_weight;
+        # fallback: the legacy acext view relabel).
         (
             w13,
             w2,
@@ -346,11 +349,12 @@ class W4AInt8MoEMethod(FusedMoEMethodBase):
     ) -> FusedMoEQuantConfig | None:
         if not self._mk_enabled():
             return None
-        # Activations stay unquantized on the wire: acext does the dynamic
-        # per-token INT8 quantization inside the kernel, exactly like the legacy
-        # path. PER_TOKEN keeps block_shape None so sail's DeepEP LL factory
-        # does not switch to a pre-quantized INT8 dispatch this kernel cannot
-        # consume. Weights are already packed INT4 with per-channel scales.
+        # Activations stay unquantized on the wire (bf16 dispatch): the selected
+        # experts class does the dynamic per-token INT8 quantization internally
+        # (native masked path) or acext does it in-kernel (fallback). PER_TOKEN
+        # keeps block_shape None so sail's DeepEP LL factory does not switch to
+        # a pre-quantized INT8 dispatch; the prepare accepts defer_input_quant
+        # for raw bf16 dispatch. Weights are packed INT4 with per-channel scales.
         return FusedMoEQuantConfig(
             _a1=FusedMoEQuantDesc(dtype=None, shape=GroupShape.PER_TOKEN),
             _a2=FusedMoEQuantDesc(dtype=None, shape=GroupShape.PER_TOKEN),
