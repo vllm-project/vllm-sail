@@ -10,7 +10,13 @@ PR#229 that are decidable without a kernel:
   aliases and SAIL precedence;
 * ``fused_gate`` in ``vllm_sail/models/deepseek_v41/flash_mla_mega_attn.py``:
   every gate branch (env, kv-record, platform, capability, the opt-in NVFP4
-  capability/top-k checks, wheel probe, topology) and the fully-open report;
+  capability/top-k checks, the PR#59 per-token-scale capability check, wheel
+  probe, topology) and the fully-open report;
+* the PR#59 output scale arms: ``VLLM_SAIL_FUSED_ATTN_PER_TOKEN_SCALE`` parsing
+  and alias precedence, ``_output_scale_args`` for both arms (read live, so an
+  A/B run flips only the environment), the ``_call_fused`` wheel-requirement
+  error, and static wiring of ``_alloc_attn_out`` / ``_o_proj`` / both kernel
+  call sites;
 * the ``dsv41_kv_record`` patch module: non-PPU delegation, once-per-process
   env caching, the forensic log line, and the patch metadata (target,
   affected_versions against the repo's SUPPORTED_RANGE);
@@ -19,7 +25,8 @@ PR#229 that are decidable without a kernel:
 
 Torch-dependent bodies (``_o_proj``, ``_dequant_fused_output``,
 ``_forward_{decode,prefill}_mega``) are intentionally out of scope here;
-they are covered by the FlashMLA PR#54 kernel UTs plus on-device smoke.
+they are covered by the FlashMLA kernel UTs (PR#54, plus PR#59's
+``--output-scale {block32,per-token}`` cases) and on-device smoke.
 """
 
 from __future__ import annotations
@@ -42,6 +49,8 @@ _SWITCH_NAMES = (
     "VLLM_PPU_PPU_KV_MXFP8",
     "VLLM_SAIL_PPU_KV_NVFP4",
     "VLLM_PPU_PPU_KV_NVFP4",
+    "VLLM_SAIL_FUSED_ATTN_PER_TOKEN_SCALE",
+    "VLLM_PPU_FUSED_ATTN_PER_TOKEN_SCALE",
 )
 
 
@@ -92,6 +101,10 @@ def test_new_switches_default_off() -> None:
         ("VLLM_SAIL_FUSED_NORM_ROPE_ATTN", "VLLM_PPU_FUSED_NORM_ROPE_ATTN"),
         ("VLLM_SAIL_PPU_KV_MXFP8", "VLLM_PPU_PPU_KV_MXFP8"),
         ("VLLM_SAIL_PPU_KV_NVFP4", "VLLM_PPU_PPU_KV_NVFP4"),
+        (
+            "VLLM_SAIL_FUSED_ATTN_PER_TOKEN_SCALE",
+            "VLLM_PPU_FUSED_ATTN_PER_TOKEN_SCALE",
+        ),
     ],
 )
 def test_switches_turn_on_via_either_name(
@@ -111,6 +124,10 @@ def test_switches_turn_on_via_either_name(
         ("VLLM_SAIL_FUSED_NORM_ROPE_ATTN", "VLLM_PPU_FUSED_NORM_ROPE_ATTN"),
         ("VLLM_SAIL_PPU_KV_MXFP8", "VLLM_PPU_PPU_KV_MXFP8"),
         ("VLLM_SAIL_PPU_KV_NVFP4", "VLLM_PPU_PPU_KV_NVFP4"),
+        (
+            "VLLM_SAIL_FUSED_ATTN_PER_TOKEN_SCALE",
+            "VLLM_PPU_FUSED_ATTN_PER_TOKEN_SCALE",
+        ),
     ],
 )
 def test_sail_name_takes_precedence_over_ppu_alias(
@@ -148,6 +165,10 @@ def gate(modules, monkeypatch):
         dequant_mxfp8_to_bf16=lambda weight, scale: weight,
     )
     modules(
+        "vllm.model_executor.layers.quantization.utils.quant_utils",
+        kFp8DynamicTokenSym="kFp8DynamicTokenSym",
+    )
+    modules(
         "vllm.models.deepseek_v41.common.ops",
         combine_topk_swa_indices=lambda *a, **k: None,
         dequantize_and_gather_k_cache=lambda *a, **k: None,
@@ -159,6 +180,9 @@ def gate(modules, monkeypatch):
         _QUANT_GROUP=32,
         _ROPE_DIM=64,
         _token_slice=lambda out, start, end: out,
+        alloc_mega_attn_output=lambda num_tokens, n_wv_group, device: SimpleNamespace(
+            num_tokens=num_tokens, n_wv_group=n_wv_group, device=device
+        ),
         DeepseekV4MegaAttnAttention=type("DeepseekV4MegaAttnAttention", (), {}),
     )
     modules(
@@ -766,3 +790,171 @@ def test_forward_mega_methods_cast_positions_to_int32() -> None:
             f"{name} lost the defensive int32 cast for token_positions; the "
             "PPU fused kernel rejects int64 positions (seen on lingjun-08)."
         )
+
+
+# ---------------------------------------------------------------------------
+# PR#59 per-token FP32 output scale arm (FlashMLA-for-sail 7bce34f)
+# ---------------------------------------------------------------------------
+
+
+def _method_source(name: str) -> str:
+    """Source of a PPU mega-attention method, for torch-free wiring checks."""
+    import ast
+
+    from tests.support.source import ROOT
+
+    source = (ROOT / "vllm_sail/models/deepseek_v41/flash_mla_mega_attn.py").read_text()
+    tree = ast.parse(source)
+    cls = next(
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ClassDef)
+        and node.name == "PPUDeepseekV4MegaAttnAttention"
+    )
+    method = next(
+        node
+        for node in cls.body
+        if isinstance(node, ast.FunctionDef) and node.name == name
+    )
+    return ast.get_source_segment(source, method) or ""
+
+
+def test_per_token_scale_switch_defaults_off() -> None:
+    """Opt-in contract: the default arm stays byte-identical to PR#54."""
+    assert envs.VLLM_SAIL_FUSED_ATTN_PER_TOKEN_SCALE is False
+    assert envs.snapshot()["VLLM_SAIL_FUSED_ATTN_PER_TOKEN_SCALE"] is False
+
+
+def test_per_token_scale_group_is_the_wv_row_width(gate) -> None:
+    """PR#59 selects the per-token format with num_per_channels == 8 * 512."""
+    assert gate.module._PER_TOKEN_SCALE_GROUP == 8 * 512 == 4096
+
+
+def test_output_scale_args_default_arm_is_the_pr54_contract(gate) -> None:
+    assert gate.module._output_scale_args() == {
+        "num_per_channels": 32,
+        "use_tma_aligned_col_major_sf": True,
+        "round_sf": True,
+        "use_packed_ue8m0": True,
+    }
+
+
+def test_output_scale_args_per_token_arm_clears_every_flag(gate) -> None:
+    """The kernel rejects mixed combinations, so all three flags must flip."""
+    gate.monkeypatch.setenv("VLLM_SAIL_FUSED_ATTN_PER_TOKEN_SCALE", "1")
+    assert gate.module._output_scale_args() == {
+        "num_per_channels": 4096,
+        "use_tma_aligned_col_major_sf": False,
+        "round_sf": False,
+        "use_packed_ue8m0": False,
+    }
+
+
+def test_output_scale_args_are_read_live_not_cached(gate) -> None:
+    """A/B flips only the env var: one code tree, one wheel, both arms."""
+    assert gate.module._output_scale_args()["num_per_channels"] == 32
+    gate.monkeypatch.setenv("VLLM_PPU_FUSED_ATTN_PER_TOKEN_SCALE", "1")
+    assert gate.module._output_scale_args()["num_per_channels"] == 4096
+    gate.monkeypatch.setenv("VLLM_SAIL_FUSED_ATTN_PER_TOKEN_SCALE", "0")
+    assert gate.module._output_scale_args()["num_per_channels"] == 32
+
+
+def test_gate_closes_per_token_arm_on_sm80(gate) -> None:
+    gate.set_wheel("api")
+    gate.set_capability(SimpleNamespace(major=8, minor=0))
+    gate.monkeypatch.setenv("VLLM_SAIL_FUSED_ATTN_PER_TOKEN_SCALE", "1")
+    ok, report = gate.module.fused_gate(_config())
+    assert ok is False
+    assert report.startswith("gate-per-token-cap:")
+    assert "8.9" in report
+
+
+def test_gate_keeps_per_token_arm_open_on_sm89(gate) -> None:
+    gate.set_wheel("api")
+    gate.monkeypatch.setenv("VLLM_SAIL_FUSED_ATTN_PER_TOKEN_SCALE", "1")
+    ok, report = gate.module.fused_gate(_config())
+    assert ok is True
+    assert report.startswith("all gates open: cap=8.9 ")
+    assert "output_scale=per_token_fp32" in report
+
+
+def test_gate_open_report_names_the_default_arm(gate) -> None:
+    gate.set_wheel("api")
+    ok, report = gate.module.fused_gate(_config())
+    assert ok is True
+    assert "output_scale=per32_ue8m0" in report
+
+
+def test_per_token_switch_alone_does_not_enable_the_fused_path(gate) -> None:
+    """The master switch still governs; the scale switch only picks the arm."""
+    gate.set_wheel("api")
+    gate.monkeypatch.setenv("VLLM_SAIL_FUSED_NORM_ROPE_ATTN", "0")
+    gate.monkeypatch.setenv("VLLM_SAIL_FUSED_ATTN_PER_TOKEN_SCALE", "1")
+    ok, report = gate.module.fused_gate(_config())
+    assert ok is False
+    assert report.startswith("gate-env:")
+
+
+def test_alloc_attn_out_is_arm_aware() -> None:
+    """The per-token arm needs its own float32 buffer, not upstream's int32."""
+    body = _method_source("_alloc_attn_out")
+    for needle in (
+        "alloc_mega_attn_output",
+        "_per_token_scale()",
+        "torch.float32",
+        "kFp8DynamicTokenSym",
+        "replace(",
+    ):
+        assert needle in body, f"_alloc_attn_out lost {needle!r}"
+
+
+def test_o_proj_asserts_the_selected_scale_format() -> None:
+    body = _method_source("_o_proj")
+    for needle in ("_per_token_scale()", "torch.float32", "torch.int32"):
+        assert needle in body, f"_o_proj lost the arm-aware check {needle!r}"
+
+
+def test_both_call_sites_share_the_output_scale_args() -> None:
+    """No call site may hardcode one arm's flags independently."""
+    for name in ("_forward_decode_mega", "_forward_prefill_mega"):
+        body = _method_source(name)
+        assert "**_output_scale_args()" in body, (
+            f"{name} no longer takes the shared PR#59 output-format arguments"
+        )
+        assert "num_per_channels=" not in body, (
+            f"{name} hardcodes num_per_channels; the two arms must stay "
+            "selectable from one place"
+        )
+        assert "_call_fused(" in body, f"{name} bypasses the wheel-error wrapper"
+
+
+def test_call_fused_names_the_wheel_requirement_on_format_rejection(gate) -> None:
+    gate.monkeypatch.setenv("VLLM_SAIL_FUSED_ATTN_PER_TOKEN_SCALE", "1")
+
+    def reject(**kwargs):
+        raise RuntimeError("num_per_channels == 32")
+
+    gate.monkeypatch.setattr(gate.module, "_API", SimpleNamespace(decode=reject))
+    with pytest.raises(RuntimeError, match="PR#59"):
+        gate.module._call_fused("decode", num_per_channels=4096)
+
+
+def test_call_fused_does_not_relabel_default_arm_errors(gate) -> None:
+    def reject(**kwargs):
+        raise RuntimeError("num_per_channels == 32")
+
+    gate.monkeypatch.setattr(gate.module, "_API", SimpleNamespace(decode=reject))
+    with pytest.raises(RuntimeError) as exc:
+        gate.module._call_fused("decode", num_per_channels=32)
+    assert "PR#59" not in str(exc.value)
+
+
+def test_call_fused_reraises_unrelated_errors_unchanged(gate) -> None:
+    gate.monkeypatch.setenv("VLLM_SAIL_FUSED_ATTN_PER_TOKEN_SCALE", "1")
+
+    def boom(**kwargs):
+        raise RuntimeError("token_positions must have dtype torch::kInt32")
+
+    gate.monkeypatch.setattr(gate.module, "_API", SimpleNamespace(decode=boom))
+    with pytest.raises(RuntimeError, match="token_positions"):
+        gate.module._call_fused("decode")
