@@ -789,6 +789,209 @@ def test_native_process_weights_uint8_view_and_preprocess():
     assert "preprocess_a8w4_weight" in src
     assert "replace_parameter" in src
     assert "torch.int8" in src  # asserts checkpoint dtype
+    # B2-fix: T^-1 must run BEFORE preprocess (checkpoint is already T-order).
+    assert "_w4a8_undo_checkpoint_T" in src
+    assert src.index("_w4a8_undo_checkpoint_T") < src.index("preprocess_a8w4_weight")
+    assert ".contiguous()" in src  # preprocess requires contiguous uint8
+
+
+def test_native_process_weights_no_scale_replacement():
+    """Scales stay captured by quant_config; replacing them would go stale."""
+    node = definition(ROOT / EXPERTS, f"{NATIVE}.process_weights_after_loading")
+    # replace_parameter(layer, name, ...) uses the loop variable; lock the
+    # loop's iterand tuple to exactly the two weight names (no scale).
+    loops = [n for n in ast.walk(node) if isinstance(n, ast.For)]
+    assert len(loops) == 1
+    iterated = ast.literal_eval(loops[0].iter)
+    assert iterated == ("w13_weight", "w2_weight")
+    assert not any("scale" in n for n in iterated)
+    # the replace_parameter call passes the loop var, not a scale constant
+    calls = [
+        c for c in ast.walk(node)
+        if isinstance(c, ast.Call) and isinstance(c.func, ast.Name)
+        and c.func.id == "replace_parameter"
+    ]
+    assert len(calls) == 1
+    assert isinstance(calls[0].args[1], ast.Name) and calls[0].args[1].id == "name"
+
+
+# ---------------------------------------------------------------------------
+# B2-fix: checkpoint T-order -> T^-1 -> portable -> preprocess (A1b cos 0.9998)
+# CPU-runnable, no torch/numpy/device. Pure-Python T / T^-1 references + AST.
+# ---------------------------------------------------------------------------
+
+
+def _T():
+    return function(EXPERTS, "_w4a8_checkpoint_T_reference", {})
+
+
+def _Tinv():
+    return function(EXPERTS, "_w4a8_undo_checkpoint_T_reference", {})
+
+
+# Tinv.first32 (nibble-level gather) from the A1b report, asserted value-by-value.
+_TINV_FIRST32 = [
+    0, 1, 2, 3, 8, 9, 10, 11, 16, 17, 18, 19, 24, 25, 26, 27,
+    4, 5, 6, 7, 12, 13, 14, 15, 20, 21, 22, 23, 28, 29, 30, 31,
+]
+# Byte-level gather table (16-byte K32 group) = first32 folded by pairs / 2.
+_TINV_BYTES = [0, 1, 4, 5, 8, 9, 12, 13, 2, 3, 6, 7, 10, 11, 14, 15]
+
+
+def test_Tinv_first32_table_matches_report():
+    """req2: Tinv.first32 asserted value-by-value; byte fold == _TINV_BYTES."""
+    folded = [_TINV_FIRST32[2 * i] // 2 for i in range(16)]
+    assert folded == _TINV_BYTES
+    # each byte's two nibbles are consecutive (low, high)
+    for i in range(16):
+        assert _TINV_FIRST32[2 * i + 1] == _TINV_FIRST32[2 * i] + 1
+    # the device T^-1 gather applied to range(16) reproduces the byte table
+    assert _Tinv()(list(range(16))) == _TINV_BYTES
+
+
+def test_T_is_bijection_not_self_inverse():
+    """T is a permutation of 16 bytes; T has order 3, T^-1 != T (A1b)."""
+    T, Tinv = _T(), _Tinv()
+    fwd = T(list(range(16)))
+    assert sorted(fwd) == list(range(16))  # bijection
+    inv = Tinv(list(range(16)))
+    assert sorted(inv) == list(range(16))
+    assert fwd != inv, "T must NOT be self-inverse"
+    assert T(fwd) != list(range(16)), "T∘T != I (order 3, not 2)"
+    assert T(T(fwd)) == list(range(16)), "T^3 == I"
+
+
+@pytest.mark.parametrize("seed", [0, 1, 2, 7, 42, 123])
+def test_Tinv_composes_to_identity(seed):
+    """req2: T^-1∘T == I and T∘T^-1 == I on random whole-group byte arrays."""
+    import random
+
+    rng = random.Random(seed)
+    T, Tinv = _T(), _Tinv()
+    for groups in (1, 2, 20, 80):  # 20=K640/32, 80=K2560/32
+        n = groups * 16
+        x = [rng.randint(0, 255) for _ in range(n)]
+        assert Tinv(T(x)) == x
+        assert T(Tinv(x)) == x
+
+
+def test_checkpoint_T_then_undo_then_preprocessT_equals_plain_preprocessT():
+    """req1: checkpoint(T-order) -> T^-1 -> preprocess-T == plain -> preprocess-T.
+
+    preprocess = XOR∘R∘T (common_preprocess.hpp:262/277-282/284). R and XOR are
+    downstream bijections, so byte-for-byte equality of the whole preprocess
+    reduces to equality of its leading T step's INPUT. Locking
+    preprocess_T(T^-1(checkpoint)) == preprocess_T(portable) with
+    checkpoint = T(portable) proves T^-1 cancels preprocess's internal T.
+    The full device preprocess (R+XOR) equality is the @ppu oracle below.
+    """
+    import random
+
+    T, Tinv = _T(), _Tinv()
+    rng = random.Random(2026)
+    for groups in (20, 80):
+        portable = [rng.randint(0, 255) for _ in range(groups * 16)]
+        checkpoint = T(portable)  # checkpoint落盘已是 T 序
+        # path A: checkpoint -> T^-1 -> preprocess's T step
+        a = T(Tinv(checkpoint))
+        # path B: portable plain -> preprocess's T step
+        b = T(portable)
+        assert a == b, "T^-1 must cancel preprocess internal T byte-for-byte"
+        assert Tinv(checkpoint) == portable
+
+
+@pytest.mark.parametrize("k_half,groups", [(1280, 80), (320, 20)])
+def test_Tinv_covers_w13_and_w2_shapes(k_half, groups):
+    """req3: w13 K=2560 (K/2=1280, 80 groups) and w2 K=640 (K/2=320, 20 groups)."""
+    import random
+
+    assert k_half % 16 == 0 and k_half // 16 == groups
+    T, Tinv = _T(), _Tinv()
+    rng = random.Random(k_half)
+    x = [rng.randint(0, 255) for _ in range(k_half)]
+    assert Tinv(T(x)) == x
+    assert len(Tinv(x)) == k_half
+
+
+def test_Tinv_rejects_non_multiple_of_16():
+    for bad in (1, 15, 17, 31):
+        with pytest.raises(AssertionError):
+            _Tinv()([0] * bad)
+        with pytest.raises(AssertionError):
+            _T()([0] * bad)
+
+
+def test_device_undo_T_uses_transpose_recipe():
+    """AST lock: device T^-1 = reshape [...,K/32,4,2,2] -> transpose(-3,-2)."""
+    node = definition(ROOT / EXPERTS, "_w4a8_undo_checkpoint_T")
+    src = ast.unparse(node)
+    assert "reshape" in src and "transpose(-3, -2)" in src
+    assert "4, 2, 2" in src
+    assert "flatten(-3)" in src and "contiguous()" in src
+    assert "k_half % 16 == 0" in src
+
+
+def test_legacy_and_fallback_have_no_byte_transform():
+    """R5: legacy + acext fallback must stay byte-level unchanged (no T^-1)."""
+    legacy = definition(ROOT / MIXED_W4, "W4AInt8MoEMethod.process_weights_after_loading")
+    first = next(n for n in legacy.body if isinstance(n, ast.If))
+    legacy_branch = ast.unparse(first)
+    assert "_w4a8_undo_checkpoint_T" not in legacy_branch
+    assert "preprocess_a8w4_weight" not in legacy_branch
+    fb = definition(ROOT / EXPERTS, f"{FALLBACK}.process_weights_after_loading")
+    fbsrc = ast.unparse(fb)
+    assert "_w4a8_undo_checkpoint_T" not in fbsrc
+    assert "preprocess_a8w4_weight" not in fbsrc
+
+
+def test_undo_T_only_in_native_mk_path():
+    """The T^-1 transform lives only in the native MK experts, gated by MK."""
+    tree = ast.parse((ROOT / EXPERTS).read_text())
+    callers = [
+        n.name
+        for n in ast.walk(tree)
+        if isinstance(n, ast.ClassDef)
+        for m in n.body
+        if isinstance(m, ast.FunctionDef)
+        and "_w4a8_undo_checkpoint_T(" in ast.unparse(m)
+    ]
+    assert callers == [NATIVE], f"T^-1 must only be called by {NATIVE}, got {callers}"
+
+
+@pytest.mark.ppu
+def test_device_undo_T_matches_reference_and_preprocess_cancels():
+    """Device oracle: torch T^-1 == pure-Python reference; full preprocess
+    (T+R+XOR) on T^-1(checkpoint) == preprocess(portable), byte-for-byte.
+    Requires PPU 810E + DeepGemm. Skipped on CPU; a skip is not a pass."""
+    pytest.skip("requires PPU 810E + DeepGemm preprocess_a8w4_weight; run on card")
+
+
+def test_real_checkpoint_slice_shape_integrity():
+    """req4: real checkpoint slice (single layer/expert) shape/byte integrity.
+
+    Reads a fixture copied from /ppusw READ-ONLY into our writable dir; asserts
+    the uint8 last dim is divisible by 16 (whole K32 groups, no remainder).
+    Shape/byte integrity ONLY — numeric correctness is the challenger's on-card
+    A1b/probe job. Skips when the fixture is absent (NOT claimed as a pass);
+    populate W4A8_CKPT_FIXTURE with the copied slice path to enable.
+    """
+    import os
+
+    path = os.environ.get("W4A8_CKPT_FIXTURE")
+    if not path or not os.path.isfile(path):
+        pytest.skip(
+            "real checkpoint fixture not populated; copy a single-layer/expert "
+            "slice from /ppusw (read-only) to a writable dir and set "
+            "W4A8_CKPT_FIXTURE. Shape/integrity only, no numeric claim."
+        )
+    import json
+
+    meta = json.loads(open(path).read())
+    for name in ("w13_weight", "w2_weight"):
+        shape = meta[name]["shape"]
+        k_half = shape[-1]
+        assert k_half % 16 == 0, f"{name} K/2={k_half} not divisible by 16"
+        assert meta[name]["dtype"] in ("int8", "uint8")
 
 
 def test_native_moe_problem_size_from_weight_shard():

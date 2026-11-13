@@ -1562,6 +1562,67 @@ def _w4a8_unpack_int4_reference(packed: list[int]) -> list[int]:
     return values
 
 
+def _w4a8_checkpoint_T_reference(packed: list[int]) -> list[int]:
+    """Pure-Python spec of the K32-group 2-byte transpose ``T``.
+
+    Source: DeepGEMM-for-sail ``common_preprocess.hpp:258-266`` — view each
+    16-byte K32 group as ``[j1=2, j2=4, b=2]``, ``transpose(-3,-2)`` ->
+    ``[j2=4, j1=2, b=2]``, flatten. ``new[j2*4+j1*2+b] = old[j1*8+j2*2+b]``.
+    A1b (challenger, synthetic single-card) proved the checkpoint bytes are
+    ALREADY in this ``T`` order (cos 0.9998), so feeding them straight to
+    ``preprocess_a8w4_weight`` applies ``T`` a second time -> silent numeric
+    error. ``T`` has order 3 (four 3-cycles + four fixed points on 16 bytes);
+    it is NOT self-inverse.
+    """
+    assert len(packed) % 16 == 0, "T operates on whole 16-byte K32 groups"
+    out = [0] * len(packed)
+    for base in range(0, len(packed), 16):
+        for j1 in range(2):
+            for j2 in range(4):
+                for b in range(2):
+                    out[base + j2 * 4 + j1 * 2 + b] = packed[base + j1 * 8 + j2 * 2 + b]
+    return out
+
+
+def _w4a8_undo_checkpoint_T_reference(packed: list[int]) -> list[int]:
+    """Inverse of :func:`_w4a8_checkpoint_T_reference` (``T^-1``, byte level).
+
+    Recovers portable plain order from checkpoint ``T``-order bytes so that
+    ``preprocess_a8w4_weight`` (whose internal ``T`` is unchanged) sees the
+    portable input it expects. ``new[j1*8+j2*2+b] = old[j2*4+j1*2+b]``.
+    Byte gather table (16-byte group): ``[0,1,4,5,8,9,12,13,2,3,6,7,10,11,14,15]``;
+    nibble expansion == ``Tinv.first32`` from the A1b report. ``T^-1 != T``.
+    """
+    assert len(packed) % 16 == 0, "T^-1 operates on whole 16-byte K32 groups"
+    out = [0] * len(packed)
+    for base in range(0, len(packed), 16):
+        for j1 in range(2):
+            for j2 in range(4):
+                for b in range(2):
+                    out[base + j1 * 8 + j2 * 2 + b] = packed[base + j2 * 4 + j1 * 2 + b]
+    return out
+
+
+def _w4a8_undo_checkpoint_T(weight_u8: "torch.Tensor") -> "torch.Tensor":
+    """Device ``T^-1``: undo the checkpoint's K32-group 2-byte transpose.
+
+    ``weight_u8`` is contiguous uint8 ``[..., K/2]``. Reshape to
+    ``[..., K/32, 4, 2, 2]``, ``transpose(-3,-2)`` -> ``[..., K/32, 2, 4, 2]``,
+    flatten back to ``[..., K/2]``. This is the exact inverse of the ``T`` step
+    inside ``preprocess_a8w4_weight`` (``common_preprocess.hpp:262``); applying
+    it first cancels that step so the checkpoint's pre-existing ``T`` order is
+    not permuted twice. Pure device reshape/transpose, no host loop, no sync.
+    """
+    *lead, k_half = weight_u8.shape
+    assert k_half % 16 == 0, (
+        f"W4A8 checkpoint T^-1 needs K/2={k_half} divisible by 16 (K%32==0)"
+    )
+    groups = k_half // 16
+    x = weight_u8.reshape(*lead, groups, 4, 2, 2)
+    x = x.transpose(-3, -2).flatten(-3).contiguous()
+    return x.reshape(*lead, k_half)
+
+
 class PPUAcextW4A8Int8Fallback(mk.FusedMoEExpertsModular):
     """回退用（fallback, NOT selected by default）: acext-based W4A8-INT8 experts.
 
@@ -1825,14 +1886,21 @@ class PPUDeepGemmExpertsW4A8Int8(mk.FusedMoEExpertsModular):
     slots never enter the GEMM — this removes the R6 invalid-row hazard without
     a zeroing pass or any host sync (``expert_num_tokens_cpu`` stays None).
 
-    Weights: the checkpoint stores portable packed signed-INT4 in an int8
-    container, w13 ``[E, 2I, K/2]`` and w2 ``[E, K, I/2]``, with per-channel
-    fp32 scales ``[E, n, 1]``. ``process_weights_after_loading`` does a
-    byte-preserving ``int8 -> uint8`` view then ``preprocess_a8w4_weight`` (the
-    device-specific permutation; ``gemm.hpp:2039-2040``). The nibble convention
-    (even-K low, odd-K high, signed two's-complement) is taken empirically from
+    Weights: the checkpoint stores packed signed-INT4 in an int8 container,
+    w13 ``[E, 2I, K/2]`` and w2 ``[E, K, I/2]``, with per-channel fp32 scales
+    ``[E, n, 1]``. CORRECTION (A1b, challenger synthetic single-card, cos
+    0.9998): the checkpoint bytes are ALREADY in the K32-group 2-byte transpose
+    (``T``) order, NOT portable plain order as the B2 draft assumed.
+    ``process_weights_after_loading`` therefore undoes ``T`` first
+    (``_w4a8_undo_checkpoint_T``, device reshape/transpose) to recover portable
+    plain order, then applies ``preprocess_a8w4_weight`` (whose internal
+    ``T + R + XOR 0x88`` is unchanged; ``gemm.hpp:2039-2040``). Without the
+    ``T^-1`` step the checkpoint's pre-existing ``T`` is permuted twice ->
+    "runs, magnitude normal, content all wrong" (3QA 0/3). The nibble
+    convention (even-K low, odd-K high, signed two's-complement) is taken from
     DeepGEMM ``tests/quantization.py:12-23`` ``pack_standard_int4_weight`` and
-    locked by a pure-Python UT round-trip; see ``_w4a8_pack_int4_reference``.
+    locked by pure-Python UT round-trips; see ``_w4a8_pack_int4_reference`` and
+    ``_w4a8_undo_checkpoint_T_reference``.
 
     Group count: ``E = w1.size(0)`` is the local routed-expert EP shard. The
     shared expert is a separate MK module and MTP experts stay bf16
@@ -1893,19 +1961,25 @@ class PPUDeepGemmExpertsW4A8Int8(mk.FusedMoEExpertsModular):
         )
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        # Checkpoint pack is portable packed signed-INT4 in an int8 container.
-        # View to uint8 (byte-preserving) then apply the device permutation the
-        # native masked kernel consumes. Per-channel scales are already fp32
-        # [E, n, 1] contiguous from create_weights and are read via quant_config
-        # (captured at construction), so they must NOT be replaced here — a new
-        # tensor object would leave quant_config.w*_scale stale.
+        # A1b (challenger, synthetic single-card, cos 0.9998) proved the
+        # checkpoint bytes are ALREADY in the K32-group 2-byte transpose (T)
+        # order, NOT portable plain order. preprocess_a8w4_weight applies T
+        # again internally (common_preprocess.hpp:262), so feeding the
+        # checkpoint straight in permutes twice -> silent numeric error.
+        # Undo T first (T^-1, device reshape/transpose) to recover portable
+        # plain order, then hand it to the unchanged preprocess (T + R + XOR).
+        # Per-channel scales are already fp32 [E, n, 1] contiguous from
+        # create_weights and are read via quant_config (captured at
+        # construction), so they must NOT be replaced here — a new tensor
+        # object would leave quant_config.w*_scale stale.
         for name in ("w13_weight", "w2_weight"):
             weight = getattr(layer, name)
             assert weight.dtype == torch.int8, (
                 f"W4A8 native expects int8 packed checkpoint weight, got "
                 f"{weight.dtype} for {name}"
             )
-            permuted = preprocess_a8w4_weight(weight.view(torch.uint8))
+            portable = _w4a8_undo_checkpoint_T(weight.view(torch.uint8))
+            permuted = preprocess_a8w4_weight(portable.contiguous())
             replace_parameter(layer, name, permuted)
 
     @property
