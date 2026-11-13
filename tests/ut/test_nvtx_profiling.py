@@ -219,6 +219,12 @@ def profiling_pkg(fake_vllm: SimpleNamespace, monkeypatch: pytest.MonkeyPatch):
         "moe",
     ):
         monkeypatch.delattr(module, attr, raising=False)
+    # Step5 Norm instrumentation is covered by test_step5_norm_profiling; stub it
+    # here so the real upstream Step5RMSNorm is not patched into PATCH_REGISTRY.
+    norm = types.ModuleType("vllm_sail.profiling.step5_norm")
+    norm.install = lambda: False
+    monkeypatch.setitem(sys.modules, norm.__name__, norm)
+    monkeypatch.setattr(module, "step5_norm", norm, raising=False)
     monkeypatch.setattr(module, "_installed", False)
     return module
 
@@ -392,6 +398,123 @@ def recording_nvtx(installed, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(prof_nvtx, "_torch_range_pop", lambda: pops.append(1))
     monkeypatch.setattr(prof_nvtx, "_model_prof_iter", lambda it: iters.append(it))
     return SimpleNamespace(pushes=pushes, pops=pops, iters=iters)
+
+
+@pytest.fixture
+def layerwise_module(fake_vllm):
+    path = Path(__file__).parents[2] / "vllm_sail/profiling/layerwise.py"
+    spec = importlib.util.spec_from_file_location("_test_layerwise", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+@pytest.mark.parametrize(
+    "enabled,stock_compile", [(False, False), (True, False), (True, True)]
+)
+def test_layerwise_v034_registers_after_draft_dummy_run_once(
+    layerwise_module, fake_vllm, monkeypatch, enabled, stock_compile
+):
+    """已删除的 runner hook 由插件补充，关闭开关时不遍历模型。"""
+    compilation = types.ModuleType("vllm.config.compilation")
+    compilation.CompilationMode = SimpleNamespace(NONE=0, STOCK_TORCH_COMPILE=1)
+    compilation.CUDAGraphMode = SimpleNamespace(NONE=0)
+    monkeypatch.setitem(sys.modules, compilation.__name__, compilation)
+    speculator = types.ModuleType("vllm.v1.worker.gpu.spec_decode.speculator")
+    speculator.DraftModelSpeculator = type("DraftModelSpeculator", (), {})
+    monkeypatch.setitem(sys.modules, speculator.__name__, speculator)
+    monkeypatch.setattr(
+        layerwise_module, "logger", SimpleNamespace(warning_once=lambda *a: None)
+    )
+    events = []
+    hooks = SimpleNamespace(register_hooks=lambda model, prefix: events.append(model))
+    monkeypatch.setattr(layerwise_module, "_make_hooks", lambda: hooks)
+    runner_cls = fake_vllm.GPUModelRunnerV2
+
+    def original_dummy_run(self, num_tokens, **kwargs):
+        assert events == [] or self.layerwise_nvtx_hooks_registered
+        return (num_tokens, kwargs)
+
+    monkeypatch.setattr(runner_cls, "_dummy_run", original_dummy_run, raising=False)
+    runner = runner_cls()
+    runner.model = object()
+    runner.speculator = speculator.DraftModelSpeculator()
+    runner.speculator.model = object()
+    runner.vllm_config = SimpleNamespace(
+        observability_config=SimpleNamespace(enable_layerwise_nvtx_tracing=enabled)
+    )
+    runner.compilation_config = SimpleNamespace(
+        mode=int(stock_compile), cudagraph_mode=0
+    )
+    layerwise_module.install()
+    wrapped = runner_cls._dummy_run
+    layerwise_module.install()
+    assert runner_cls._dummy_run is wrapped
+    for _ in range(2):
+        assert runner._dummy_run(3, is_profile=True) == (3, {"is_profile": True})
+    assert events == (
+        [runner.model, runner.speculator.model] if enabled and not stock_compile else []
+    )
+
+
+@pytest.mark.parametrize("output", [None, "result"], ids=["forward-error", "success"])
+def test_layerwise_v034_markers_preserve_labels_and_shared_module_dedup(
+    layerwise_module, monkeypatch, output
+):
+    """无需 PytHooks，正常和异常 forward 均关闭 input/output ranges。"""
+    events = []
+
+    class Module:
+        def __init__(self):
+            self.pre_hooks = []
+            self.post_hooks = []
+
+        def register_forward_pre_hook(self, hook, *, with_kwargs):
+            assert with_kwargs
+            self.pre_hooks.append(hook)
+
+        def register_forward_hook(self, hook, *, always_call):
+            assert always_call
+            self.post_hooks.append(hook)
+
+    torch = types.ModuleType("torch")
+    torch.nn = SimpleNamespace(
+        **{
+            name: type(name, (Module,), {})
+            for name in ("Identity", "Dropout", "Dropout1d", "Dropout2d", "Dropout3d")
+        }
+    )
+    torch.cuda = SimpleNamespace(
+        nvtx=SimpleNamespace(range_pop=lambda: events.append("pop"))
+    )
+    monkeypatch.setitem(sys.modules, "torch", torch)
+    nvtx_hooks = types.ModuleType("vllm.utils.nvtx_pytorch_hooks")
+
+    def marker(name, module, in_tensor, kwargs=None, out_tensor=None):
+        events.append((name, in_tensor, kwargs, out_tensor))
+
+    nvtx_hooks.construct_marker_dict_and_push = marker
+    monkeypatch.setitem(sys.modules, nvtx_hooks.__name__, nvtx_hooks)
+    shared, skipped = Module(), torch.nn.Identity()
+    model = SimpleNamespace(
+        named_modules=lambda prefix: [
+            (f"{prefix}.shared", shared),
+            (f"{prefix}.skip", skipped),
+        ]
+    )
+    hooks = layerwise_module._make_hooks()
+    hooks.register_hooks(model, "target")
+    hooks.register_hooks(model, "draft")
+    assert len(shared.pre_hooks) == len(shared.post_hooks) == 1
+    assert skipped.pre_hooks == skipped.post_hooks == []
+    shared.pre_hooks[0](shared, ("input",), {"key": "value"})
+    shared.post_hooks[0](shared, ("input",), output)
+    assert events == [
+        ("target.shared(input)", ("input",), {"key": "value"}, None),
+        "pop",
+        ("target.shared(output)", None, None, output),
+        "pop",
+    ]
 
 
 def test_v2_execute_model_wraps_iteration_range(installed, recording_nvtx) -> None:
