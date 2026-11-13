@@ -1310,3 +1310,254 @@ def test_upstream_is_monolithic_still_uses_hasattr():
     node = definition(p, "FusedMoEMethodBase.is_monolithic")
     src = ast.unparse(node)
     assert "hasattr(self, 'experts_cls')" in src or 'hasattr(self, "experts_cls")' in src
+
+
+# ---------------------------------------------------------------------------
+# C1: post-silu INT8 quant truncation -> opt-in round-to-nearest.
+# Device evidence (challenger, seq=259): A(legacy acext) vs B_trunc(native)
+#   cos 0.9995145 rel_L2 3.5348e-2 L1 +1.6177%; A vs B_round cos 0.9999600
+#   rel_L2 9.1692e-3 L1 -0.0223%; distance ratio 3.855x (>3x) => C1 is a real
+#   differential. 47.0% of codes differ, all +/-1; L1 magnitude -1.61%.
+# Fix: libdevice.round (half-away-from-zero) == the entry per_token_quant_int8
+#   operator (vllm int8_utils.round_int8). Opt-in USE_ROUNDING tl.constexpr,
+#   default False => fp8 AND existing W8A8 int8 callers compile the byte-identical
+#   truncating else branch; only the W4A8 masked call site enables it.
+# All checks below are CPU-only (no torch / triton / device). The exact 47.0%->0
+# and whole-machine gsm8k Delta are the on-card oracle, not a CPU expectation.
+# ---------------------------------------------------------------------------
+
+BATCHED = "vllm_sail/model_executor/layers/fused_moe/experts/batched_deep_gemm_moe.py"
+
+
+def _half_away_round(x):
+    """libdevice.round semantics: half-away-from-zero (NOT python banker's round)."""
+    import math
+
+    return int(math.copysign(math.floor(abs(x) + 0.5), x))
+
+
+def _silu_mul_quant_codes(y_row, use_rounding):
+    """CPU reference of the post-silu per-token INT8 quant epilogue.
+
+    Mirrors _silu_mul_quant_deep_gemm: y_s = max(max|y|, eps)/127;
+    clamp(y/y_s, -128, 127); then round (half-away) or trunc (toward zero).
+    Clamp bounds, y_s and its dtype are identical to the kernel.
+    """
+    eps = 1e-10
+    qmin, qmax = -128, 127
+    amax = max((abs(v) for v in y_row), default=0.0)
+    y_s = max(amax, eps) / qmax
+    codes = []
+    for v in y_row:
+        r = min(max(v / y_s, qmin), qmax)
+        codes.append(_half_away_round(r) if use_rounding else int(r))
+    return codes, y_s
+
+
+def _param_default(fn_node, name):
+    args = fn_node.args.args
+    defaults = fn_node.args.defaults
+    offset = len(args) - len(defaults)
+    for i, a in enumerate(args):
+        if a.arg == name:
+            return defaults[i - offset] if i >= offset else None
+    raise AssertionError(f"parameter {name!r} not found")
+
+
+def _calls_to(node, name):
+    """Calls to `name(...)` or `name[grid](...)` within an AST body."""
+    out = []
+    for c in ast.walk(node):
+        if not isinstance(c, ast.Call):
+            continue
+        f = c.func
+        if isinstance(f, ast.Name) and f.id == name:
+            out.append(c)
+        elif (
+            isinstance(f, ast.Subscript)
+            and isinstance(f.value, ast.Name)
+            and f.value.id == name
+        ):
+            out.append(c)
+    return out
+
+
+# req1: code-layer expected int8 with the +2.5/-2.5 half-away boundary.
+def test_c1_quant_code_layer_half_away_boundary():
+    """Locks libdevice.round = half-away-from-zero (the entry round_int8 op),
+    discriminating it from BOTH truncation and half-to-even (banker's)."""
+    # amax=127 -> y_s=1.0, so y/y_s == y exactly
+    y = [127.0, 2.5, -2.5, 0.5, -0.5, 1.5, -1.5, 2.4999, 2.5001]
+    cr, ys = _silu_mul_quant_codes(y, use_rounding=True)
+    ct, _ = _silu_mul_quant_codes(y, use_rounding=False)
+    assert abs(ys - 1.0) < 1e-12
+    # half-away: +2.5->+3, -2.5->-3, +0.5->+1, -0.5->-1
+    assert cr == [127, 3, -3, 1, -1, 2, -2, 2, 3]
+    # truncation toward zero (the unpatched native behavior)
+    assert ct == [127, 2, -2, 0, 0, 1, -1, 2, 2]
+    # discriminate from half-to-even: banker's gives 2.5->2, 0.5->0, -2.5->-2, -0.5->0
+    assert cr[1] == 3 and cr[3] == 1 and cr[2] == -3 and cr[4] == -1
+    # the patch changes only the .5-boundary codes, each by exactly +/-1
+    for a, b in zip(ct, cr):
+        assert abs(a - b) <= 1
+    assert any(a != b for a, b in zip(ct, cr))
+
+
+# req2: fp8 (and W8A8) byte-unchanged — constexpr branch isolation.
+def test_c1_round_branch_constexpr_else_byte_identical():
+    node = definition(ROOT / BATCHED, "_silu_mul_quant_deep_gemm")
+    args = {a.arg: a for a in node.args.args}
+    assert "USE_ROUNDING" in args
+    assert ast.unparse(args["USE_ROUNDING"].annotation) == "tl.constexpr"
+    d = _param_default(node, "USE_ROUNDING")
+    assert isinstance(d, ast.Constant) and d.value is False
+    ifs = [
+        n
+        for n in ast.walk(node)
+        if isinstance(n, ast.If)
+        and isinstance(n.test, ast.Name)
+        and n.test.id == "USE_ROUNDING"
+    ]
+    assert len(ifs) == 1
+    br = ifs[0]
+    assert br.orelse, "must keep an else branch"
+    else_src = ast.unparse(ast.Module(body=br.orelse, type_ignores=[])).strip()
+    # the else branch is the ORIGINAL truncating cast, byte-for-byte
+    assert else_src == (
+        "y_q = tl.clamp(y / y_s, quant_min, quant_max).to(y_q_ptr.dtype.element_ty)"
+    )
+    then_src = ast.unparse(ast.Module(body=br.body, type_ignores=[]))
+    assert "tl.extra.cuda.libdevice.round" in then_src
+    assert "tl.clamp(y / y_s, quant_min, quant_max)" in then_src
+
+
+def test_c1_fp8_wrapper_never_rounds():
+    node = definition(ROOT / BATCHED, "persistent_masked_m_silu_mul_quant")
+    assert all(a.arg != "use_rounding" for a in node.args.args)
+    calls = _calls_to(node, "_persistent_masked_m_silu_mul_quant")
+    assert len(calls) == 1
+    assert all(k.arg != "use_rounding" for k in calls[0].keywords)
+    kw = {k.arg: ast.unparse(k.value) for k in calls[0].keywords}
+    assert kw.get("use_fp8") == "True" and kw.get("use_int8") == "False"
+
+
+def test_c1_w8a8_and_fp8_callers_never_round():
+    node = definition(ROOT / BATCHED, "PPUBatchedDeepGemmExperts.apply")
+    for wrapper in (
+        "persistent_masked_m_silu_mul_quant",
+        "int8_persistent_masked_m_silu_mul_quant",
+    ):
+        for c in _calls_to(node, wrapper):
+            assert all(k.arg != "use_rounding" for k in c.keywords), (
+                f"{wrapper} caller must stay truncating (byte-identical)"
+            )
+
+
+def test_c1_only_w4a8_call_site_enables_round():
+    node = definition(ROOT / EXPERTS, f"{NATIVE}.apply")
+    calls = _calls_to(node, "int8_persistent_masked_m_silu_mul_quant")
+    assert len(calls) == 1
+    kw = {k.arg: k.value for k in calls[0].keywords}
+    assert "use_rounding" in kw
+    assert isinstance(kw["use_rounding"], ast.Constant) and kw["use_rounding"].value is True
+    # both wrappers default False (opt-in), so all other callers are unaffected
+    for fn in (
+        "int8_persistent_masked_m_silu_mul_quant",
+        "_persistent_masked_m_silu_mul_quant",
+    ):
+        d = _param_default(definition(ROOT / BATCHED, fn), "use_rounding")
+        assert isinstance(d, ast.Constant) and d.value is False
+    # persistent forwards USE_ROUNDING=use_rounding into the kernel launch
+    pnode = definition(ROOT / BATCHED, "_persistent_masked_m_silu_mul_quant")
+    launches = _calls_to(pnode, "_silu_mul_quant_deep_gemm")
+    assert len(launches) == 1
+    lk = {k.arg: ast.unparse(k.value) for k in launches[0].keywords}
+    assert lk.get("USE_ROUNDING") == "use_rounding"
+    # int8 wrapper forwards use_rounding=use_rounding
+    inode = definition(ROOT / BATCHED, "int8_persistent_masked_m_silu_mul_quant")
+    ic = _calls_to(inode, "_persistent_masked_m_silu_mul_quant")
+    assert len(ic) == 1
+    assert any(
+        k.arg == "use_rounding" and ast.unparse(k.value) == "use_rounding"
+        for k in ic[0].keywords
+    )
+
+
+def test_c1_scale_clamp_and_ys_dtype_unchanged():
+    ksrc = ast.unparse(definition(ROOT / BATCHED, "_silu_mul_quant_deep_gemm"))
+    assert "y_s = tl.maximum(tl.max(tl.abs(y)), eps) / quant_max" in ksrc
+    # both branches clamp with the SAME quant_min/quant_max (no new bounds)
+    assert ksrc.count("tl.clamp(y / y_s, quant_min, quant_max)") == 2
+    psrc = ast.unparse(definition(ROOT / BATCHED, "_persistent_masked_m_silu_mul_quant"))
+    assert "torch.iinfo(quant_dtype)" in psrc
+    assert "quant_max = f_info.max" in psrc and "quant_min = f_info.min" in psrc
+    assert "y_s.dtype == torch.float32" in psrc
+
+
+# req3: real fixture skip != pass; C1 must not touch the weight path.
+def test_c1_does_not_touch_weight_preprocess_path():
+    for name in (f"{NATIVE}.process_weights_after_loading", "_w4a8_undo_checkpoint_T"):
+        src = ast.unparse(definition(ROOT / EXPERTS, name))
+        assert "use_rounding" not in src
+        assert "libdevice.round" not in src
+
+
+def test_c1_real_activation_fixture_skips_when_absent():
+    """req3: real post-gemm1 activations vs acext round reference, bit-for-bit.
+
+    The authoritative numeric confirmation (device 47.0% code disagreement -> 0,
+    L1 -1.61%, whole-machine gsm8k Delta) is the challenger's on-card job. On CPU
+    this SKIPS when W4A8_SILU_ACT_FIXTURE is absent -- a skip is NOT a pass. When
+    populated with real y rows + acext int8 reference codes, the patched round
+    codes must equal the reference exactly.
+    """
+    import json
+    import os
+
+    path = os.environ.get("W4A8_SILU_ACT_FIXTURE")
+    if not path or not os.path.isfile(path):
+        pytest.skip(
+            "real activation fixture not populated; dump post-gemm1 y rows + "
+            "acext int8 reference codes to a writable dir and set "
+            "W4A8_SILU_ACT_FIXTURE. Numeric claim deferred to whole-machine Delta."
+        )
+    data = json.loads(open(path).read())
+    for row in data["rows"]:
+        codes, _ = _silu_mul_quant_codes(row["y"], use_rounding=True)
+        assert codes == row["acext_int8"], "round codes must equal acext reference"
+
+
+# req4: round effective — trunc-vs-round disagreement (device 47.0%) and the
+# L1 shrinkage direction; round codes == independent half-away reference (0 diff).
+def test_c1_trunc_vs_round_disagreement_and_shrinkage():
+    import math
+    import random
+
+    rng = random.Random(2026)
+    I = 64
+    total = disagree = l1_t = l1_r = 0
+    for _ in range(300):
+        gate = [rng.gauss(0, 1) for _ in range(I)]
+        up = [rng.gauss(0, 1) for _ in range(I)]
+        y = [_silu(g) * u for g, u in zip(gate, up)]
+        ct, _ = _silu_mul_quant_codes(y, use_rounding=False)
+        cr, _ = _silu_mul_quant_codes(y, use_rounding=True)
+        # independent half-away reference: cross-check the helper, 0 disagreement
+        amax = max(abs(v) for v in y) or 1e-10
+        ys = max(amax, 1e-10) / 127
+        ref = [
+            int(math.copysign(math.floor(abs(min(max(v / ys, -128), 127)) + 0.5),
+                              min(max(v / ys, -128), 127)))
+            for v in y
+        ]
+        assert cr == ref, "round branch must equal the entry operator bit-for-bit"
+        for a, b in zip(ct, cr):
+            total += 1
+            disagree += a != b
+            l1_t += abs(a)
+            l1_r += abs(b)
+    frac = disagree / total
+    # substantial disagreement reproduces the device 47.0% order (not hardcoded)
+    assert frac > 0.30, f"trunc-vs-round disagreement {frac:.3f} too small"
+    # truncation shrinks L1 magnitude (device L1 -1.61%); round removes the shrink
+    assert l1_t < l1_r

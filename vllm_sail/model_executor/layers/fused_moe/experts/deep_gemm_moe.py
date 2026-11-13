@@ -2183,6 +2183,12 @@ class PPUDeepGemmExpertsW4A8Int8(mk.FusedMoEExpertsModular):
             is_situ=(activation == MoEActivation.SITU),
             situ_beta=self.activation_situ_beta,
             situ_linear_beta=self.activation_situ_linear_beta,
+            # PPU MODIFICATION: begin -- C1 fix: round-to-nearest (half-away-from-
+            # zero) to match the entry per_token_quant_int8 operator; the legacy
+            # acext path rounds, the native masked path truncated. Default False
+            # elsewhere keeps fp8 and W8A8 int8 byte-identical.
+            use_rounding=True,
+            # PPU MODIFICATION: end
         )
 
         int8_int4_m_grouped_gemm_nt_masked(

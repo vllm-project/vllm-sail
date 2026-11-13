@@ -214,6 +214,12 @@ def _silu_mul_quant_deep_gemm(
     # Meta ---------------------------------------------------------------
     BLOCK: tl.constexpr,
     NUM_STAGES: tl.constexpr,
+    # PPU MODIFICATION: begin -- opt-in round-to-nearest; default preserves the
+    # truncating behavior so fp8 and existing int8 callers stay byte-identical.
+    # Placed last so no non-default constexpr follows it (Python signature rule);
+    # all meta params are passed by keyword at the launch site.
+    USE_ROUNDING: tl.constexpr = False,
+    # PPU MODIFICATION: end
 ):
     # 3D grid: (G, token_parallel_blocks, E)
     # axis-0 = group index, axis-1 = token block index, axis-2 = expert
@@ -268,7 +274,19 @@ def _silu_mul_quant_deep_gemm(
         if ceil_ue8m0:
             y_s = tl.exp2(tl.ceil(tl.log2(y_s)))
 
-        y_q = tl.clamp(y / y_s, quant_min, quant_max).to(y_q_ptr.dtype.element_ty)
+        # PPU MODIFICATION: begin -- opt-in round-to-nearest before the cast.
+        # libdevice.round is half-away-from-zero, the SAME operator the entry
+        # quant uses (vllm int8_utils.round_int8), so enabling it makes the
+        # post-silu quant consistent with the entry quant instead of truncating.
+        # The else branch is byte-identical to the original truncating cast, so
+        # fp8 and existing int8 callers (USE_ROUNDING=False) are unaffected.
+        # Clamp bounds, y_s and its dtype are deliberately left unchanged.
+        if USE_ROUNDING:
+            clamp_val = tl.clamp(y / y_s, quant_min, quant_max)
+            y_q = tl.extra.cuda.libdevice.round(clamp_val).to(y_q_ptr.dtype.element_ty)
+        else:
+            y_q = tl.clamp(y / y_s, quant_min, quant_max).to(y_q_ptr.dtype.element_ty)
+        # PPU MODIFICATION: end
 
         tl.store(y_q_ptr + base_yq_offset + t * stride_yq_t, y_q, mask=mask)
         tl.store(y_s_ptr + base_ys_offset + t * stride_ys_t, y_s)
@@ -288,6 +306,10 @@ def _persistent_masked_m_silu_mul_quant(
     is_situ: bool = False,
     situ_beta: float = 1.0,
     situ_linear_beta: float = -1.0,
+    # PPU MODIFICATION: begin -- opt-in round-to-nearest for the quantizing
+    # epilogue; default False keeps fp8 and existing int8 callers byte-identical.
+    use_rounding: bool = False,
+    # PPU MODIFICATION: end
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Quantize silu(y[..., :H]) * y[..., H:] to FP8 with group per-token scales
     y has shape (E, T, 2*H). The first half of the last dimension is
@@ -451,6 +473,10 @@ def _persistent_masked_m_silu_mul_quant(
             IS_SITU=is_situ,
             SITU_BETA=situ_beta,
             SITU_LINEAR_BETA=situ_linear_beta,
+            # PPU MODIFICATION: begin -- forward the opt-in rounding flag; when
+            # False the kernel compiles the byte-identical truncating else branch.
+            USE_ROUNDING=use_rounding,
+            # PPU MODIFICATION: end
             BLOCK=block_size,
             NUM_STAGES=n_stages,
             num_warps=n_warps,
@@ -501,6 +527,11 @@ def int8_persistent_masked_m_silu_mul_quant(
     is_situ: bool = False,
     situ_beta: float = 1.0,
     situ_linear_beta: float = -1.0,
+    # PPU MODIFICATION: begin -- opt-in round-to-nearest; default False keeps the
+    # existing W8A8 int8 caller byte-identical (truncating), only the W4A8 masked
+    # call site enables it to match the entry per-token quant operator.
+    use_rounding: bool = False,
+    # PPU MODIFICATION: end
 ):
     return _persistent_masked_m_silu_mul_quant(
         y,
@@ -516,6 +547,9 @@ def int8_persistent_masked_m_silu_mul_quant(
         is_situ=is_situ,
         situ_beta=situ_beta,
         situ_linear_beta=situ_linear_beta,
+        # PPU MODIFICATION: begin
+        use_rounding=use_rounding,
+        # PPU MODIFICATION: end
     )
 
 
