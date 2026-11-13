@@ -4,6 +4,7 @@
 #include <ATen/cuda/CUDAContext.h>
 #include <c10/cuda/CUDAException.h>
 #include <c10/cuda/CUDAGuard.h>
+#include <hggc_runtime.h>
 #include <algorithm>
 #include <cfloat>
 #include <cmath>
@@ -325,12 +326,12 @@ template <int Threads> __global__ void merge_single_row(Decode p) {
     out[0] = p.output_pair(sum.x, sum.y, sigmoid); out[1] = p.output_pair(sum.z, sum.w, sigmoid);
   }
 }
-void launch_single_row(Decode p, cudaStream_t stream) {
+void launch_single_row(Decode p, hggcStream_t stream) {
   const dim3 blocks(p.splits, p.heads / 8);
   packed_attention<8, kSingleRowTile, 1, false, true><<<blocks, 32, 0, stream>>>(p);
   if (p.splits > 1) { constexpr int tiles = kHeadDim / kSingleRowMergeWidth; merge_single_row<kSingleRowMergeThreads><<<p.heads * tiles, kSingleRowMergeThreads, 0, stream>>>(p); }
 }
-template <int Warps, bool Direct = false> void launch(Decode p, cudaStream_t stream) {
+template <int Warps, bool Direct = false> void launch(Decode p, hggcStream_t stream) {
   constexpr int TG = Warps == 1 ? 4 : 2;
   const int work = Direct ? p.rows : p.rows * p.splits, blocks = (work + Warps - 1) / Warps;
   if (p.heads == 16) packed_attention<16, TG, Warps, Direct><<<blocks, 32 * Warps, 0, stream>>>(p);

@@ -4,6 +4,7 @@
 #include <ATen/cuda/CUDAContext.h>
 #include <c10/cuda/CUDAException.h>
 #include <c10/cuda/CUDAGuard.h>
+#include <hggc_runtime.h>
 #include <cfloat>
 #include <climits>
 #include <cmath>
@@ -665,14 +666,14 @@ void step5_native_attention_kernel(Params p) {
   __builtin_trap();
 #endif
 }
-template <int BQ> void launch(Params p, cudaStream_t stream) {
+template <int BQ> void launch(Params p, hggcStream_t stream) {
   constexpr int HT = kHeads / 8, BS = BQ == 1 ? 16 : 64, PARTS = BQ == 1 ? 8 : 1;
   constexpr bool group_cta = BQ == 8 && kHeads == 16;
   const int blocks = p.groups * (group_cta ? 1 : kGroupRows / BQ);
   if constexpr (BQ > 1) {
     constexpr int bytes = BQ * kWords * sizeof(uint32_t);
     if (p.logical_regions > kWindowRegions) {
-      C10_CUDA_CHECK(cudaFuncSetAttribute(step5_prepare_union_kernel<BQ, group_cta, 2 * kWords>, cudaFuncAttributeMaxDynamicSharedMemorySize, 2 * bytes));
+      C10_CUDA_CHECK(hggcFuncSetAttribute(step5_prepare_union_kernel<BQ, group_cta, 2 * kWords>, hggcFuncAttributeMaxDynamicSharedMemorySize, 2 * bytes));
       step5_prepare_union_kernel<BQ, group_cta, 2 * kWords><<<blocks, 2 * kWords, 2 * bytes, stream>>>(p);
     } else step5_prepare_union_kernel<BQ, group_cta, kWords><<<blocks, kWords, bytes, stream>>>(p);
     C10_CUDA_KERNEL_LAUNCH_CHECK();
@@ -680,10 +681,10 @@ template <int BQ> void launch(Params p, cudaStream_t stream) {
   constexpr int threads = (BQ == 1 ? 1 : BQ / 2) * HT * 32, bytes = BS * 192 * 4 * PARTS;
   static_assert(PARTS == 1 || ((PARTS - 1) * HT * 8 * 192 + PARTS * HT * 8) * 4 <= bytes);
   if constexpr (BQ == 8) {
-    C10_CUDA_CHECK(cudaFuncSetAttribute(step5_native_attention_kernel<kHeads>, cudaFuncAttributeMaxDynamicSharedMemorySize, bytes));
+    C10_CUDA_CHECK(hggcFuncSetAttribute(step5_native_attention_kernel<kHeads>, hggcFuncAttributeMaxDynamicSharedMemorySize, bytes));
     step5_native_attention_kernel<kHeads><<<blocks, threads, bytes, stream>>>(p);
   } else {
-    C10_CUDA_CHECK(cudaFuncSetAttribute(step5_paged_attention_kernel<BQ, HT, BS, PARTS>, cudaFuncAttributeMaxDynamicSharedMemorySize, bytes));
+    C10_CUDA_CHECK(hggcFuncSetAttribute(step5_paged_attention_kernel<BQ, HT, BS, PARTS>, hggcFuncAttributeMaxDynamicSharedMemorySize, bytes));
     step5_paged_attention_kernel<BQ, HT, BS, PARTS><<<blocks, threads * PARTS, bytes, stream>>>(p);
   }
 }
