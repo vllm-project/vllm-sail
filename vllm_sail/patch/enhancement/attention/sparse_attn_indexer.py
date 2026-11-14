@@ -173,6 +173,31 @@ def sparse_attn_indexer_init(
 
 
 _upstream_forward_native = _indexer.SparseAttnIndexer.forward_native
+_upstream_mqa_logits_mx_inputs = _indexer.mqa_logits_mx_inputs
+
+
+@patch(
+    _MODULE,
+    "mqa_logits_mx_inputs",
+    reason=(
+        "PPU's MXFP4 MQA logits kernels require BF16 weights, but upstream "
+        "gates the weights cast behind mqa_logits_use_mx_scales(), which is "
+        "SM100-only; on PPU (capability 89) FP32 producer weights pass "
+        "through and the SAIL DeepGEMM kernel rejects them. Cast FP32 "
+        "weights to BF16 for FP4 queries (non-None q_scale); FP8 queries "
+        "(q_scale folded into FP32 weights) are untouched."
+    ),
+    affected_versions=_AFFECTED,
+    remove_when="mqa_logits_use_mx_scales() covers PPU, or the cast moves out of the SM100 gate.",
+)
+def mqa_logits_mx_inputs_ppu(q, q_scale, weights):
+    result = _upstream_mqa_logits_mx_inputs(q, q_scale, weights)
+    if q_scale is None or not current_platform.is_ppu():
+        return result
+    q_scale_out, weights_out = result
+    if weights_out.dtype != torch.bfloat16:
+        weights_out = weights_out.to(torch.bfloat16)
+    return q_scale_out, weights_out
 
 
 @patch(

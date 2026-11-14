@@ -113,6 +113,7 @@ _ATTENTION_TARGETS = (
         "vllm.v1.attention.ops.triton_decode_attention",
         "_decode_grouped_att_m_fwd",
     ),
+    ("vllm.model_executor.layers.sparse_attn_indexer", "mqa_logits_mx_inputs"),
     ("vllm.model_executor.layers.sparse_attn_indexer", "SparseAttnIndexer.__init__"),
     (
         "vllm.model_executor.layers.sparse_attn_indexer",

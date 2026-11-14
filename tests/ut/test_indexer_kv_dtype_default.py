@@ -146,7 +146,8 @@ def test_mxfp4_stays_rejected_below_sm_89(installed_indexer):
 
 
 @pytest.mark.parametrize(
-    "model_type", ["deepseek_v4", "deepseek_v41", "deepseek_v41_text"]
+    "model_type",
+    ["deepseek_v4", "deepseek_v41", "deepseek_v41_text", "kimi_k3"],
 )
 def test_mxfp4_default_is_available_to_both_deepseek_producers(
     installed_indexer, model_type
@@ -155,15 +156,102 @@ def test_mxfp4_default_is_available_to_both_deepseek_producers(
     assert uses_fp4(config("auto", model_type)) is True
 
 
-@pytest.mark.parametrize("model_type", ["glm5", "glm5_next", "deepseek_v3", "kimi_k3"])
+@pytest.mark.parametrize(
+    "model_type", ["kimi_k3", "kimi_k31", "kimi_linear"]
+)
+def test_kimi_models_resolve_the_mxfp4_indexer_cache(installed_indexer, model_type):
+    """Kimi K3.1 shares the DSA indexer and its MXFP4 cache producer."""
+    uses_fp4, _, _ = installed_indexer(89)
+    assert uses_fp4(config("auto", model_type)) is True
+    assert uses_fp4(config("mxfp4", model_type)) is True
+    # An explicit fp8 request still wins over the mxfp4 default.
+    assert uses_fp4(config("fp8", model_type)) is False
+
+
+@pytest.mark.parametrize("model_type", ["glm5", "glm5_next", "deepseek_v3"])
 def test_fixed_fp8_models_do_not_inherit_deepseek_mxfp4_metadata(
     installed_indexer, model_type
 ):
     uses_fp4, _, _ = installed_indexer(89)
     assert uses_fp4(config("auto", model_type)) is False
     assert uses_fp4(config("fp8", model_type)) is False
-    with pytest.raises(ValueError, match="requires DeepSeek V4 or V4.1"):
+    with pytest.raises(ValueError, match="requires DeepSeek V4/V4.1 or Kimi K3.1"):
         uses_fp4(config("mxfp4", model_type))
+
+
+def test_builder_init_reads_kimi_head_count(modules, patch_utils_module):
+    """Kimi K3.1 nests the geometry under ``dsa_config``; the KV-cache spec
+    wins whenever it carries geometry."""
+    platform = NS(is_ppu=lambda: True, is_device_capability=lambda cap: cap == 89)
+    fake_torch = modules("torch", float32="fp32", int32="int32")
+    fake_torch.empty = lambda shape, dtype=None, device=None: NS(
+        shape=shape, dtype=dtype, device=device
+    )
+    modules("vllm.platforms", current_platform=platform)
+    modules(
+        "vllm.v1.attention.backend",
+        CommonAttentionMetadata=type("CommonAttentionMetadata", (), {}),
+    )
+    modules("vllm_sail.patch.utils", patch_value=patch_utils_module.patch_value)
+    deep_gemm = modules("vllm_sail.utils.deep_gemm")
+    deep_gemm.get_num_sms = lambda: 8
+    provider = modules(
+        "vllm.v1.attention.backends.mla.indexer",
+        DeepseekV32IndexerMetadataBuilder=type(
+            "DeepseekV32IndexerMetadataBuilder",
+            (),
+            {
+                "__init__": lambda self: None,
+                "build": lambda self, *args, **kwargs: None,
+                "_prepare_decode_tensors": lambda self, *args, **kwargs: None,
+                "update_draft_decode_metadata": lambda self, metadata: None,
+            },
+        ),
+        DeepseekV32IndexerMetadata=type("DeepseekV32IndexerMetadata", (), {}),
+        get_paged_mqa_logits_metadata=lambda *args, **kwargs: None,
+        dsa_indexer_uses_fp4=lambda config: False,
+        _supports_flattened_device_query_lens=lambda: False,
+        _supports_varlen_paged_mqa_logits=lambda: False,
+        DSA_INDEXER_KV_DTYPES=("fp8", "mxfp4"),
+        PPU_DEEP_GEMM_TB_PER_CU=8,
+    )
+    patch = load_patch("vllm_sail/patch/enhancement/attention/mla_indexer.py")
+
+    def build(hf_attrs, spec_attrs=None):
+        self = NS(
+            vllm_config=NS(model_config=NS(hf_text_config=NS(**hf_attrs))),
+            kv_cache_spec=NS(**(spec_attrs or {})),
+            device="device",
+        )
+        patch._builder_init_wrapper(self)
+        return self
+
+    # Kimi K3.1: geometry nested under ``dsa_config`` (object form).
+    kimi = build(
+        {"dsa_config": NS(index_num_heads=32, index_head_dim=128)}
+    )
+    assert kimi.indexer_n_head == 32
+    assert kimi.indexer_q_head_dim == 128
+    # Kimi K3.1 with a raw-dict ``dsa_config``.
+    kimi_dict = build(
+        {"dsa_config": {"index_num_heads": 32, "index_head_dim": 128}}
+    )
+    assert kimi_dict.indexer_n_head == 32
+    assert kimi_dict.indexer_q_head_dim == 128
+    # DeepSeek V4.1: only ``index_n_heads`` is present.
+    deepseek = build({"index_n_heads": 64, "index_head_dim": 128})
+    assert deepseek.indexer_n_head == 64
+    # The KV-cache spec still wins over both spellings.
+    spec_first = build(
+        {"dsa_config": NS(index_num_heads=32, index_head_dim=128)},
+        {"indexer_n_head": 16, "indexer_q_head_dim": 64},
+    )
+    assert spec_first.indexer_n_head == 16
+    assert spec_first.indexer_q_head_dim == 64
+    # The fp4 scheduler buffer is sized from the SM count.
+    assert kimi.scheduler_metadata_buffer.shape == (8 * 8 + 1, 2)
+    assert kimi.scheduler_metadata_buffer.dtype == "int32"
+    assert kimi.num_sms == 8
 
 
 def test_non_ppu_delegates_to_upstream(installed_indexer):

@@ -244,11 +244,17 @@ def dsa_indexer_uses_fp4(vllm_config):
 
     if not current_platform.is_ppu():
         return _upstream_uses_fp4(vllm_config)
-    # PPU MODIFICATION: begin -- only V4/V4.1 have MXFP4 query/cache producers.
+    # PPU MODIFICATION: begin -- only V4/V4.1 and Kimi K3.1 have MXFP4
+    # query/cache producers.
     model_config = vllm_config.model_config
     hf_config = model_config.hf_text_config
     supports_fp4 = hf_config.model_type in (
-        "deepseek_v4", "deepseek_v41", "deepseek_v41_text"
+        "deepseek_v4", "deepseek_v41", "deepseek_v41_text",
+        # Kimi K3.1 shares the DSA indexer and quantises its cache through
+        # ``dsa_cache`` when this helper resolves True. ``hf_text_config``
+        # surfaces either the top-level or the text sub-config type depending
+        # on how the checkpoint was serialized, so accept both spellings.
+        "kimi_k3", "kimi_k31", "kimi_linear",
     )
     # sm_89 (Zhenwu M890) defaults these models to the MXFP4 indexer
     # cache. It halves the per-token K cache (132B -> 68B) and keeps the whole
@@ -265,7 +271,9 @@ def dsa_indexer_uses_fp4(vllm_config):
     if kv_dtype == "mxfp4" and not current_platform.is_device_capability(89):
         raise ValueError("PPU indexer_kv_dtype='mxfp4' requires capability sm_89")
     if kv_dtype == "mxfp4" and not supports_fp4:
-        raise ValueError("PPU indexer_kv_dtype='mxfp4' requires DeepSeek V4 or V4.1")
+        raise ValueError(
+            "PPU indexer_kv_dtype='mxfp4' requires DeepSeek V4/V4.1 or Kimi K3.1"
+        )
     return kv_dtype == "mxfp4"
 
 
@@ -312,12 +320,25 @@ def _builder_init_wrapper(self, *args, **kwargs) -> None:
     if not current_platform.is_ppu():
         return
     hf_config = self.vllm_config.model_config.hf_text_config
-    self.indexer_n_head = getattr(self.kv_cache_spec, "indexer_n_head", 0) or getattr(
-        hf_config, "index_n_heads", 0
+    # Kimi K3.1 nests the indexer geometry under ``dsa_config`` (and names
+    # the head count ``index_num_heads``); DeepSeek V4/V4.1 (and the
+    # KV-cache spec) put ``index_n_heads`` on the text config itself.
+    dsa_config = getattr(hf_config, "dsa_config", None)
+    if dsa_config is None or isinstance(dsa_config, dict):
+        dsa_get = (dsa_config or {}).get
+    else:
+        dsa_get = lambda name: getattr(dsa_config, name, 0)  # noqa: E731
+    self.indexer_n_head = (
+        getattr(self.kv_cache_spec, "indexer_n_head", 0)
+        or getattr(hf_config, "index_n_heads", 0)
+        or getattr(hf_config, "index_num_heads", 0)
+        or dsa_get("index_num_heads")
     )
-    self.indexer_q_head_dim = getattr(
-        self.kv_cache_spec, "indexer_q_head_dim", 0
-    ) or getattr(hf_config, "index_head_dim", 0)
+    self.indexer_q_head_dim = (
+        getattr(self.kv_cache_spec, "indexer_q_head_dim", 0)
+        or getattr(hf_config, "index_head_dim", 0)
+        or dsa_get("index_head_dim")
+    )
     if (getattr(hf_config, "index_kpool", 1) or 1) > 1:
         # GLM-5-Next zero-pads its queries and weights to at least 32 heads.
         self.indexer_n_head = max(32, self.indexer_n_head)

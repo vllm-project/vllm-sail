@@ -142,6 +142,7 @@ def _rebind_consumers():
         (
             (
                 "vllm.model_executor.kernels.attention.dsa.candidate_blocks",
+                "vllm.model_executor.layers.sparse_attn_indexer",
                 "vllm.models.step5.nvidia.ops.sparse_indexer",
             ),
             _original_supported,
@@ -150,6 +151,7 @@ def _rebind_consumers():
         (
             (
                 "vllm.model_executor.kernels.attention.dsa.candidate_blocks",
+                "vllm.model_executor.layers.sparse_attn_indexer",
                 _SPARSE_MODULE,
             ),
             _original_topk,
