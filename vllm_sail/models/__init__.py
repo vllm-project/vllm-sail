@@ -16,8 +16,9 @@ Registered architectures (cross-checked against the PPU fork):
   fork's ``ppu/mtp.py``.
 * ``DSparkDraftModel`` -> ``vllm_sail.models.deepseek_v4.dspark`` — injects
   the target model's quantization mappings into DSpark's fresh quant config.
-* ``GlmMoeDsaForCausalLM`` / ``DeepseekV32MTPModel`` -> legacy upstream models
-  retaining PPU INT8 indexer and checkpoint-loader patches.
+* ``DeepseekV32ForCausalLM`` / ``DeepseekV32MTPModel`` -> new V3.2 main/MTP
+  stack with PPU INT8/FP8 indexer and checkpoint loaders.
+* ``GlmMoeDsaForCausalLM`` -> legacy upstream model retaining its PPU patches.
 * ``MiniMaxM3SparseForCausalLM`` / ``MiniMaxM3SparseForConditionalGeneration``
   -> ``vllm_sail.models.minimax_m3`` — upstream classes plus the
   ``SupportsQuant`` interface the fork adds (its only minimax_m3 change).
@@ -57,7 +58,10 @@ _REQUIRED_PPU_MODELS: dict[str, str] = {
     "GlmMoeDsaForCausalLM": (
         "vllm.model_executor.models.deepseek_v2:GlmMoeDsaForCausalLM"
     ),
-    "DeepseekV32MTPModel": "vllm.model_executor.models.deepseek_mtp:DeepSeekMTP",
+    "DeepseekV32ForCausalLM": (
+        "vllm_sail.models.deepseek_v32.model:DeepseekV32ForCausalLM"
+    ),
+    "DeepseekV32MTPModel": "vllm_sail.models.deepseek_v32.mtp:DeepseekV32MTP",
 }
 
 #: Optional overrides may fail independently without disabling DeepSeek V4.

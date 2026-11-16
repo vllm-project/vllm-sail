@@ -27,6 +27,7 @@ need workload-specific tuning.
 | Mixture of experts | PPU backends for unquantized and selected quantized experts | Backend support varies with expert shape and quantization format |
 | FlashAttention | PPU FlashAttention 2 and 3 integration | Matching SDK libraries; version selection follows availability and model constraints |
 | MLA and sparse attention | PPU FlashMLA integration and sparse indexer | Matching PPU libraries; FP8 dense FlashMLA decode is unavailable |
+| DeepSeek V3.2 main and MTP | New V3.2 model stack with an INT8 indexer on Zhenwu 810E and an FP8 indexer on Zhenwu M890 | BF16 activations and main MLA cache, FlashMLA sparse, PCP=DCP=1; device and full-model qualification pending |
 | Gated delta networks | PLA and Triton paths for GDN | PLA availability and supported shapes determine dispatch |
 | Kimi delta attention | PLA and Triton paths for KDA | PLA prefill retains final recurrent state; intermediate prefill checkpoints are disabled. Backend and sequence-shape constraints apply |
 | Native operations | HGGC activation, normalization, quantization, routing, cache, sampling and model-specific kernels | Only the selected source corpus is compiled; each changed kernel needs device correctness tests |

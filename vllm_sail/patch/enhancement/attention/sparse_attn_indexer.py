@@ -57,7 +57,8 @@ def _with_target_globals(fn):
         "the fork's PPU branch must run first. Delegation cannot intercept the "
         "upstream raise, hence the verbatim body. PPU logits still require SAIL "
         "DeepGEMM. The PPU op also publishes its required producer weights "
-        "dtype, following SparseMQAIndexer's contract."
+        "dtype, following SparseMQAIndexer's contract. SM80 pack warmup uses "
+        "the actual INT8 queries instead of an unsupported FP8 conversion."
     ),
     affected_versions=_AFFECTED,
     remove_when="upstream downgrades the missing-DeepGEMM error to a warning, or PPU always ships DeepGEMM.",
@@ -148,10 +149,20 @@ def sparse_attn_indexer_init(
             _UNPACK_SEQ_TRITON_KERNEL,
         )
 
-        pack_dtype = torch.uint8 if use_fp4_cache else current_platform.fp8_dtype()
+        # PPU MODIFICATION: begin
+        # SM80 queries contain real INT8 values. Do not compile an FP8
+        # packer during warmup when the producer cannot emit FP8.
+        use_int8 = current_platform.is_ppu() and not current_platform.supports_fp8()
+        pack_dtype = (
+            torch.uint8 if use_fp4_cache else
+            torch.int8 if use_int8 else current_platform.fp8_dtype()
+        )
+        # PPU MODIFICATION: end
         _PACK_SEQ_TRITON_KERNEL.register_warmup(
             dtype=pack_dtype,
-            pad_value=0 if use_fp4_cache else -float("inf"),
+            # PPU MODIFICATION: begin
+            pad_value=0 if use_fp4_cache or use_int8 else -float("inf"),
+            # PPU MODIFICATION: end
         )
         _UNPACK_SEQ_TRITON_KERNEL.register_warmup()
 

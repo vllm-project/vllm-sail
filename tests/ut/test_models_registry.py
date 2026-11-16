@@ -64,6 +64,7 @@ EXPECTED_ARCHITECTURES = {
     "DSparkDraftModel",
     "DSparkV41DraftModel",
     "GlmMoeDsaForCausalLM",
+    "DeepseekV32ForCausalLM",
     "DeepseekV32MTPModel",
     "MiniMaxM3SparseForCausalLM",
     "MiniMaxM3SparseForConditionalGeneration",
@@ -85,7 +86,7 @@ def test_registered_architecture_inventory() -> None:
 def test_registration_targets_are_lazy_strings() -> None:
     for arch, target in models_pkg._PPU_MODELS.items():
         module_path, _, class_name = target.partition(":")
-        if arch not in {"GlmMoeDsaForCausalLM", "DeepseekV32MTPModel"}:
+        if arch != "GlmMoeDsaForCausalLM":
             assert module_path.startswith("vllm_sail."), (arch, target)
         assert class_name, (arch, target)
 
@@ -99,13 +100,18 @@ def test_registration_targets_are_lazy_strings() -> None:
             "vllm.model_executor.models.deepseek_v2:GlmMoeDsaForCausalLM",
         ),
         (
+            "DeepseekV32ForCausalLM",
+            "DeepseekV32ForCausalLM",
+            "vllm_sail.models.deepseek_v32.model:DeepseekV32ForCausalLM",
+        ),
+        (
             "DeepseekV32MTPModel",
-            "DeepSeekV32MTP",
-            "vllm.model_executor.models.deepseek_mtp:DeepSeekMTP",
+            "DeepseekV32MTP",
+            "vllm_sail.models.deepseek_v32.mtp:DeepseekV32MTP",
         ),
     ],
 )
-def test_glm_and_mtp_replace_fp8_fused_models(
+def test_dsa_architectures_select_ppu_targets(
     fresh_models_package, fake_vllm, arch, upstream_class, ppu_target
 ) -> None:
     fake_vllm.models[arch] = f"vllm.models.deepseek_v32:{upstream_class}"
@@ -296,7 +302,12 @@ def test_one_broken_model_does_not_break_the_hook(
 
 @pytest.mark.parametrize(
     "failed_arch",
-    ["DeepSeekV4MTPModel", "GlmMoeDsaForCausalLM", "DeepseekV32MTPModel"],
+    [
+        "DeepSeekV4MTPModel",
+        "GlmMoeDsaForCausalLM",
+        "DeepseekV32ForCausalLM",
+        "DeepseekV32MTPModel",
+    ],
 )
 def test_required_registration_failure_is_transactional(
     fresh_models_package, fake_vllm: _RecordingRegistry, failed_arch

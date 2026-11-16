@@ -405,12 +405,17 @@ def ppu_sparse_attn_indexer(
                     topk_tokens,
                 )
 
-    if has_decode:
+    if has_decode and num_decode_tokens > 0:
         decode_metadata = attn_metadata_narrowed.decode
         assert decode_metadata is not None
         kv_cache = kv_cache_as_quant_view(kv_cache, head_dim, use_fp4_cache)
         decode_lens = decode_metadata.decode_lens
-        if decode_metadata.requires_padding:
+        # MTP may narrow a speculative batch without changing the metadata's
+        # padding flag. Shape-only detection avoids a device sync in capture.
+        needs_padding = decode_metadata.requires_padding or (
+            num_decode_tokens % decode_lens.shape[0] != 0
+        )
+        if needs_padding:
             # pad in edge case where we have short chunked prefill length <
             # decode_threshold since we unstrictly split
             # prefill and decode by decode_threshold
@@ -429,7 +434,9 @@ def ppu_sparse_attn_indexer(
                 )
             else:
                 padded_q_quant_decode_tokens = pack_seq_triton(
-                    q_quant[:num_decode_tokens], decode_lens
+                    q_quant[:num_decode_tokens],
+                    decode_lens,
+                    pad_value=0 if q_dtype == torch.int8 else -float("inf"),
                 )
                 padded_q_scale = None
         else:
@@ -460,7 +467,7 @@ def ppu_sparse_attn_indexer(
             # All paged DSA policies in 4869f1e use next_n=1. Q, weights,
             # contexts and page tables must share the same query row order.
             decode_weights = weights[:num_decode_tokens]
-            if decode_metadata.requires_padding:
+            if needs_padding:
                 decode_weights = pack_seq_triton(
                     decode_weights, decode_lens, pad_value=0
                 ).reshape(num_padded_tokens, -1)
@@ -536,7 +543,7 @@ def ppu_sparse_attn_indexer(
         num_rows = logits.shape[0]
         if candidate_blocks is not None:
             decode_candidates = candidate_blocks[:num_decode_tokens]
-            if decode_metadata.requires_padding:
+            if needs_padding:
                 decode_candidates = pack_seq_triton(
                     decode_candidates, decode_lens, pad_value=-1
                 ).reshape(num_padded_tokens, -1)
@@ -551,7 +558,7 @@ def ppu_sparse_attn_indexer(
                 candidate_write,
                 row_repeat,
             )
-            if candidate_write and decode_metadata.requires_padding:
+            if candidate_write and needs_padding:
                 candidate_blocks[:num_decode_tokens].copy_(
                     unpack_seq_triton(
                         decode_candidates.reshape(batch_size, next_n, -1), decode_lens
@@ -595,7 +602,7 @@ def ppu_sparse_attn_indexer(
                 topk_tokens,
             )
 
-        if decode_metadata.requires_padding:
+        if needs_padding:
             # if padded, we need to unpack
             # the topk indices removing padded tokens
             topk_indices = unpack_seq_triton(
