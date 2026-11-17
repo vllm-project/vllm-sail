@@ -28,6 +28,7 @@ PREPARE_DUMMY_ATTN_TARGET = (
     "vllm.v1.worker.gpu.model_runner.GPUModelRunner.prepare_dummy_attn"
 )
 DISPATCH_CG_TARGET = "vllm.v1.worker.gpu.model_runner.dispatch_cg_and_sync_dp"
+EXECUTE_MODEL_TARGET = "vllm.v1.worker.gpu.model_runner.GPUModelRunner.execute_model"
 
 
 @pytest.fixture
@@ -241,7 +242,7 @@ def test_prepare_dummy_attn_uses_padded_capacity_for_metadata(
     assert slot_mappings.shape == (8,)
 
 
-def test_dispatch_wrapper_records_uniform_token_count(
+def test_dispatch_wrapper_records_uniform_token_count_for_dp(
     monkeypatch, dummy_batch_module
 ):
     calls = []
@@ -268,6 +269,108 @@ def test_dispatch_wrapper_records_uniform_token_count(
     assert dummy_batch_module._get_uniform_token_count() == 3
 
 
+def test_dispatch_wrapper_clears_uniform_token_count_for_single_rank(
+    monkeypatch, dummy_batch_module
+):
+    """dp_size == 1 returns sync=None; the local vote must not be recorded."""
+
+    def original(*args, **kwargs):
+        return (NS(num_tokens=4), None)
+
+    modules(
+        monkeypatch,
+        model_runner=NS(dispatch_cg_and_sync_dp=original),
+    )
+    dummy_batch_module._set_uniform_token_count(7)
+    dummy_batch_module._install_dispatch_wrapper()
+    from vllm.v1.worker.gpu import model_runner as mr
+
+    result = mr.dispatch_cg_and_sync_dp(
+        NS(), 1, 4, 3, 4, dp_size=1, dp_rank=0
+    )
+    assert result[1] is None
+    assert dummy_batch_module._get_uniform_token_count() is None
+
+
+def test_uniform_token_count_does_not_leak_out_of_execute_model(
+    monkeypatch, dummy_batch_module
+):
+    """The profile sampler builds its own dummy batch; it must not inherit
+    the execute_model dummy batch's agreed uniform_token_count."""
+    InputBatch = _fake_input_batch()
+
+    class Sync:
+        uniform_token_count = 4
+
+    def dispatch_cg_and_sync_dp(*args, **kwargs):
+        return NS(num_tokens=8), Sync()
+
+    class GPUModelRunner:
+        def execute_model(self):
+            model_runner = sys.modules["vllm.v1.worker.gpu.model_runner"]
+            model_runner.dispatch_cg_and_sync_dp(self, 2, 8, 4, 1, 0)
+            return InputBatch.make_dummy(
+                8, 8, _fake_input_buffers(torch.device("cpu"), 8, 8)
+            )
+
+    modules(
+        monkeypatch,
+        input_batch=NS(InputBatch=InputBatch),
+        model_runner=NS(
+            GPUModelRunner=GPUModelRunner,
+            dispatch_cg_and_sync_dp=dispatch_cg_and_sync_dp,
+        ),
+        random_uuid=lambda: "deadbeef",
+    )
+    dummy_batch_module._install_make_dummy()
+    dummy_batch_module._install_dispatch_wrapper()
+    dummy_batch_module._install_execute_model_scope()
+
+    inside = GPUModelRunner().execute_model()
+    assert (inside.num_reqs, inside.num_tokens) == (2, 8)
+
+    outside = InputBatch.make_dummy(
+        4, 4, _fake_input_buffers(torch.device("cpu"), 4, 4)
+    )
+    assert (outside.num_reqs, outside.num_tokens) == (4, 4)
+    assert outside.seq_lens.tolist() == [1, 1, 1, 1]
+
+
+def test_uniform_token_count_is_ignored_for_single_rank(
+    monkeypatch, dummy_batch_module
+):
+    """Without DP there is no agreed value; make_dummy must keep num_reqs."""
+    InputBatch = _fake_input_batch()
+
+    def dispatch_cg_and_sync_dp(*args, **kwargs):
+        return NS(num_tokens=8), None
+
+    class GPUModelRunner:
+        def execute_model(self):
+            model_runner = sys.modules["vllm.v1.worker.gpu.model_runner"]
+            model_runner.dispatch_cg_and_sync_dp(self, 2, 8, 4, 1, 0)
+            return InputBatch.make_dummy(
+                8, 8, _fake_input_buffers(torch.device("cpu"), 8, 8)
+            )
+
+    modules(
+        monkeypatch,
+        input_batch=NS(InputBatch=InputBatch),
+        model_runner=NS(
+            GPUModelRunner=GPUModelRunner,
+            dispatch_cg_and_sync_dp=dispatch_cg_and_sync_dp,
+        ),
+        random_uuid=lambda: "deadbeef",
+    )
+    dummy_batch_module._install_make_dummy()
+    dummy_batch_module._install_dispatch_wrapper()
+    dummy_batch_module._install_execute_model_scope()
+
+    inside = GPUModelRunner().execute_model()
+    assert (inside.num_reqs, inside.num_tokens) == (8, 8)
+    assert inside.seq_lens.tolist() == [1, 1, 1, 1, 1, 1, 1, 1]
+
+
 def test_install_records_real_targets_and_reapplication_guard(
     monkeypatch, dummy_batch_module
 ):
@@ -281,6 +384,9 @@ def test_install_records_real_targets_and_reapplication_guard(
 
     class GPUModelRunner:
         def prepare_dummy_attn(self, *args, **kwargs):
+            return None
+
+        def execute_model(self, *args, **kwargs):
             return None
 
     def dispatch_cg_and_sync_dp(*args, **kwargs):
@@ -305,11 +411,12 @@ def test_install_records_real_targets_and_reapplication_guard(
         is not None
     )
 
-    records = {r.target: r for r in PATCH_REGISTRY[-4:]}
+    records = {r.target: r for r in PATCH_REGISTRY[-5:]}
     assert INPUT_BATCH_TARGET in records
     assert SET_DUMMY_CONTEXT_TARGET in records
     assert PREPARE_DUMMY_ATTN_TARGET in records
     assert DISPATCH_CG_TARGET in records
+    assert EXECUTE_MODEL_TARGET in records
     for record in records.values():
         assert record.reason and record.remove_when
         assert record.affected_versions == SUPPORTED_RANGE

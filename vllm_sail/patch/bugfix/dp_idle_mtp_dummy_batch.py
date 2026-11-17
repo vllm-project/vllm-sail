@@ -293,29 +293,57 @@ def _install_dispatch_wrapper() -> None:
     @functools.wraps(original)
     def dispatch_cg_and_sync_dp(*args, **kwargs):
         batch_desc, sync = original(*args, **kwargs)
-        # Mirror execute_model's choice in the upstream PR: if a DP sync exists
-        # (dp_size > 1), trust its agreed uniform_token_count, even when that
-        # agreement is ``None`` (ranks disagreed); only fall back to this rank's
-        # own vote when dp_size == 1 and no sync was produced.
+        # Only record the agreed value when cross-rank coordination actually
+        # happened (dp_size > 1).  For dp_size == 1 the returned sync is None
+        # and uniform_token_count is merely this rank's own vote; using it
+        # would incorrectly repartition non-DP dummy batches and mismatch the
+        # model's expected batch geometry.
         if sync is not None:
             _set_uniform_token_count(sync.uniform_token_count)
         else:
-            rank_uniform = kwargs.get("uniform_token_count")
-            if rank_uniform is None and len(args) > 3:
-                rank_uniform = args[3]
-            _set_uniform_token_count(rank_uniform)
+            _set_uniform_token_count(None)
         return batch_desc, sync
 
     patch(
         "vllm.v1.worker.gpu.model_runner",
         "dispatch_cg_and_sync_dp",
         reason=(
-            "0.33.0 execute_model does not pass the agreed uniform_token_count to "
-            "InputBatch.make_dummy; record it from the DP sync for dummy runs."
+            "0.33.0 execute_model does not pass the DP-agreed "
+            "uniform_token_count to InputBatch.make_dummy; record it from the "
+            "DP sync for dummy runs, but only when dp_size > 1."
         ),
         affected_versions=">=0.33.0,<0.34.0",
         remove_when="upstream vLLM 0.33.x backports the DP dummy-batch geometry fix",
     )(dispatch_cg_and_sync_dp)
+
+
+def _install_execute_model_scope() -> None:
+    from vllm.v1.worker.gpu.model_runner import GPUModelRunner
+
+    original = GPUModelRunner.execute_model
+
+    @functools.wraps(original)
+    def execute_model(self, *args, **kwargs):
+        # The agreed token count is only valid for the dummy batch this call
+        # builds. Later, unrelated ``make_dummy(num_reqs, num_reqs, ...)`` calls
+        # (e.g. the profile sampler's batch) must not inherit it, or the sampler
+        # sees fewer requests than logits rows.
+        _set_uniform_token_count(None)
+        try:
+            return original(self, *args, **kwargs)
+        finally:
+            _set_uniform_token_count(None)
+
+    patch(
+        "vllm.v1.worker.gpu.model_runner",
+        "GPUModelRunner.execute_model",
+        reason=(
+            "Scope the DP-agreed uniform_token_count to the execute_model dummy "
+            "batch; it must not leak into the profile sampler's own dummy batch."
+        ),
+        affected_versions=">=0.33.0,<0.34.0",
+        remove_when="upstream vLLM 0.33.x backports the DP dummy-batch geometry fix",
+    )(execute_model)
 
 
 def install() -> None:
@@ -323,3 +351,4 @@ def install() -> None:
     _install_set_dummy_context()
     _install_prepare_dummy_attn()
     _install_dispatch_wrapper()
+    _install_execute_model_scope()
