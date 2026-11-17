@@ -43,6 +43,8 @@ Modules, and why each is import-on-install like the rest of the framework:
 * ``qwen3_next`` — NVTX profiling scaffold (+19).
 * ``qwen4_exp_qsa`` — route Qwen4Exp QSA through PPU FA3's CUDA kernel where it
   can run the shape; upstream hard-wires the Triton one.
+* ``qwen4_exp_qsa_fp4`` — QSA indexer compressed key cache as MXFP4, scored by
+  DeepGEMM's FP4 average MQA logits kernels.
 * ``step5_dsa_backend`` — admits SM 8.x PPU to Step5 DSA and runs upstream's
   Triton indexer scorer there, since PPU FlashInfer has no ``attn_scores``;
   resolves the region top-k to PPU DeepSelect or ``per_row``.
@@ -85,6 +87,7 @@ from vllm_sail.patch.enhancement.models import (
     qwen3_moe,  # noqa: F401
     qwen3_next,  # noqa: F401
     qwen4_exp_qsa,  # noqa: F401
+    qwen4_exp_qsa_fp4,  # noqa: F401
     step5_dsa_backend,  # noqa: F401
     step5_indexer_fp16,  # noqa: F401
     step5_mtp,  # noqa: F401
