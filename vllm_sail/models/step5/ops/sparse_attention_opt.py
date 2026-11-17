@@ -163,6 +163,158 @@ def _resident_scores_sm90(
         tl.store(out_base + region, float("-inf"), region < REGIONS)
 
 
+@triton.jit(do_not_specialize=["REGIONS", "PAGES"])
+def _grouped_scores_sm89(
+    Q,
+    KV,
+    W,
+    Lengths,
+    Spans,
+    Output,
+    Q_ROW: tl.constexpr,
+    Q_HEAD: tl.constexpr,
+    W_ROW: tl.constexpr,
+    W_HEAD: tl.constexpr,
+    KV_PAGE: tl.constexpr,
+    LENGTH_STRIDE: tl.constexpr,
+    REGIONS,
+    PAGES,
+    HEADS: tl.constexpr,
+    NEXT_N: tl.constexpr,
+    GROUP_ROWS: tl.constexpr,
+    TILE: tl.constexpr,
+    GRID_TILES: tl.constexpr,
+):
+    """Reuse K pages within a request; query/head rows are packed tightly, K never shared across spans."""
+    span = tl.program_id(0)
+    worker = tl.program_id(1)
+    first = tl.load(Spans + span * 3).to(tl.int64)
+    count = tl.load(Spans + span * 3 + 1)
+    owner = tl.load(Spans + span * 3 + 2).to(tl.int64)
+    row = first + tl.arange(0, GROUP_ROWS)
+    row_valid = tl.arange(0, GROUP_ROWS) < count
+    lengths = tl.load(
+        Lengths + row // NEXT_N * LENGTH_STRIDE,
+        row_valid,
+        other=0,
+    )
+    lengths = tl.minimum(tl.maximum(lengths, 0), REGIONS)
+    max_live = tl.max(lengths, 0)
+    matrix_row = tl.arange(0, GROUP_ROWS * HEADS)
+    query_row = first + matrix_row // HEADS
+    head = matrix_row % HEADS
+    d = tl.arange(0, 256)
+    query = tl.load(
+        Q.to(tl.pointer_type(tl.uint8))
+        + query_row[:, None] * Q_ROW
+        + head[:, None] * Q_HEAD
+        + d[None, :],
+        (matrix_row[:, None] // HEADS) < count,
+        other=0,
+    ).to(tl.float8e4nv, bitcast=True)
+    weights = tl.load(
+        W + query_row * W_ROW + head * W_HEAD,
+        matrix_row // HEADS < count,
+        other=0,
+    ).to(tl.float32)
+    for tile in tl.range(worker, tl.cdiv(REGIONS, TILE), GRID_TILES):
+        region = tile * TILE + tl.arange(0, TILE)
+        if tile * TILE < max_live:
+            valid = (region < REGIONS) & (region < max_live)
+            physical = owner * PAGES + region // 32
+            key = tl.load(
+                KV
+                + physical[None, :] * KV_PAGE
+                + (region[None, :] % 32) * 256
+                + d[:, None],
+                valid[None, :],
+                other=0,
+            ).to(tl.float8e4nv, bitcast=True)
+            dot = tl.dot(query, key, out_dtype=tl.float32, max_num_imprecise_acc=0)
+            weighted = tl.maximum(dot, 0.0) * weights[:, None]
+            total = tl.sum(weighted.reshape((GROUP_ROWS, HEADS, TILE)), 1)
+            scales = tl.load(
+                (KV + physical * KV_PAGE + 32 * 256 + (region % 32) * 4).to(
+                    tl.pointer_type(tl.float32)
+                ),
+                valid,
+                other=0,
+            )
+            result = tl.where(
+                region[None, :] < lengths[:, None],
+                total * scales[None, :],
+                float("-inf"),
+            )
+        else:
+            result = tl.full((GROUP_ROWS, TILE), float("-inf"), tl.float32)
+        tl.store(
+            Output + row[:, None] * REGIONS + region[None, :],
+            result,
+            row_valid[:, None] & (region[None, :] < REGIONS),
+        )
+
+
+def grouped_paged_logits(
+    query,
+    weights,
+    packed,
+    lengths,
+    spans,
+    regions,
+    pages,
+    heads,
+    next_n,
+    *,
+    group_rows=None,
+    tile=32,
+    grid_cap=32,
+    warps=2,
+):
+    """Inputs come from a validated packed plan; config overrides are for offline acceptance only."""
+    if heads not in (4, 8, 16) or isinstance(heads, bool):
+        raise ValueError("unsupported grouped heads")
+    group_rows = 64 // heads if group_rows is None else group_rows
+    if (
+        group_rows not in (4, 8, 16)
+        or isinstance(group_rows, bool)
+        or tile not in (32, 64, 128)
+        or grid_cap not in (8, 16, 32)
+        or warps not in (2, 4)
+        or next_n not in (1, 2)
+    ):
+        raise ValueError("unsupported grouped score configuration")
+    output = torch.empty(
+        (query.shape[0], regions),
+        dtype=torch.float32,
+        device=query.device,
+    )
+    if query.shape[0] and regions:
+        workers = min(triton.cdiv(regions, tile), grid_cap)
+        _grouped_scores_sm89[(spans.shape[0], workers)](
+            query,
+            packed,
+            weights,
+            lengths,
+            spans,
+            output,
+            query.stride(0),
+            query.stride(2),
+            weights.stride(0),
+            weights.stride(2),
+            packed.stride(0),
+            lengths.stride(0),
+            regions,
+            pages,
+            heads,
+            next_n,
+            group_rows,
+            tile,
+            workers,
+            num_warps=warps,
+        )
+    return output
+
+
 def paged_mqa_logits_sm90(
     q: torch.Tensor,
     kv_fused: torch.Tensor,

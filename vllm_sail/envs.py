@@ -51,11 +51,11 @@ if TYPE_CHECKING:
     VLLM_SAIL_ENABLE_FP8_TO_INT8: bool = False
     VLLM_SAIL_KPOOL_DECODE_LOGITS: str = "non_paged"
     VLLM_SAIL_KPOOL_MAX_DENSE_POOLS: int = 1 << 21
-    VLLM_SAIL_STEP5_DSA_SCORES: bool = False
+    VLLM_SAIL_STEP5_DSA_SCORES: str = "v0"
     VLLM_SAIL_STEP5_DSA_SELECTOR_PPU: bool = False
     VLLM_SAIL_STEP5_DSA_PREFILL_PPU: bool = False
     VLLM_SAIL_STEP5_DSA_PREFILL_BACKEND: str = "flashinfer"
-    VLLM_SAIL_STEP5_DSA_PREFILL_BATCH_ATTENTION: bool = False
+    VLLM_SAIL_STEP5_DSA_PREFILL_BATCH_ATTENTION: bool = True
     VLLM_STEP5_INDEXER_FP8_AS_FP16: bool = False
     VLLM_SAIL_MINIMAX_M3_MSA: bool = True
     VLLM_SAIL_MINIMAX_M3_MSA_INDEXER_TRITON: bool = False
@@ -87,11 +87,11 @@ if TYPE_CHECKING:
     VLLM_PPU_USE_TRITON_INT8_QUANT: bool = True
     VLLM_PPU_FP8_LOAD_POLICY: str | None = None
     VLLM_PPU_ENABLE_FP8_TO_INT8: bool = False
-    VLLM_PPU_STEP5_DSA_SCORES: bool = False
+    VLLM_PPU_STEP5_DSA_SCORES: str = "v0"
     VLLM_PPU_STEP5_DSA_SELECTOR_PPU: bool = False
     VLLM_PPU_STEP5_DSA_PREFILL_PPU: bool = False
     VLLM_PPU_STEP5_DSA_PREFILL_BACKEND: str = "flashinfer"
-    VLLM_PPU_STEP5_DSA_PREFILL_BATCH_ATTENTION: bool = False
+    VLLM_PPU_STEP5_DSA_PREFILL_BATCH_ATTENTION: bool = True
     VLLM_PPU_NVTX_PROFILE: bool = False
     VLLM_PPU_NVTX_DUMP_DICT: bool = False
     VLLM_PPU_NVTX_DUMP_TOPK: bool = False
@@ -108,6 +108,7 @@ GDN_DECODE_KERNELS = ("auto", "cuda", "pla", "triton")
 KPOOL_DECODE_LOGITS_BACKENDS = ("non_paged",)
 MEGA_MOE_MMA_TYPES = ("fp4xfp4", "fp8xfp4", "bf16xfp4")
 STEP5_PREFILL_BACKENDS = ("flashinfer", "native")
+STEP5_DSA_SCORE_MODES = ("v0", "v1", "v2")
 
 
 def _env_names(name: str) -> tuple[str, ...]:
@@ -262,10 +263,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
         "VLLM_SAIL_KPOOL_MAX_DENSE_POOLS", 1 << 21
     ),
     # -- Step5 DSA ----------------------------------------------------------
-    # Route the Step5 DSA indexer scoring kernel to the resident-block Triton
-    # implementation in vllm_sail/models/step5/ops/. Read on every call. Off by
-    # default: upstream's kernel stays the reference until validated per model.
-    "VLLM_SAIL_STEP5_DSA_SCORES": _bool("VLLM_SAIL_STEP5_DSA_SCORES", False),
+    # v0 keeps upstream, v1 selects the resident-block Triton scorer, and v2
+    # additionally tries the grouped FP8 prefill scorer. Read on every call.
+    "VLLM_SAIL_STEP5_DSA_SCORES": _choice(
+        "VLLM_SAIL_STEP5_DSA_SCORES", "v0", STEP5_DSA_SCORE_MODES
+    ),
     # per_row stays the default; the new selector is opt-in only.
     "VLLM_SAIL_STEP5_DSA_SELECTOR_PPU": _bool(
         "VLLM_SAIL_STEP5_DSA_SELECTOR_PPU", False
@@ -280,7 +282,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # The indexer still runs in chunks; only the explicit native route may batch
     # attention at finish.
     "VLLM_SAIL_STEP5_DSA_PREFILL_BATCH_ATTENTION": _bool(
-        "VLLM_SAIL_STEP5_DSA_PREFILL_BATCH_ATTENTION", False
+        "VLLM_SAIL_STEP5_DSA_PREFILL_BATCH_ATTENTION", True
     ),
     # 0: E4M3 bytes; 1: E4M3-quantized values stored as FP16, using FP16 MMA.
     # The FP16 summary cache takes twice the memory; keeps the Step5 fork's name.

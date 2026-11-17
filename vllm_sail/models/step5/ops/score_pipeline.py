@@ -14,6 +14,374 @@ _EXPERIMENT = ContextVar("step5_score_experiment", default=False)
 # The candidate is called only from the standalone acceptance context, never
 # from production patches.
 _STATS = Counter()
+_PACKED_ATTRIBUTE = "step5_sail_packed_score_plan"
+_PACKED_CONTEXT = ContextVar("step5_packed_score", default=None)
+PACKED_REASON = (
+    "PPU SM89 Step5 prefill groups query/head rows within a request and reuses "
+    "the existing packed K; enabled only by VLLM_SAIL_STEP5_DSA_SCORES=v2, "
+    "v0/v1 build no compact plan."
+)
+PACKED_REMOVE_WHEN = (
+    "Upstream Step5 prefill scorer reuses packed K across queries within a request."
+)
+
+
+def compact_enabled():
+    from vllm_sail import envs
+
+    return envs.VLLM_SAIL_STEP5_DSA_SCORES == "v2"
+
+
+def packed_spans(starts, chunk_rows, group_rows):
+    """Split by request and chunk; tail groups keep only real rows, owner 0 is valid."""
+    if group_rows not in (4, 8, 16) or isinstance(group_rows, bool):
+        raise ValueError("unsupported grouped rows")
+    starts, chunk_rows = tuple(starts), tuple(chunk_rows)
+    if (
+        not starts
+        or starts[0] != 0
+        or any(not isinstance(n, int) or isinstance(n, bool) or n < 0 for n in starts)
+        or any(b < a for a, b in zip(starts, starts[1:], strict=False))
+        or any(
+            not isinstance(n, int) or isinstance(n, bool) or n <= 0 for n in chunk_rows
+        )
+        or sum(chunk_rows) != starts[-1]
+    ):
+        raise ValueError("incomplete request/chunk boundaries")
+    chunks, begin = [], 0
+    for size in chunk_rows:
+        end, spans = begin + size, []
+        for owner, (left, right) in enumerate(zip(starts, starts[1:], strict=False)):
+            left, right = max(left, begin), min(right, end)
+            while left < right:
+                count = min(group_rows, right - left)
+                spans.append((left - begin, count, owner))
+                left += count
+        chunks.append((begin, end, tuple(spans)))
+        begin = end
+    return tuple(chunks)
+
+
+class PackedScorePlan:
+    def __init__(self, runtime, starts, heads, device, *, group_rows=None):
+        import torch
+
+        if heads not in (4, 8, 16) or isinstance(heads, bool):
+            raise ValueError("unsupported grouped heads")
+        self.heads = heads
+        self.group_rows = 64 // heads if group_rows is None else group_rows
+        self.runtime_key = _runtime_key(runtime)
+        self.requests = len(starts) - 1
+        self.host = packed_spans(
+            starts, [m.current.numel() for m in runtime[4]], self.group_rows
+        )
+        flat = [span for _, _, spans in self.host for span in spans]
+        self.spans = (
+            torch.tensor(flat, dtype=torch.int32)
+            .reshape(-1, 3)
+            .pin_memory()
+            .to(device, non_blocking=True)
+        )
+        self.chunks, cursor = [], 0
+        for begin, end, spans in self.host:
+            self.chunks.append((begin, end, self.spans[cursor : cursor + len(spans)]))
+            cursor += len(spans)
+
+
+def attach_packed_plan(metadata, runtime, ppu, heads, *, group_rows=None):
+    """No extra upload when disabled; per-step metadata is reused across layers, never K values."""
+    if not ppu or not compact_enabled():
+        return runtime
+    from vllm_sail import envs
+
+    setattr(metadata, _PACKED_ATTRIBUTE, None)
+    if envs.VLLM_STEP5_INDEXER_FP8_AS_FP16:
+        return runtime
+    if (
+        runtime is None
+        or not runtime[4]
+        or not 512 < runtime[2] <= 2147483647
+        or heads not in (4, 8, 16)
+        or (heads == 16 and not _EXPERIMENT.get())
+        or getattr(runtime[4][0], "selected", None) is not None
+    ):
+        return runtime
+    sizes = [m.current.numel() for m in runtime[4]]
+    if max(sizes) < 256 or getattr(metadata.query_start_loc_cpu, "is_cuda", False):
+        return runtime
+    import torch
+
+    if tuple(torch.cuda.get_device_capability(metadata.slot_mapping.device)) != (8, 9):
+        return runtime
+    starts = metadata.query_start_loc_cpu[: metadata.num_actual_reqs + 1].tolist()
+    if (
+        len(starts) != metadata.num_actual_reqs + 1
+        or starts[-1] != sum(sizes)
+        or (
+            runtime[8] is not None
+            and (
+                len(runtime[8]) != len(sizes)
+                or any(n % 2 for n in starts)
+                or any(n % 2 for n in sizes)
+            )
+        )
+    ):
+        return runtime
+    rows = 64 // heads if group_rows is None else group_rows
+    if not any(b - a >= rows for a, b in zip(starts, starts[1:], strict=False)):
+        return runtime
+    plan = PackedScorePlan(
+        runtime, starts, heads, metadata.slot_mapping.device, group_rows=group_rows
+    )
+    setattr(metadata, _PACKED_ATTRIBUTE, plan)
+    return runtime
+
+
+def _same_view(actual, expected):
+    return (
+        actual is not None
+        and expected is not None
+        and actual.shape == expected.shape
+        and actual.stride() == expected.stride()
+        and actual.device == expected.device
+        and actual.dtype == expected.dtype
+        and actual.data_ptr() == expected.data_ptr()
+    )
+
+
+@contextmanager
+def bind_packed(metadata, runtime, adapter, query, weights, ppu):
+    """Bind views for this forward only; the outer context is restored even on error."""
+    context = None
+    if ppu and compact_enabled():
+        plan = getattr(metadata, _PACKED_ATTRIBUTE, None)
+        if (
+            plan is not None
+            and runtime is not None
+            and plan.runtime_key == _runtime_key(runtime)
+        ):
+            import torch
+
+            rows = plan.host[-1][1]
+            if (
+                query is not None
+                and weights is not None
+                and plan.host
+                and query.ndim == 4
+                and weights.ndim == 3
+                and query.shape[0] >= rows
+                and query.shape[1] == 1
+                and query.shape[-1] == 256
+                and query.shape[2] in (8, 16)
+                and weights.shape == query.shape[:3]
+                and query.dtype == torch.float8_e4m3fn
+                and weights.dtype == torch.float32
+                and query.is_cuda
+                and query.device == weights.device == plan.spans.device
+                and query.stride(3) == 1
+                and query.stride(2) == 256
+                and query.stride(0) >= query.shape[2] * 256
+                and weights.stride(2) == 1
+                and weights.stride(0) >= query.shape[2]
+                and plan.heads == (4 if runtime[8] is not None else query.shape[2])
+            ):
+                context = PackedScoreContext(plan, runtime, adapter, query, weights)
+    token = _PACKED_CONTEXT.set(context)
+    try:
+        yield context
+    finally:
+        _PACKED_CONTEXT.reset(token)
+        if context is not None:
+            context.release()
+
+
+class PackedScoreContext:
+    def __init__(self, plan, runtime, adapter, query, weights):
+        self.plan, self.runtime, self.adapter = plan, runtime, adapter
+        self.query, self.weights, self.cursor = query, weights, 0
+
+    def release(self):
+        self.plan = self.runtime = self.adapter = self.query = self.weights = None
+
+
+def packed_logits(
+    adapter,
+    query,
+    weights,
+    packed,
+    pages,
+    requests,
+    lengths,
+    regions,
+    *,
+    pairs=None,
+    paired_heads=0,
+    block_table=None,
+    config=None,
+):
+    """Returning None falls back before launch; device/JIT exceptions propagate."""
+    c = _PACKED_CONTEXT.get()
+    if not compact_enabled() or c is None or c.adapter is not adapter:
+        return None
+    if c.plan.runtime_key != _runtime_key(c.runtime) or c.cursor >= len(c.plan.chunks):
+        return None
+    index = c.cursor
+    c.cursor += 1
+    begin, end, spans = c.plan.chunks[index]
+    host_spans = c.plan.host[index][2]
+    if (
+        end - begin < 256
+        or regions != c.runtime[2]
+        or (end - begin) * regions * 4 > 128 << 20
+        or not any(count == c.plan.group_rows for _, count, _ in host_spans)
+    ):
+        return None
+    import torch
+
+    paired = c.runtime[8] is not None
+    expected_pairs = c.runtime[8][index] if paired else None
+    if (paired and (pairs is not expected_pairs or paired_heads != 4)) or (
+        not paired and pairs is not None
+    ):
+        return None
+    effective = pairs[0] if paired else lengths
+    expected = expected_pairs[0] if paired else c.runtime[4][index].lengths
+    if block_table is not None and not _same_view(
+        block_table, c.runtime[4][index].block_table
+    ):
+        return None
+    if (
+        not _same_view(query, c.query[begin:end])
+        or not _same_view(weights, c.weights[begin:end])
+        or not _same_view(requests, c.runtime[0][begin:end])
+        or effective is not expected
+        or lengths is not c.runtime[4][index].lengths
+        or effective.ndim != 1
+        or effective.dtype != torch.int32
+        or effective.device != query.device
+        or effective.stride(0) != 1
+        or effective.numel() != (end - begin) // (2 if paired else 1)
+        or pages != ((regions + 127) // 128) * 4
+        or packed.dtype != torch.uint8
+        or packed.device != query.device
+        or packed.shape != (c.plan.requests * pages, 32, 1, 260)
+        or not packed.is_contiguous()
+    ):
+        return None
+    from vllm_sail.models.step5.ops.sparse_attention_opt import grouped_paged_logits
+
+    result = grouped_paged_logits(
+        query,
+        weights,
+        packed,
+        effective,
+        spans,
+        regions,
+        pages,
+        c.plan.heads,
+        2 if paired else 1,
+        group_rows=c.plan.group_rows,
+        **(config or {}),
+    )
+    _STATS["compact_chunks"] += 1
+    _STATS["compact_spans"] += spans.shape[0]
+    return result
+
+
+def wrap_packed_plan(original, platform):
+    @functools.wraps(original, updated=())
+    def planned(self, attn_metadata, n, lengths, layout, positions=None):
+        runtime = original(self, attn_metadata, n, lengths, layout, positions)
+        if platform.is_ppu() and compact_enabled():
+            heads = (
+                4
+                if runtime is not None and runtime[8] is not None
+                else max(self.indexer_heads, 8)
+            )
+            attach_packed_plan(attn_metadata, runtime, True, heads)
+        return runtime
+
+    return planned
+
+
+def wrap_packed_forward(original, platform):
+    @functools.wraps(original, updated=())
+    def forward(
+        self,
+        query,
+        kv_cache,
+        attn_metadata,
+        output,
+        dsa_proxy_query,
+        dsa_proxy_key,
+        dsa_proxy_weights,
+        dsa_proxy_z,
+        **kwargs,
+    ):
+        args = (
+            self,
+            query,
+            kv_cache,
+            attn_metadata,
+            output,
+            dsa_proxy_query,
+            dsa_proxy_key,
+            dsa_proxy_weights,
+            dsa_proxy_z,
+        )
+        if not platform.is_ppu() or not compact_enabled():
+            return original(*args, **kwargs)
+        runtime = attn_metadata.step5_runtime
+        plan = getattr(attn_metadata, _PACKED_ATTRIBUTE, None)
+        if runtime is not None and (
+            plan is None or plan.runtime_key != _runtime_key(runtime)
+        ):
+            heads = 4 if runtime[8] is not None else dsa_proxy_query.shape[2]
+            attach_packed_plan(attn_metadata, runtime, True, heads)
+        with bind_packed(
+            attn_metadata,
+            runtime,
+            self.adapter,
+            dsa_proxy_query,
+            dsa_proxy_weights,
+            True,
+        ):
+            return original(*args, **kwargs)
+
+    return forward
+
+
+def wrap_packed_logits(original, platform=None):
+    @functools.wraps(original, updated=())
+    def logits(
+        self, query, weights, packed, pages, requests, lengths, regions, **kwargs
+    ):
+        selected_platform = platform
+        if compact_enabled() and selected_platform is None:
+            from vllm.platforms import current_platform
+
+            selected_platform = current_platform
+        if compact_enabled() and selected_platform.is_ppu():
+            result = packed_logits(
+                self,
+                query,
+                weights,
+                packed,
+                pages,
+                requests,
+                lengths,
+                regions,
+                pairs=kwargs.get("pairs"),
+                paired_heads=kwargs.get("paired_heads", 0),
+                block_table=kwargs.get("block_table"),
+            )
+            if result is not None:
+                return result
+        return original(
+            self, query, weights, packed, pages, requests, lengths, regions, **kwargs
+        )
+
+    return logits
 
 
 @contextmanager

@@ -29,10 +29,9 @@ BOOL_DEFAULTS = {
     "DISABLE_MEGA_MHC": False,
     "USE_TRITON_INT8_QUANT": True,
     "ENABLE_FP8_TO_INT8": False,
-    "STEP5_DSA_SCORES": False,
     "STEP5_DSA_SELECTOR_PPU": False,
     "STEP5_DSA_PREFILL_PPU": False,
-    "STEP5_DSA_PREFILL_BATCH_ATTENTION": False,
+    "STEP5_DSA_PREFILL_BATCH_ATTENTION": True,
     "NVTX_PROFILE": False,
     "NVTX_DUMP_DICT": False,
     "NVTX_DUMP_TOPK": False,
@@ -52,6 +51,7 @@ BACKENDS = ("MOE_BACKEND", "DENSE_BACKEND")
 STRING_DEFAULTS = {
     "KPOOL_DECODE_LOGITS": "non_paged",
     "MEGA_MOE_MMA_TYPE": "fp8xfp4",
+    "STEP5_DSA_SCORES": "v0",
 }
 
 
@@ -76,7 +76,7 @@ def test_defaults_and_canonical_snapshot() -> None:
     expected["VLLM_SAIL_STEP5_DSA_PREFILL_BACKEND"] = "flashinfer"
     assert envs.snapshot() == expected
     assert set(envs.environment_variables) == set(expected)
-    for suffix in (*BOOL_DEFAULTS, *INT_DEFAULTS, *BACKENDS):
+    for suffix in (*BOOL_DEFAULTS, *INT_DEFAULTS, *BACKENDS, *STRING_DEFAULTS):
         assert getattr(envs, f"VLLM_PPU_{suffix}") == expected[f"VLLM_SAIL_{suffix}"]
 
 
@@ -89,6 +89,24 @@ def test_mega_moe_mma_type_is_lazy_and_checks_choices(monkeypatch):
     monkeypatch.setenv(name, "unsupported")
     with pytest.raises(ValueError, match=name):
         getattr(envs, name)
+
+
+@pytest.mark.parametrize("prefix", ["VLLM_SAIL", "VLLM_PPU"])
+def test_step5_score_modes_are_lazy_and_check_choices(monkeypatch, prefix):
+    sail = "VLLM_SAIL_STEP5_DSA_SCORES"
+    ppu = "VLLM_PPU_STEP5_DSA_SCORES"
+    assert getattr(envs, sail) == getattr(envs, ppu) == "v0"
+    for mode in ("v0", "v1", "v2"):
+        monkeypatch.setenv(prefix + "_STEP5_DSA_SCORES", f" {mode.upper()} ")
+        assert getattr(envs, sail) == getattr(envs, ppu) == mode
+    monkeypatch.setenv(prefix + "_STEP5_DSA_SCORES", "1")
+    with pytest.raises(ValueError, match="v0, v1, v2"):
+        getattr(envs, sail)
+    monkeypatch.setenv(ppu, "v2")
+    monkeypatch.setenv(sail, "")
+    assert getattr(envs, sail) == "v0"
+    monkeypatch.setenv(sail, "v1")
+    assert getattr(envs, ppu) == "v1"
 
 
 @pytest.mark.parametrize("prefix", ["VLLM_SAIL", "VLLM_PPU"])
@@ -119,6 +137,7 @@ def test_prefill_backend_lazy_choices_and_precedence(monkeypatch, prefix):
     "suffix",
     [
         "STEP5_FUSED_NORM",
+        "STEP5_DSA_SCORE_COMPACT",
         "STEP5_DSA_SCORE_MQA",
         "STEP5_DSA_SCORE_MQA_BQ",
         "STEP5_DSA_PREFILL_MULTI_QUERY",

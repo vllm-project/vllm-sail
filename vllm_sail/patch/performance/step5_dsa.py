@@ -32,7 +32,7 @@ _REASON = (
     "Step5's indexer scorer launches one block per (row, region tile), which "
     "reloads the row's query tile and gate once per tile -- 258 times on the "
     "production shape. The plugin keeps blocks resident per row instead "
-    "(3.188 -> 2.070 ms on ZW-M890P). Opt-in via VLLM_SAIL_STEP5_DSA_SCORES."
+    "(3.188 -> 2.070 ms on ZW-M890P). Opt-in via VLLM_SAIL_STEP5_DSA_SCORES=v1/v2."
 )
 _AFFECTED = ">=0.34.0,<0.35.0"
 _REMOVE_WHEN = (
@@ -64,7 +64,7 @@ def install() -> None:
         # launcher, which reaches the software-E4M3 scorer.
         if not (
             current_platform.is_ppu()
-            and envs.VLLM_SAIL_STEP5_DSA_SCORES
+            and envs.VLLM_SAIL_STEP5_DSA_SCORES in ("v1", "v2")
             and current_platform.has_device_capability(89)
         ):
             return original(*args, **kwargs)
@@ -93,6 +93,8 @@ def install() -> None:
                 consumer, _NAME, reason=_REASON,
                 affected_versions=_AFFECTED, remove_when=_REMOVE_WHEN,
             )(paged_mqa_logits_sm90)
+    # Grouped delegation composes the existing logits/native prefill entries
+    # instead of patching the same target twice.
     _installed = True
 
 

@@ -74,6 +74,92 @@ unsupported-op stub. Its fused MTP kernel applies only to eligible batches;
 other batches use the existing Triton path. The new HGGC port still requires
 native build and device correctness verification before deployment.
 
+## Step5 Prefill Attention
+
+`VLLM_SAIL_STEP5_DSA_PREFILL_BACKEND` defaults to `flashinfer`. Selecting
+`native` enables the PPU native path for supported inputs. If the backend
+variable is unset, the compatibility switch
+`VLLM_SAIL_STEP5_DSA_PREFILL_PPU=1` also selects `native`.
+
+`VLLM_SAIL_STEP5_DSA_PREFILL_BATCH_ATTENTION` defaults to `1` (`True`) and
+only affects native prefill: the indexer still runs in chunks, while attention
+runs once after all chunks have supplied their selections. Set it to `0` to
+run attention per chunk. It does not select the native backend, affect decode,
+or change FlashInfer or non-PPU execution. Unsupported native inputs still
+fall back to FlashInfer before launch.
+
+## Step5 Score
+
+`VLLM_SAIL_STEP5_DSA_SCORES` selects the scorer: `v0` (default) keeps the
+upstream call chain, `v1` enables the resident-block Triton scorer, and `v2`
+additionally tries the grouped FP8 prefill scorer that packs multiple queries
+per request on top of resident. The variable is read lazily and accepts the
+`VLLM_PPU_STEP5_DSA_SCORES` alias, with the SAIL name taking precedence.
+`v0`/`v1` add no grouped-metadata upload.
+
+The new path reuses each layer's existing packed K and FP32 scales; it never
+repacks K and never caches K values across layers. Initial eligibility requires
+PPU SM89, FP8 query, uint8 packed K, FP32 weights, head dimension 256, effective
+heads 4/8, regions > 512, a current chunk of at least 256 queries containing a
+full query group, and FP32 scores within the existing 128 MiB budget. Tail
+groups keep masking; paired queries continue to share pair lengths. H16
+regresses in short-context microbenchmarks, so the regular v2 path does not
+build a compact plan and stays on resident; the low-level H16 kernel is kept
+only in the standalone experimental acceptance.
+
+Decode, the FP16 indexer, small batches, and unsupported layouts delegate to
+the original call chain; inputs eligible for resident continue to use resident.
+Real JIT or device errors propagate directly instead of silently recomputing.
+The selector and attention backends are selected independently; explicit
+DeepSelect still requires the FP32-capable SAIL DeepSelect library. The grouped
+scorer is an experimental optimization that is off by default; device
+correctness and performance must be accepted separately, and neither implies
+whole-model accuracy or HTTP throughput has passed.
+
+Standalone device acceptance uses the existing `tools/step5_score_harness.py`:
+it compares `reference/resident/compact` by default, `--route` selects a route
+explicitly, and the legacy `mqa2/4/8` run only when requested explicitly.
+`--selector per_row|deep_select` exercises the real selector; a missing
+explicit dependency is reported as blocked rather than faking a fallback pass.
+`--mode kernel` covers low-level scales, tail groups, K updates, and graph
+replay; `--mode tune` performs an offline configuration sweep and never
+autotunes in the production hot path. `--large` includes the 64K context;
+`--mode ab` reports score-only, the pack/select/metadata pipeline, and the full
+DSA forward separately, with the original resident as the primary baseline.
+Acceptance is refused while other compute processes occupy the device; user
+services are never stopped. Run Python commands inside the prepared SAIL
+container.
+
+`--group-rows/--tile/--grid-cap/--warps` override the default configuration in
+the low-level numerical mode and bound the sweep in tuning mode; A/B rejects
+custom configurations and must measure the actual production defaults. In the
+formal numerical and A/B modes, both the CPU FP32 oracle and the resident
+comparison must pass the fixed `atol=rtol=1e-4`; failures never proceed to
+performance timing or recommended dispatch. Every measured attention backend
+in the full forward must satisfy the fallback gate, and candidate routes must
+have real submissions.
+
+`--mode diagnostic-bench --large --groups 6 --iterations 32` is a separate FP8
+kernel performance investigation: it first checks equivalence with resident
+and repeat determinism, then runs A/B and B/A warm-cache graph replays on
+preallocated outputs. Each side sweeps configurations offline, and both default
+and per-side tuned results are reported. Inputs are fixed-seed synthetic data;
+the 64K context is measured in 4096-query chunks, and each side's FP32 output
+stays within 128 MiB. This mode excludes packing, selector, metadata, and
+attention, and does not represent cold-cache HBM performance. Fixed CPU oracle
+metrics are retained even when failing; `numerical_valid` and
+`performance_valid` stay false, and no production dispatch recommendation is
+produced.
+
+Pick one experimental mode; `v1` returns to resident and `v0` returns to the
+upstream call chain:
+
+```bash
+export VLLM_SAIL_STEP5_DSA_SCORES=v1  # resident
+export VLLM_SAIL_STEP5_DSA_SCORES=v2  # grouped compact
+```
+
+
 ## DeepSeek V4.1
 
 The main integration retains upstream V4.1 target/DSpark execution, shared KV
@@ -146,6 +232,14 @@ parallelism and non-MXFP4 indexer caches are rejected. Missing or disabled
 dependencies fail at startup instead of silently selecting dense scoring.
 Keep the option disabled to use the dense indexer. PPU inference correctness
 and performance for the candidate-only path still require device validation.
+
+The SAIL DeepSelect entry accepts BF16 and FP32 scores and passes them to the
+external `deep_select` library in their original dtype, never downcasting FP32
+to BF16. When the entry conditions are met, Step5 selects the library for both
+`auto` and `deep_select`. FP32 execution requires upgrading to the FP32-capable
+PPU DeepSelect library; the current BF16-only `deep_select==1.0.0` raises a
+dtype error directly and no longer falls back automatically on FP32 input. Use
+`--sparse-indexer-topk-backend per_row` until the library is upgraded.
 
 Prefill chunking retains upstream's chunker and BF16 budget conversion for the
 sparse backend. The PPU sparse builder includes SAIL's physical row padding in
