@@ -59,6 +59,7 @@ EXPECTED_MODULES = {
     "qwen3_moe",
     "qwen3_next",
     "qwen4_exp_qsa",
+    "qwen4_exp_qsa_fp4",
 }
 
 REQUIRED_METADATA = ("reason", "affected_versions", "remove_when")
@@ -333,6 +334,16 @@ _EXPECTED_TARGETS = {
     "vllm.model_executor.models.qwen3_next.th_nvtx_range_pop",
     "vllm.models.qwen4_exp.nvidia.qsa.Qwen4ExpQSAImpl.__init__",
     "vllm.models.qwen4_exp.nvidia.qsa.Qwen4ExpQSAImpl.forward",
+    "vllm.models.qwen4_exp.common.qsa_indexer.QSACompressedKeyCache.__init__",
+    (
+        "vllm.models.qwen4_exp.common.qsa_indexer."
+        "QSAIndexerBackend.get_supported_kernel_block_sizes"
+    ),
+    "vllm.models.qwen4_exp.nvidia.ops.qsa_prepare.qsa_prepare",
+    "vllm.models.qwen4_exp.nvidia.qsa_indexer.qsa_prepare",
+    "vllm.models.qwen4_exp.nvidia.ops.qsa_indexer.qsa_select_paged_decode",
+    "vllm.models.qwen4_exp.nvidia.ops.qsa_indexer.qsa_select_paged_prefill",
+    "vllm.models.qwen4_exp.nvidia.ops.qsa_indexer.warmup_qsa_mqa_paged_decode",
     (
         "vllm.model_executor.layers.quantization.utils.marlin_utils."
         "check_moe_marlin_supports_config"
@@ -530,6 +541,18 @@ def test_reapplication_raises(installed_model_patches) -> None:
             "dequantize_and_gather_k_cache",
             "models/deepseek_v4/common/ops/cache_utils",
             "dequantize_and_gather_k_cache",
+        ),
+        (
+            "models/qwen4_exp_qsa_fp4",
+            "__init__",
+            "models/qwen4_exp/common/qsa_indexer",
+            "_QSAIndexerCache.__init__",
+        ),
+        (
+            "models/qwen4_exp_qsa_fp4",
+            "get_supported_kernel_block_sizes",
+            "v1/attention/backend",
+            "AttentionBackend.get_supported_kernel_block_sizes",
         ),
     ],
 )
