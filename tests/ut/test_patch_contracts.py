@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import ast
 import inspect
+from copy import deepcopy
 
 import pytest
 
@@ -240,6 +241,30 @@ def target_problems(root, hooks):
                 # The generated dataclass API has its own source dependency
                 # checks and real constructor/replace/merge behavior tests.
                 continue
+            if hook.target == "vllm.models.step5.nvidia.mega_moe.Step5MegaMoE":
+                constructor = next(
+                    (
+                        node
+                        for node in getattr(resolved.node, "body", [])
+                        if isinstance(node, FUNC_NODES) and node.name == "__init__"
+                    ),
+                    None,
+                )
+                if constructor is None:
+                    failures.append(f"{hook.target}: missing explicit constructor")
+                    continue
+                constructor = deepcopy(constructor)
+                if not constructor.args.args or constructor.args.args[0].arg != "self":
+                    failures.append(f"{hook.target}: unresolved constructor receiver")
+                    continue
+                constructor.args.args.pop(0)
+                # The full constructor contract covers **expert_kwargs;
+                # forwarding behavior is verified by the MegaMoE UT.
+                failures.extend(
+                    f"{hook.target}: {problem}"
+                    for problem in compatibility_problems(hook.node, constructor)
+                )
+                continue
             if consumers is None:
                 consumers = imported_consumer_calls(root)
             failures.extend(
@@ -321,6 +346,44 @@ patch(dynamic_module(), "unsupported")(method)
         "vllm.example.two",
     }
     assert len(unresolved) == 1 and "dynamic_module()" in unresolved[0].expression
+
+
+@pytest.mark.parametrize("import_style", ["direct", "module"])
+@pytest.mark.parametrize("fault", [None, "missing-keyword", "dynamic-return"])
+def test_imported_factory_checks_returned_callable_without_importing(
+    tmp_path, monkeypatch, import_style, fault
+):
+    from tests.support import patch_inventory
+
+    monkeypatch.setattr(patch_inventory, "ROOT", tmp_path)
+    package = tmp_path / "vllm_sail"
+    package.mkdir()
+    parameters = "a" if fault == "missing-keyword" else "a, *, used=None"
+    returned = "choose(wrapper)" if fault == "dynamic-return" else "wrapper"
+    (package / "factory.py").write_text(
+        'raise RuntimeError("must not import")\n'
+        "def wrap(original):\n"
+        f"    def wrapper({parameters}): pass\n"
+        f"    return {returned}\n"
+    )
+    upstream = tmp_path / "vllm"
+    upstream.mkdir()
+    (upstream / "example.py").write_text("def run(a, *, used=None): pass\n")
+    imported, invoke = (
+        ("from vllm_sail.factory import wrap as factory", "factory")
+        if import_style == "direct"
+        else ("from vllm_sail import factory", "factory.wrap")
+    )
+    plugin = tmp_path / "plugin.py"
+    plugin.write_text(f'{imported}\npatch("vllm.example", "run")({invoke}(original))\n')
+    hooks, unresolved = scan_patch_file(plugin)
+    assert not unresolved and len(hooks) == 1
+    problems = target_problems(tmp_path, hooks)
+    assert bool(problems) is (fault is not None), problems
+    if fault == "dynamic-return":
+        assert "unresolved callable replacement" in " ".join(problems)
+    elif fault == "missing-keyword":
+        assert "used" in " ".join(problems)
 
 
 def test_discovery_reports_dictionary_unpack_instead_of_partial_success(tmp_path):
@@ -595,6 +658,23 @@ def test_flashmla_signature_fault_is_rejected_with_optional_source_missing(
     broken = provider._replace(node=_function("def flash_mla_with_kvcache(): pass"))
     problems = target_problems(upstream_source_root, [broken])
     assert problems and any(target in problem for problem in problems)
+
+
+@pytest.mark.upstream_source
+@pytest.mark.parametrize(
+    "signature", ["", "vllm_config", "vllm_config, *, required, **kwargs"]
+)
+def test_step5_factory_contract_rejects_broken_bindings(
+    upstream_source_root, signature
+):
+    """Missing or new required params must fail even with **expert_kwargs calls."""
+    hooks, unresolved = scan_patch_file(PATCH_ROOT / "enhancement/mega_moe.py")
+    assert not unresolved
+    target = "vllm.models.step5.nvidia.mega_moe.Step5MegaMoE"
+    hook = next(hook for hook in hooks if hook.target == target)
+    assert not target_problems(upstream_source_root, [hook])
+    broken = hook._replace(node=_function(f"def replacement({signature}): pass"))
+    assert target_problems(upstream_source_root, [broken])
 
 
 def test_unconditional_dangling_import_cannot_be_repaired_by_later_assignment(tmp_path):

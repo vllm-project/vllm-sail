@@ -44,7 +44,7 @@ def installed(modules):
     platform = NS(is_ppu=lambda: True)
     sail = NS(
         is_deep_select_available=lambda: True,
-        can_use_deep_select=lambda logits, k: logits.dtype == "bf16",
+        can_use_deep_select=lambda logits, k: logits.dtype in ("bf16", "fp32"),
         _wheel=lambda: NS(get_stride_requirement=lambda: (512, 32)),
         deep_select_topk=lambda *args: calls.append(args) or "sail-indices",
     )
@@ -127,7 +127,8 @@ def test_preloaded_consumers_get_all_matching_replacements(
     assert p.has_deep_select()
     assert p.get_deep_select_stride_requirement() == (512, 32)
     assert p.is_deep_select_supported(NS(dtype="bf16"), 64)
-    assert not p.is_deep_select_supported(NS(dtype="fp32"), 64)
+    assert p.is_deep_select_supported(NS(dtype="fp32"), 64)
+    assert not p.is_deep_select_supported(NS(dtype="fp16"), 64)
     assert installed.provider.SparseIndexerTopk.resolve_backend is p.resolve_backend
     for module, name, replacement in (
         (SPARSE, "has_deep_select", p.has_deep_select),
@@ -156,10 +157,11 @@ def test_preloaded_consumers_get_all_matching_replacements(
         load_patch(PATCH)
 
 
+@pytest.mark.parametrize("dtype", ["bf16", "fp32"])
 def test_upstream_entry_returns_sail_indices_and_preserves_optional_arguments(
-    installed,
+    installed, dtype
 ):
-    logits = NS(dtype="bf16")
+    logits = NS(dtype=dtype)
     assert (
         installed.patch.deep_select_topk(logits, 64, indices_dtype="int64")
         == "sail-indices"
@@ -172,11 +174,38 @@ def test_cached_topk_objects_do_not_retain_cuda_only_support_flags(installed, ba
     cached = NS(_backend=backend, _has_deep_select=False)
     resolve = installed.provider.SparseIndexerTopk.resolve_backend
     assert resolve(cached, NS(dtype="bf16"), 64, 2) == "deep_select"
+    assert resolve(cached, NS(dtype="fp32"), 64, 2) == "deep_select"
     if backend == "auto":
-        assert resolve(cached, NS(dtype="fp32"), 64, 2) == "cuda-result"
+        assert resolve(cached, NS(dtype="fp16"), 64, 2) == "cuda-result"
     else:
         with pytest.raises(RuntimeError, match="never rounded"):
-            resolve(cached, NS(dtype="fp32"), 64, 2)
+            resolve(cached, NS(dtype="fp16"), 64, 2)
+
+
+@pytest.mark.parametrize("dtype", ["bf16", "fp32"])
+@pytest.mark.parametrize("backend", ["auto", "deep_select"])
+def test_step5_selects_deepselect_without_converting_scores(dtype, backend):
+    """Step5 BF16/FP32 inputs share one DeepSelect entry, keeping raw scores/params."""
+    scores = NS(dtype=dtype, shape=(2, 64))
+    calls = []
+    select = function(
+        "vllm_sail/patch/enhancement/models/step5_dsa_backend.py",
+        "_select_regions",
+        {
+            "current_platform": NS(is_ppu=lambda: True),
+            "deep_select": NS(can_use_deep_select=lambda x, k: True),
+            "_sparse": NS(
+                select_regions=lambda *args, **kwargs: calls.append((args, kwargs))
+            ),
+        },
+    )
+    select(NS(_topk_backend=backend), scores, "current", 8, topk_lengths="ends")
+    assert calls == [
+        (
+            (scores, "current", 8, "deep_select"),
+            {"topk_lengths": "ends", "paged_prefill": None, "sort": True},
+        )
+    ]
 
 
 def test_non_ppu_probes_and_entry_preserve_upstream(installed):

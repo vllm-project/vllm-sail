@@ -121,10 +121,10 @@ def _value(node: ast.AST, env: dict[str, Any]) -> Any:
             and node.func.attr == "eager_break_during_capture"
         ):
             return _value(node.args[0], env)
-        if isinstance(node.func, ast.Name) and isinstance(
-            env.get(node.func.id), ast.FunctionDef
-        ):
-            factory = env[node.func.id]
+        factory = _maybe_value(node.func, env)
+        if isinstance(factory, str) and factory.startswith("vllm_sail."):
+            factory = resolve_symbol(ROOT, factory).node
+        if isinstance(factory, ast.FunctionDef):
             if isinstance(factory.body[-1], ast.Return) and isinstance(
                 factory.body[-1].value, ast.Name
             ):
@@ -404,11 +404,7 @@ def dispatcher_hooks(path: Path) -> list[Hook]:
         module = _value(call.args[0], env)
         name, body = (_value(arg, env) for arg in call.args[1:])
         attribute = next(
-            (
-                _value(kw.value, env)
-                for kw in call.keywords
-                if kw.arg == "target_name"
-            ),
+            (_value(kw.value, env) for kw in call.keywords if kw.arg == "target_name"),
             name,
         )
         if not isinstance(body, ast.FunctionDef):
