@@ -24,6 +24,7 @@ synchronised value rather than this rank's own vote.
 from __future__ import annotations
 
 import functools
+import sys
 import threading
 from collections.abc import Sequence
 from typing import TYPE_CHECKING
@@ -38,6 +39,11 @@ if TYPE_CHECKING:
 #: engine runs one step per thread and the value is overwritten by every
 #: dispatch, so it never survives into an unrelated batch.
 _UNIFORM_TOK_COUNT = threading.local()
+
+_CONTEXT_CONSUMERS = (
+    "vllm.v1.worker.gpu.model_runner",
+    "vllm.v1.worker.gpu.cudagraph_utils",
+)
 
 
 def _set_uniform_token_count(value: int | None) -> None:
@@ -63,8 +69,10 @@ def _install_make_dummy() -> None:
         is_padding: bool = True,
         uniform_token_count: int | None = None,
     ) -> InputBatch:
+        # PPU MODIFICATION: begin
         if uniform_token_count is None:
             uniform_token_count = _get_uniform_token_count()
+        # PPU MODIFICATION: end
 
         assert 0 < num_reqs <= num_tokens
         device = input_buffers.device
@@ -181,6 +189,9 @@ def _install_set_dummy_context() -> None:
     import numpy as np
     import torch
     from vllm.utils.math_utils import cdiv
+    from vllm.v1.worker.gpu import input_batch as _input_batch
+
+    original = _input_batch.set_dummy_context
 
     def set_dummy_context(
         input_batch: InputBatch,
@@ -236,16 +247,27 @@ def _install_set_dummy_context() -> None:
             )
             block_table[:num_reqs, :num_blocks] = block_ids.view(num_reqs, num_blocks)
 
-    patch(
-        "vllm.v1.worker.gpu.input_batch",
-        "set_dummy_context",
+    metadata = dict(
         reason=(
             "Profiling context belongs only to real dummy rows, never graph "
             "padding rows."
         ),
         affected_versions=">=0.33.0,<0.34.0",
         remove_when="upstream vLLM 0.33.x backports the DP dummy-batch geometry fix",
-    )(set_dummy_context)
+    )
+    patch("vllm.v1.worker.gpu.input_batch", "set_dummy_context", **metadata)(
+        set_dummy_context
+    )
+    # These modules import the function by value before plugin installation.
+    # Rebind only aliases still pointing at the original, without importing
+    # unloaded consumers or overwriting an independent replacement.
+    for name in _CONTEXT_CONSUMERS:
+        consumer = sys.modules.get(name)
+        if (
+            consumer is not None
+            and getattr(consumer, "set_dummy_context", None) is original
+        ):
+            patch(name, "set_dummy_context", **metadata)(set_dummy_context)
 
 
 def _install_prepare_dummy_attn() -> None:
