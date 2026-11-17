@@ -37,6 +37,8 @@ Modules, and why each is import-on-install like the rest of the framework:
   (``msa_for_sail``) kernels on PPU, with 890P fp8 / 810E bf16 defaults.
 * ``qwen3_moe`` — per-layer mix_layer quant overrides (+36).
 * ``qwen3_next`` — NVTX profiling scaffold (+19).
+* ``qwen4_exp_qsa`` — route Qwen4Exp QSA through PPU FA3's CUDA kernel where it
+  can run the shape; upstream hard-wires the Triton one.
 * ``moe_marlin_gate`` — VLLM_PPU_ENABLE_MOE_MARLIN default-off gate.
 """
 
@@ -65,6 +67,7 @@ from vllm_sail.patch.enhancement.models import (
     moe_marlin_gate,  # noqa: F401
     qwen3_moe,  # noqa: F401
     qwen3_next,  # noqa: F401
+    qwen4_exp_qsa,  # noqa: F401
 )
 
 # Leaf-style: preload the MiniMax ops package without quack on PPU.
