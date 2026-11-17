@@ -270,6 +270,8 @@
   "vllm.models.qwen4_exp.nvidia.ops.qsa_indexer.qsa_select_paged_prefill": "af82475eef466f7756bbc960edadf40cefc22c32a6f38eee6d0b89cb0f19dbb8",
   "vllm.models.qwen4_exp.nvidia.ops.qsa_indexer.warmup_qsa_mqa_paged_decode": "f6e3876cb45e20026efab4d74eed7ba78bda1b194d69e6a3dc0d38cff951e500",
   "vllm.models.qwen4_exp.nvidia.ops.qsa_prepare.qsa_prepare": "e4225a8bc171604044c4876104785a137648376c0a9948c7ab0d1ad8d195498d",
+  "vllm.models.qwen4_exp.nvidia.qsa.Qwen4ExpQSAImpl.__init__": "217c5d9dc612b980556722b892b02894d0844ea8eb36e6ab7d504fe992e08e02",
+  "vllm.models.qwen4_exp.nvidia.qsa.Qwen4ExpQSAImpl.forward": "5d4d58731e96a06211b7bb228106e480a76c4552186e0b4b05638f6d55508557",
   "vllm.models.qwen4_exp.nvidia.qsa_indexer.qsa_prepare": "e4225a8bc171604044c4876104785a137648376c0a9948c7ab0d1ad8d195498d",
   "vllm.models.step5.nvidia.flashinfer_sparse.Step5FlashInferSparse.__init__": "22fd2b6ea4c4698a31aef313cfdd5cda885a06ee788650eb2e34991253604e7d",
   "vllm.models.step5.nvidia.flashinfer_sparse.Step5FlashInferSparse.decode_logits": "ca9eb407326af0d73a97298a7ff28022f2b53c262f98e093109c057953816043",

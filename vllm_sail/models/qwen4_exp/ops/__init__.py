@@ -2,7 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Qwen4Exp QSA indexer kernels for PPU.
 
-These modules import ``torch`` and DeepGEMM at module top level, so they must
-not be imported eagerly. This ``__init__`` deliberately imports nothing;
-import the leaf modules directly from the patches that need them.
+This ``__init__`` deliberately imports nothing, matching
+``vllm_sail/models/deepseek_v4/ops/__init__.py``: the leaf modules import
+``torch``, ``vllm.triton_utils`` and DeepGEMM at module top level. Import
+them directly, under the QSA selection gate.
 """
