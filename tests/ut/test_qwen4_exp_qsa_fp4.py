@@ -304,13 +304,58 @@ def test_fp4_avg_metadata_extra_matches_the_schedule_assert():
 
     The head dimension is the logical 128, not the packed 64 the Q/K tensors
     carry: DeepGEMM halves it internally for MXFP4 and rejects a D32 tile. The
-    fourth entry is a dtype, since an integer byte size is not accepted.
+    fourth entry is a dtype, since an integer byte size is not accepted. The
+    head count must follow the scored query: H8's tiles-per-CU differs from
+    H4's, so a stale default would silently corrupt the launch geometry.
     """
     torch = pytest.importorskip("torch")
     pytest.importorskip("vllm", reason="requires vLLM")
     from vllm_sail.utils import deep_gemm
 
     assert deep_gemm.fp4_avg_metadata_extra(3) == (3, 4, 128, torch.int8)
+    assert deep_gemm.fp4_avg_metadata_extra(4, 8) == (4, 8, 128, torch.int8)
+    with pytest.raises(ValueError, match="heads only"):
+        deep_gemm.fp4_avg_metadata_extra(3, 16)
+
+
+def test_decode_scorer_rejects_a_head_count_the_kernels_cannot_score():
+    """The decode guard fires before any cache access or quantization."""
+    torch = pytest.importorskip("torch")
+    pytest.importorskip("vllm", reason="requires vLLM")
+    from vllm_sail.models.qwen4_exp.ops import fp4_select
+
+    q = torch.zeros(4, 16, 128, dtype=torch.bfloat16)
+    with pytest.raises(NotImplementedError, match="heads only"):
+        fp4_select.qsa_select_paged_decode(
+            q,
+            None,
+            None,
+            None,
+            token_topk=2048,
+            compress_ratio=4,
+            decode_query_len=4,
+            block_indices=torch.zeros(4, 512, dtype=torch.int32),
+        )
+
+
+def test_warmup_rejects_a_head_count_the_kernels_cannot_score(monkeypatch):
+    pytest.importorskip("torch", reason="requires torch")
+    pytest.importorskip("vllm", reason="requires vLLM")
+    from vllm_sail.models.qwen4_exp.ops import fp4_select
+    from vllm_sail.utils import deep_gemm
+
+    monkeypatch.setattr(deep_gemm, "has_fp4_mqa_avg_logits", lambda: True)
+    monkeypatch.setattr(deep_gemm, "has_fp4_paged_mqa_avg_logits", lambda: True)
+    with pytest.raises(NotImplementedError, match="logical dims only"):
+        fp4_select.warmup_qsa_mqa_paged_decode(
+            None,
+            None,
+            num_heads=16,
+            head_dim=128,
+            max_decode_query_len=4,
+            max_num_reqs=1,
+            max_num_batched_tokens=4,
+        )
 
 
 def test_require_fp4_mqa_avg_logits_needs_both_kernels(monkeypatch):

@@ -979,6 +979,10 @@ def fp8_fp4_paged_mqa_logits(
 # Only what `metadata_extra` needs lives here; the packed row layout is described
 # by `vllm_sail.models.qwen4_exp.ops.mxfp4`.
 FP4_AVG_NUM_HEADS = 4
+# DeepGEMM's FP4 AVG entries accept 4 heads, or 8 heads with MXFP4 (M890 only,
+# bf16 logits). The head count sizes the paged schedule buffer, so it must match
+# the scored query's head count exactly.
+FP4_AVG_NUM_HEADS_SUPPORTED = (4, 8)
 FP4_AVG_LOGICAL_HEAD_DIM = 128
 # On M890 `torch.int8` denotes packed MXFP4, not integer arithmetic; DeepGEMM
 # reads it together with the device arch and rejects `torch.uint8` /
@@ -986,18 +990,28 @@ FP4_AVG_LOGICAL_HEAD_DIM = 128
 FP4_AVG_QK_DTYPE = torch.int8
 
 
-def fp4_avg_metadata_extra(next_n: int) -> tuple[int, int, int, torch.dtype]:
+def fp4_avg_metadata_extra(
+    next_n: int, num_heads: int = FP4_AVG_NUM_HEADS
+) -> tuple[int, int, int, torch.dtype]:
     """`metadata_extra` for `get_paged_mqa_logits_metadata` on the FP4 AVG path.
 
     DeepGEMM sizes the FP4 paged AVG schedule buffer from
     ``(next_n, num_heads, logical head_dim, qk_dtype)`` and rejects any other
-    combination at launch, so callers must not guess these values. The head
-    dimension is the logical one: DeepGEMM halves it internally for MXFP4, so
-    passing the packed 64 would ask for a D32 tile, which it rejects.
+    combination at launch, so callers must not guess these values. ``num_heads``
+    must be the scored query's actual head count (4 or 8): the schedule's
+    tiles-per-CU differs between them, and a mismatch silently corrupts the
+    launch geometry. The head dimension is the logical one: DeepGEMM halves it
+    internally for MXFP4, so passing the packed 64 would ask for a D32 tile,
+    which it rejects.
     """
+    if num_heads not in FP4_AVG_NUM_HEADS_SUPPORTED:
+        raise ValueError(
+            "DeepGEMM's FP4 AVG kernels score "
+            f"{FP4_AVG_NUM_HEADS_SUPPORTED} heads only, got {num_heads}"
+        )
     return (
         next_n,
-        FP4_AVG_NUM_HEADS,
+        num_heads,
         FP4_AVG_LOGICAL_HEAD_DIM,
         FP4_AVG_QK_DTYPE,
     )
@@ -1037,13 +1051,14 @@ def fp4_mqa_avg_logits(
 
     Average mode computes ``sum_h(relu(q_h . k)) * k_scale / sqrt(128)`` with
     unity head weights, so unlike `fp8_fp4_mqa_logits` there is no `weights`
-    argument and `num_heads` must be exactly `FP4_AVG_NUM_HEADS`. Normalization
-    uses the logical head dimension (128), not the packed one.
+    argument and `num_heads` must be one of `FP4_AVG_NUM_HEADS_SUPPORTED`
+    (8 heads requires MXFP4 and bf16 logits). Normalization uses the logical
+    head dimension (128), not the packed one.
 
     Args:
-        q: Tuple ``(q_values, q_sf)`` where `q_values` is `[M, 4, 64]` int8
-            holding two E2M1 values per byte and `q_sf` is `[M, 4]` int32
-            holding the packed UE8M0 block scales.
+        q: Tuple ``(q_values, q_sf)`` where `q_values` is `[M, H, 64]` int8
+            holding two E2M1 values per byte and `q_sf` is `[M, H]` int32
+            holding the packed UE8M0 block scales, with H in (4, 8).
         kv: Tuple ``(k_values, k_sf)`` where `k_values` is `[N, 64]` int8 and
             `k_sf` is `[N]` int32.
         cu_seqlen_ks: Inclusive start of the valid K range per query row, shape
@@ -1096,9 +1111,9 @@ def fp4_paged_mqa_avg_logits(
     """Score a paged MXFP4 key cache with the average MQA logits kernel.
 
     Args:
-        q: Tuple ``(q_values, q_sf)`` where `q_values` is `[B, next_n, 4, 64]`
-            int8 and `q_sf` is `[B, next_n, 4]` int32. `next_n` must be in
-            `[1, 6]`.
+        q: Tuple ``(q_values, q_sf)`` where `q_values` is `[B, next_n, H, 64]`
+            int8 and `q_sf` is `[B, next_n, H]` int32, with H in (4, 8).
+            `next_n` must be in `[1, 6]`.
         kv_cache: Paged cache of shape `[num_blocks, page_kv, 1, 68]`, dtype
             `torch.uint8`. Each page is planar: all `page_kv` rows of 64 packed
             value bytes first, then `page_kv` rows of 4 UE8M0 scale bytes. The
@@ -1120,8 +1135,9 @@ def fp4_paged_mqa_avg_logits(
             dtype int32. One framework block is one page, so these are the
             framework block ids vLLM already maintains -- do not expand them.
         schedule_metadata: From `get_paged_mqa_logits_metadata` built with
-            `metadata_extra=fp4_avg_metadata_extra(next_n)`. DeepGEMM asserts its
-            size matches `get_num_sms() * tb_per_cu` at launch.
+            `metadata_extra=fp4_avg_metadata_extra(next_n, num_heads)` for the
+            scored query's head count. DeepGEMM asserts its size matches
+            `get_num_sms() * tb_per_cu` at launch.
         max_context_len: Maximum sequence length used to size the logits output.
         logits_dtype: Output dtype. Defaults to `torch.float32` because the
             DeepGEMM FP4 entries default to `torch.bfloat16`.
@@ -1519,6 +1535,7 @@ __all__ = [
     "has_fp4_paged_mqa_avg_logits",
     "fp4_avg_metadata_extra",
     "FP4_AVG_NUM_HEADS",
+    "FP4_AVG_NUM_HEADS_SUPPORTED",
     "FP4_AVG_LOGICAL_HEAD_DIM",
     "FP4_AVG_QK_DTYPE",
     "get_paged_mqa_logits_metadata",
