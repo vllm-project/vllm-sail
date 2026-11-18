@@ -27,6 +27,7 @@ from vllm_sail.models.qwen4_exp.ops.mxfp4 import (
     qsa_quant_q_mxfp4,
 )
 from vllm_sail.utils.deep_gemm import (
+    FP4_AVG_NUM_HEADS_SUPPORTED,
     fp4_avg_metadata_extra,
     fp4_mqa_avg_logits,
     fp4_paged_mqa_avg_logits,
@@ -37,7 +38,6 @@ from vllm_sail.utils.deep_gemm import (
 # Upstream rounds its prefill logits width to this granularity; DeepGEMM pads
 # the allocation's row stride to 1024 bytes, which is DeepSelect's requirement.
 _LOGITS_WIDTH_GRANULARITY = 64
-_FP4_AVG_NUM_HEADS = 4
 # The paged kernel hard-caps the query rows it packs into one request tile.
 _MAX_PAGED_NEXT_N = 6
 
@@ -104,6 +104,11 @@ def qsa_select_paged_decode(
         )
     num_requests = q.shape[0] // decode_query_len
     num_heads = q.shape[1]
+    if num_heads not in FP4_AVG_NUM_HEADS_SUPPORTED:
+        raise NotImplementedError(
+            "DeepGEMM's FP4 average MQA logits kernels score "
+            f"{FP4_AVG_NUM_HEADS_SUPPORTED} heads only, got {num_heads}"
+        )
 
     page_rows = check_qsa_fp4_cache_layout(k_cache)
     columns = page_table.shape[1] * page_rows
@@ -129,7 +134,7 @@ def qsa_select_paged_decode(
             # the granularity does without depending on how far they lift it.
             MXFP4_PAGE_ROWS_GRANULARITY,
             get_num_sms(),
-            fp4_avg_metadata_extra(decode_query_len),
+            fp4_avg_metadata_extra(decode_query_len, num_heads),
         ),
         columns,
         logits_dtype=torch.bfloat16,
@@ -240,11 +245,11 @@ def warmup_qsa_mqa_paged_decode(
     """
     del page_table, max_num_reqs, max_num_batched_tokens
     require_fp4_mqa_avg_logits()
-    if num_heads != _FP4_AVG_NUM_HEADS or head_dim != MXFP4_LOGICAL_HEAD_DIM:
+    if num_heads not in FP4_AVG_NUM_HEADS_SUPPORTED or head_dim != MXFP4_LOGICAL_HEAD_DIM:
         raise NotImplementedError(
             "DeepGEMM's FP4 average MQA logits kernels score "
-            f"{_FP4_AVG_NUM_HEADS} heads of {MXFP4_LOGICAL_HEAD_DIM} logical "
-            f"dims only, got {num_heads} heads of {head_dim}"
+            f"{FP4_AVG_NUM_HEADS_SUPPORTED} heads of {MXFP4_LOGICAL_HEAD_DIM} "
+            f"logical dims only, got {num_heads} heads of {head_dim}"
         )
 
     device = k_cache.device
@@ -257,12 +262,12 @@ def warmup_qsa_mqa_paged_decode(
     page = k_cache[:1]
     block_table = torch.zeros((1, 1), dtype=torch.int32, device=device)
     q_values = torch.zeros(
-        (_MAX_PAGED_NEXT_N, _FP4_AVG_NUM_HEADS, MXFP4_PACKED_HEAD_DIM),
+        (_MAX_PAGED_NEXT_N, num_heads, MXFP4_PACKED_HEAD_DIM),
         dtype=torch.int8,
         device=device,
     )
     q_sf = torch.zeros(
-        (_MAX_PAGED_NEXT_N, _FP4_AVG_NUM_HEADS), dtype=torch.int32, device=device
+        (_MAX_PAGED_NEXT_N, num_heads), dtype=torch.int32, device=device
     )
 
     profiles: list[tuple[int, int]] = []
@@ -271,9 +276,9 @@ def warmup_qsa_mqa_paged_decode(
         fp4_paged_mqa_avg_logits(
             (
                 q_values[:next_n].view(
-                    1, next_n, _FP4_AVG_NUM_HEADS, MXFP4_PACKED_HEAD_DIM
+                    1, next_n, num_heads, MXFP4_PACKED_HEAD_DIM
                 ),
-                q_sf[:next_n].view(1, next_n, _FP4_AVG_NUM_HEADS),
+                q_sf[:next_n].view(1, next_n, num_heads),
             ),
             page,
             context_lens,
@@ -282,7 +287,7 @@ def warmup_qsa_mqa_paged_decode(
                 context_lens,
                 MXFP4_PAGE_ROWS_GRANULARITY,
                 num_sms,
-                fp4_avg_metadata_extra(next_n),
+                fp4_avg_metadata_extra(next_n, num_heads),
             ),
             page_rows,
             logits_dtype=torch.bfloat16,
@@ -290,7 +295,7 @@ def warmup_qsa_mqa_paged_decode(
         profiles.append((next_n, 1))
 
     bf16_q = torch.zeros(
-        (1, _FP4_AVG_NUM_HEADS, MXFP4_LOGICAL_HEAD_DIM),
+        (1, num_heads, MXFP4_LOGICAL_HEAD_DIM),
         dtype=torch.bfloat16,
         device=device,
     )

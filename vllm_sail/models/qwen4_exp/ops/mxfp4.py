@@ -124,8 +124,8 @@ def qsa_quant_q_mxfp4(
 
     Args:
         q: ``[num_rows, num_heads, 128]`` normalized and RoPE'd query, bf16 or
-            fp32. ``num_heads`` must be 4, which is all the average-mode kernel
-            supports.
+            fp32. Packing is per-head, so any head count the average-mode
+            kernels accept (4 or 8) works here.
 
     Returns:
         ``(values, scales)`` with ``values`` ``[num_rows, num_heads, 64]`` int8
