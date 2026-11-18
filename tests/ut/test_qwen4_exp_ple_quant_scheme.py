@@ -312,8 +312,8 @@ def test_install_skips_when_upstream_modules_are_missing(
 ) -> None:
     state = _StubState()
     _stub_logger(monkeypatch, state)
-    # No ngram stub chain: the parent package must lack the attribute so the
-    # from-import goes through importlib, where a None entry raises.
+    # No ngram stub chain: install() probes via importlib.import_module, which
+    # consults sys.modules directly, where a None entry raises.
     monkeypatch.setitem(
         sys.modules, "vllm.models.qwen4_exp.common.ngram_embedding", None
     )
@@ -323,6 +323,30 @@ def test_install_skips_when_upstream_modules_are_missing(
     assert state.warnings and "ple_quant_scheme" in state.warnings[0]
     assert len(PATCH_REGISTRY) == registry_before
     ple_module.install()
+    assert len(PATCH_REGISTRY) == registry_before
+
+
+def test_install_skips_even_when_the_parent_attribute_is_bound(
+    monkeypatch: pytest.MonkeyPatch, ple_module
+) -> None:
+    # Mode B regression: with real vLLM imported earlier in the session, the
+    # parent package carries a bound ngram_embedding attribute. A from-import
+    # probe would resolve through it and bypass the None entry in sys.modules,
+    # then patch()'s importlib.import_module would raise uncaught.
+    state = _StubState()
+    _stub_logger(monkeypatch, state)
+    parent = types.ModuleType("vllm.models.qwen4_exp.common")
+    parent.ngram_embedding = types.ModuleType(  # type: ignore[attr-defined]
+        "vllm.models.qwen4_exp.common.ngram_embedding"
+    )
+    _register_chain(monkeypatch, "vllm.models.qwen4_exp.common", parent)
+    monkeypatch.setitem(
+        sys.modules, "vllm.models.qwen4_exp.common.ngram_embedding", None
+    )
+    registry_before = len(PATCH_REGISTRY)
+    ple_module.install()
+    assert ple_module._unavailable is True
+    assert state.warnings and "ple_quant_scheme" in state.warnings[0]
     assert len(PATCH_REGISTRY) == registry_before
 
 

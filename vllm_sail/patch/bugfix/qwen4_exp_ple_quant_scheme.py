@@ -37,6 +37,8 @@ import-time consumer alias needs rebinding.
 
 from __future__ import annotations
 
+import importlib
+
 from vllm_sail.patch.utils import patch
 
 _NGRAM_MODULE = "vllm.models.qwen4_exp.common.ngram_embedding"
@@ -79,7 +81,10 @@ def install() -> None:
 
     logger = init_logger(__name__)
     try:
-        from vllm.models.qwen4_exp.common import ngram_embedding
+        # Probe exactly how patch() imports the target: a from-import can
+        # resolve through an already-bound parent attribute and succeed even
+        # when importlib.import_module would fail.
+        ngram_embedding = importlib.import_module(_NGRAM_MODULE)
     except ImportError as exc:
         _unavailable = True
         logger.warning(
