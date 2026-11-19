@@ -243,6 +243,24 @@ jobs:
           except (OSError, ValueError, RecursionError):
               pass
           accuracy = mapping(private.get("accuracy"))
+          def bench_case(concurrency):
+              result = mapping(mapping(private.get("bench")).get(f"c{concurrency}"))
+              def verdict_label(value):
+                  return value if value in ("pass", "fail") else "not_available"
+              phase = result.get("failed_phase")
+              warmup = mapping(result.get("warmup_metrics"))
+              measured = mapping(result.get("metrics"))
+              return {
+                  "status": verdict_label(result.get("status")),
+                  "failed_phase": phase if phase in ("warmup", "measure") else None,
+                  "warmup_expected": count(result.get("warmup_prompts")),
+                  "warmup_completed": count(warmup.get("completed")),
+                  "warmup_failed": count(warmup.get("failed")),
+                  "measured_expected": count(result.get("num_prompts")),
+                  "measured_completed": count(measured.get("completed")),
+                  "measured_failed": count(measured.get("failed")),
+              }
+
           baseline = mapping(accuracy.get("per_question")).get("status")
           model = os.environ["MODEL_KEY"]
           if baseline not in ("baseline_established", "baseline_incomplete"):
@@ -267,6 +285,9 @@ jobs:
               },
               "baseline_completeness": baseline,
               "micro_e2e": verdict(private.get("micro_e2e_passed")),
+              "micro_e2e_cases": {
+                  str(concurrency): bench_case(concurrency) for concurrency in (1, 16)
+              },
           }
           (Path(os.environ["PUBLIC_DIR"]) / "summary.json").write_text(
               json.dumps(public, indent=2, allow_nan=False) + "\n", encoding="utf-8"

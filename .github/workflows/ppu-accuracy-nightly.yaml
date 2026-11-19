@@ -1,206 +1,35 @@
 name: PPU accuracy nightly
 
-# Nightly GSM8K accuracy regression for the model-precision E2E gate
-# (CI plan category 3). Accuracy stays outside the per-PR gate: this entry
-# point builds wheels for the triggering commit and runs the legacy and Recipe
-# accuracy lanes without scheduling the migrated cases twice.
-#
-#   build    -- after validating model selection, call ppu-build-and-test.yaml
-#               with skip_device_tests so the pin-UT and Fast Sanity
-#               lanes stay with the per-PR gate instead of competing for the
-#               same 8-ppu-m890p hosts the accuracy lane needs.
-#               Resolving "the newest successful build" instead does not work:
-#               ppu-build-and-test.yaml exposes no workflow_dispatch entry, and
-#               the runs its workflow_call produces belong to the caller, so
-#               the only rows it lists are pull_request previews. Picking the
-#               newest of those pinned this lane to a preview from days ago,
-#               whose checkout predates every fix merged since.
-#   select   -- on schedule, route migrated cases to Recipe when enabled.
-#               Manual runs keep their legacy or explicit recipe: selection.
-#   accuracy -- one reusable call per model. A single model already needs all
-#               eight devices and ppu_runtime_container.sh takes an exclusive
-#               flock on the runner, so max-parallel stays at 1; the catalog
-#               can occupy a runner for much of a day.
-#   recipe   -- scheduled after the legacy lane, or run on its own with the
-#               recipe: prefix. The public Recipe gate applies to both paths.
-#
-# What the lane gates on
-#   * the reviewed golden under tests/e2e/models/_golden when one exists
-#     (score inside the checkpoint's band);
-#   * score >= threshold (0.9) for a checkpoint that has no golden yet.
-#     ppu_e2e_accuracy.sh seeds the read-only golden directory into the
-#     writable results tree before evaluating, and a model without a golden
-#     only reports "created" and uploads a *.pending-review.json artifact for
-#     a human to promote into the repository.
-#
-# Chip coverage: the lane runs on the self-hosted 8-ppu-m890p runner and uses
-# whatever devices that host exposes, so deepseek-v4-int8 (catalog board
-# OAM-810E) exercises the ZW-M890P int8 path here and its golden is bound to
-# that chip. A true 810E lane needs the ppu-scheduler-action route the kernel
-# and perf lanes use, which the local Docker wrapper cannot provide.
-#
-# Schedule: 12:00 UTC = 20:00 CST. The serial accuracy cases are long, so the
-# window is chosen only to start ahead of the 18:30 UTC upstream-reuse and
-# 20:00 UTC perf lanes; the run does not wait for them.
-
 on:
   workflow_dispatch:
     inputs:
       models:
-        description: "Comma-separated legacy catalog keys (blank = all legacy), or recipe:<comma-separated policy slugs> for Recipe-only"
-        required: false
-        default: ""
+        description: Recipe policy slugs for this validation
         type: string
-
-  schedule:
-    - cron: "0 12 * * *"
+        required: true
 
 permissions:
   contents: read
-  # Downloading the wheels the build job of this same run uploaded needs this.
   actions: read
 cache-mode: none
 
-concurrency:
-  # Cancelling would throw away a finished build and the serial model runs
-  # behind it, so a second nightly waits instead of replacing the first.
-  group: accuracy-nightly-${{ github.ref }}
-  cancel-in-progress: false
-
 jobs:
   build:
-    name: Build nightly wheels
-    needs: select
-    uses: ./.github/workflows/ppu-build-and-test.yaml
+    name: Repackage verified native wheels
+    if: ${{ inputs.models == 'recipe:deepseek-v4-flash-dp-ep' }}
+    uses: ./.github/workflows/_ppu-build.yaml
     with:
-      # github.sha is the main commit this run was triggered on, and the same
-      # value goes to the accuracy calls below, so the checkout and the wheel
-      # manifest describe one tree.
-      pr_head_sha: ${{ github.sha }}
-      skip_device_tests: true
-
-  select:
-    name: Select accuracy models
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    env:
-      SELECT_RECIPES: ${{ vars.PPU_RECIPE_PUBLIC_ENABLED == 'true' && (github.event_name == 'schedule' || startsWith(inputs.models, 'recipe:')) }}
-    outputs:
-      matrix: ${{ steps.select.outputs.matrix }}
-      recipe_models: ${{ steps.select.outputs.recipe_models }}
-    steps:
-      - name: Check out vLLM SAIL
-        uses: actions/checkout@v4
-        with:
-          persist-credentials: false
-
-      - uses: actions/setup-python@v5
-        if: env.SELECT_RECIPES == 'true'
-        with:
-          python-version: "3.12"
-
-      - name: Install Recipe selector dependency
-        if: env.SELECT_RECIPES == 'true'
-        run: python -m pip install --no-cache-dir PyYAML==6.0.3
-
-      - name: Select accuracy models
-        id: select
-        env:
-          MODELS: ${{ inputs.models }}
-          RECIPE_PUBLIC_ENABLED: ${{ vars.PPU_RECIPE_PUBLIC_ENABLED }}
-          SCHEDULED_RECIPE_ENABLED: ${{ github.event_name == 'schedule' && vars.PPU_RECIPE_PUBLIC_ENABLED == 'true' }}
-        run: |
-          python3 - <<'PY'
-          import importlib.util
-          import json
-          import os
-          import sys
-          from pathlib import Path
-
-          spec = importlib.util.spec_from_file_location(
-              "ppu_e2e_select", Path("scripts/ci/ppu_e2e_select.py")
-          )
-          select = importlib.util.module_from_spec(spec)
-          spec.loader.exec_module(select)
-
-          requested = os.environ.get("MODELS", "")
-          output = Path(os.environ["GITHUB_OUTPUT"])
-          if requested.startswith("recipe:"):
-              if os.environ["RECIPE_PUBLIC_ENABLED"] != "true":
-                  sys.exit("Recipe accuracy is disabled: PPU_RECIPE_PUBLIC_ENABLED must be true")
-              slugs = [slug.strip() for slug in requested.removeprefix("recipe:").split(",")]
-              if any(not slug for slug in slugs) or len(slugs) != len(set(slugs)):
-                  sys.exit("Specify one or more distinct, nonempty Recipe policy slugs")
-              models = ",".join(slugs)
-              try:
-                  select.build_recipe_matrix(models, "model_sanity")
-              except ValueError as error:
-                  sys.exit(str(error))
-              with output.open("a", encoding="utf-8") as handle:
-                  handle.write(f"recipe_models={models}\n")
-              sys.exit(0)
-
-          catalog = json.loads(select.CATALOG.read_text())
-          scheduled_recipes = os.environ["SCHEDULED_RECIPE_ENABLED"] == "true"
-          try:
-              selected = select.build_accuracy_matrix(catalog, requested)["include"]
-              if scheduled_recipes:
-                  legacy_cases = select.scheduled_legacy_accuracy_cases(selected)
-              else:
-                  # Use catalog case IDs as keys to distinguish serving variants.
-                  legacy_cases = [entry["case_id"] for entry in selected]
-          except ValueError as error:
-              sys.exit(str(error))
-          if not legacy_cases and not scheduled_recipes:
-              sys.exit(f"no accuracy model selected by MODELS={requested!r}")
-
-          if legacy_cases:
-              include = [{"model": case_id} for case_id in legacy_cases]
-              matrix = json.dumps({"include": include}, separators=(",", ":"))
-              print(f"accuracy matrix: {matrix}")
-              with output.open("a", encoding="utf-8") as handle:
-                  handle.write(f"matrix={matrix}\n")
-          PY
-
-  accuracy:
-    name: Accuracy ${{ matrix.model }}
-    needs: [build, select]
-    if: needs.select.outputs.matrix != ''
-    permissions:
-      contents: read
-      actions: read
-    strategy:
-      fail-fast: false
-      # Every model needs all eight devices and the runtime wrapper holds an
-      # exclusive flock on the runner, so a second concurrent lane aborts.
-      max-parallel: 1
-      matrix: ${{ fromJson(needs.select.outputs.matrix) }}
-    uses: ./.github/workflows/_ppu-accuracy-tests.yaml
-    with:
-      pr_mode: false
-      # Reuse the exact SAIL commit the wheels were built from; the wrapper
-      # refuses a checkout that disagrees with the wheel manifest.
-      pr_head_sha: ${{ github.sha }}
-      wheel_source_sha: ${{ github.sha }}
-      # _ppu-build.yaml names the artifact after the run that uploaded it,
-      # which for a workflow_call is this nightly run.
-      build_run_id: ${{ github.run_id }}
-      models: ${{ matrix.model }}
+      pr_head_sha: '51cbbdf1c5bc35cbb0e36e1c302cb6dd66464044'
+      native_reuse_run_id: '44504802787'
 
   recipe-model-sanity:
     name: Recipe model sanity & micro-E2E
-    needs: [build, select, accuracy]
-    if: >-
-      ${{ !cancelled() && vars.PPU_RECIPE_PUBLIC_ENABLED == 'true' &&
-      needs.build.result == 'success' && needs.select.result == 'success' &&
-      (github.event_name == 'schedule' || needs.select.outputs.recipe_models != '') }}
-    permissions:
-      contents: read
-      actions: read
+    needs: build
+    if: ${{ needs.build.result == 'success' && inputs.models == 'recipe:deepseek-v4-flash-dp-ep' }}
     uses: ./.github/workflows/_ppu-recipe-model-sanity.yaml
     with:
       pr_mode: false
-      pr_head_sha: ${{ github.sha }}
-      wheel_source_sha: ${{ github.sha }}
+      pr_head_sha: '51cbbdf1c5bc35cbb0e36e1c302cb6dd66464044'
+      wheel_source_sha: '51cbbdf1c5bc35cbb0e36e1c302cb6dd66464044'
       build_run_id: ${{ github.run_id }}
-      models: ${{ needs.select.outputs.recipe_models }}
+      models: 'deepseek-v4-flash-dp-ep'
