@@ -516,7 +516,7 @@ def test_strict_collection_minimum_is_retained():
     assert error is not None and "expected at least 3" in error
 
 
-def test_pooling_reuse_excludes_only_the_snowflake_parameter(tmp_path):
+def test_pooling_reuse_excludes_hub_resolved_embed_dimensions(tmp_path):
     entry = next(e for e in harness.load_manifest() if e.id == "pooling_params")
     target = tmp_path / entry.path
     target.parent.mkdir(parents=True)
@@ -527,8 +527,8 @@ def test_pooling_reuse_excludes_only_the_snowflake_parameter(tmp_path):
         '    {"name": "Snowflake/snowflake-arctic-embed-m-v1.5"},\n'
         "])\n"
         "def test_embed_dimensions(model_info):\n"
-        '    assert model_info["name"] == "intfloat/multilingual-e5-small"\n'
-        '@pytest.mark.parametrize("case", range(39))\n'
+        '    raise AssertionError("hub-resolved case must be deselected")\n'
+        '@pytest.mark.parametrize("case", range(40))\n'
         "def test_other_pooling_parameters(case):\n"
         "    assert case >= 0\n"
     )
