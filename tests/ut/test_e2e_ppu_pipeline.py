@@ -861,6 +861,7 @@ def test_accuracy_nightly_is_serial_and_wheel_sourced_from_the_build_commit() ->
     assert nightly["jobs"]["build"]["with"] == {
         "pr_head_sha": "${{ github.sha }}",
         "skip_device_tests": True,
+        "native_reuse_run_id": "44518863734",
     }
     assert accuracy["needs"] == ["build", "select"]
     # Checkout and wheels must describe the same SAIL tree.
