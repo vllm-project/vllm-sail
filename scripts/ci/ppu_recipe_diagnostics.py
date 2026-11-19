@@ -10,6 +10,9 @@ PHASES = {
     "wheel_verification": "wheel_verification_failed",
     "runtime_dependencies": "runtime_dependencies_failed",
     "platform_check": "platform_check_failed",
+    "qwen_runtime_qsa_deepgemm": "qwen_runtime_qsa_deepgemm",
+    "qwen_runtime_qsa_deepselect": "qwen_runtime_qsa_deepselect",
+    "qwen_runtime_qsa_initialization": "qwen_runtime_qsa_initialization",
     "model_cache_check": "model_cache_check_failed",
     "recipe_validation": "recipe_validation_failed",
     "server_startup": "server_startup_failed",
@@ -23,6 +26,16 @@ PHASES = {
 # Publish stable categories for concrete startup errors. Raw log lines stay
 # in private retention, including for errors that do not match the allowlist.
 STARTUP_ERRORS = (
+    (r"numpy\.dtype size changed", "server_startup_numpy_abi"),
+    (
+        r"ModuleNotFoundError: No module named ['\"]deep_select",
+        "server_startup_deepselect_missing",
+    ),
+    (r"ModuleNotFoundError: No module named", "server_startup_missing_module"),
+    (r"ImportError:", "server_startup_import_error"),
+    (r"AssertionError:", "server_startup_assertion"),
+    (r"AttributeError:", "server_startup_attribute_error"),
+    (r"TypeError:", "server_startup_type_error"),
     (
         r"(?:OutOfMemoryError:|RuntimeError: [^\n]*out of memory)",
         "server_startup_out_of_memory",

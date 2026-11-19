@@ -167,6 +167,34 @@ from huggingface_hub import snapshot_download
 snapshot_download(repo_id=sys.argv[1], local_files_only=True)
 PY
 
+if [[ "${MODEL_ID}" == T-HEAD/Qwen3.8-Flash-Next-* ]]; then
+    if python - >/dev/null 2>&1 <<'PYTHON'
+from vllm_sail.utils.deep_gemm import (
+    has_fp4_mqa_avg_logits,
+    has_fp4_paged_mqa_avg_logits,
+)
+
+if not has_fp4_mqa_avg_logits() or not has_fp4_paged_mqa_avg_logits():
+    raise SystemExit(42)
+try:
+    import deep_select
+except (ImportError, OSError):
+    raise SystemExit(43) from None
+if not callable(getattr(deep_select, "topk", None)):
+    raise SystemExit(43)
+PYTHON
+    then
+        :
+    else
+        case "$?" in
+            42) record_phase qwen_runtime_qsa_deepgemm ;;
+            43) record_phase qwen_runtime_qsa_deepselect ;;
+            *) record_phase qwen_runtime_qsa_initialization ;;
+        esac
+        exit 2
+    fi
+fi
+
 record_phase recipe_validation
 python "${ROOT_DIR}/scripts/ci/ppu_recipe.py" validate --all --require-vllm-parser
 
