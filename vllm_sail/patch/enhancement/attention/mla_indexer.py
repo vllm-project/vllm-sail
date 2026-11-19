@@ -143,9 +143,17 @@ def _ppu_paged_metadata(
         indices = None
     if metadata_extra is None:
         raise ValueError("SAIL paged DSA metadata requires indexer query head geometry")
-    return _ppu_deep_gemm.get_paged_mqa_logits_metadata(
+    # PPU MODIFICATION: begin -- size upstream's copy buffer for the active ABI.
+    metadata = _ppu_deep_gemm.get_paged_mqa_logits_metadata(
         context_lens, block_size, num_sms, metadata_extra, indices=indices
     )
+    buffer = getattr(builder, "scheduler_metadata_buffer", None)
+    if buffer is not None and (
+        buffer.shape[0] < metadata.shape[0] or buffer.shape[1] != metadata.shape[1]
+    ):
+        builder.scheduler_metadata_buffer = metadata.new_empty(metadata.shape)
+    return metadata
+    # PPU MODIFICATION: end
 
 
 patch(
