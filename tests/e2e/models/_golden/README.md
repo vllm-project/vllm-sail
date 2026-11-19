@@ -225,11 +225,13 @@ Records still carrying the legacy `mode: lower_bound` tolerance keep their
 one-sided bound and hard floor, so an older baseline continues to gate exactly
 as it did.
 
-## Nightly CI
+## Manual accuracy CI
 
-`ppu-accuracy-nightly.yaml` runs every accuracy **case** once a night against
-the wheels of the newest successful PPU CI build. The checkout inside the
-runtime container is read-only, so `scripts/ci/ppu_e2e_accuracy.sh` copies
+`ppu-debug.yaml` runs every accuracy **case** when `run_accuracy` is enabled
+and `accuracy_models` is blank, using the wheels built by that same run.
+`ppu-accuracy-nightly.yaml` now builds wheels only and has no nightly schedule.
+The checkout inside the runtime container is read-only, so
+`scripts/ci/ppu_e2e_accuracy.sh` copies
 every `accuracy_*.json` from this directory into the writable results tree
 before evaluating (`GOLDEN_SEED_DIR`, default
 `/source/tests/e2e/models/_golden`). Consequences:
@@ -247,7 +249,7 @@ the next run.
 Promotion stays a human step: review the pending artifact, commit it here as
 `accuracy_<model>_<chip>.json`, and the next run gates against it.
 
-`chip` is whatever device the nightly runner exposes, not the catalog `board`
+`chip` is whatever device the accuracy runner exposes, not the catalog `board`
 field: the lane runs on the self-hosted `8-ppu-m890p` runner, so
 `deepseek_v4_int8` is currently captured against the ZW-M890P int8 path.
 

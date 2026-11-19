@@ -20,7 +20,7 @@ EVAL_SCRIPT = ROOT / "scripts" / "eval" / "ppu_gsm8k_eval.py"
 GOLDEN = ROOT / "tests" / "e2e" / "models" / "_golden"
 MODEL_WORKFLOW = ROOT / ".github" / "workflows" / "_ppu-model-tests.yaml"
 ACCURACY_WORKFLOW = ROOT / ".github" / "workflows" / "_ppu-accuracy-tests.yaml"
-NIGHTLY_WORKFLOW = ROOT / ".github" / "workflows" / "ppu-accuracy-nightly.yaml"
+WHEEL_WORKFLOW = ROOT / ".github" / "workflows" / "ppu-accuracy-nightly.yaml"
 KERNEL_PERF_WORKFLOW = ROOT / ".github" / "workflows" / "_ppu-kernel-perf.yaml"
 KERNEL_PERF_LABEL_WORKFLOW = ROOT / ".github" / "workflows" / "kernel-perf-label.yaml"
 PERF_REGRESSION_WORKFLOW = ROOT / ".github" / "workflows" / "perf-regression.yaml"
@@ -702,7 +702,6 @@ def test_model_workflow_is_call_only_and_uses_docker_runner() -> None:
     ("filename", "event", "expected"),
     [
         ("_ppu-model-tests.yaml", "workflow_call", "qwen3.8-27b-m890p"),
-        ("ppu-debug.yaml", "workflow_dispatch", "qwen3.8-27b-m890p"),
     ],
 )
 def test_smoke_workflow_defaults_target_available_m890_runner(
@@ -712,6 +711,22 @@ def test_smoke_workflow_defaults_target_available_m890_runner(
     models = config[True][event]["inputs"]["models"]["default"]
     assert models == expected
     matrix = _load_select().build_matrix(_catalog(), models)
+    assert [(entry["key"], entry["board"]) for entry in matrix["include"]] == [
+        ("qwen3.8-27b-m890p", "ZW-M890P")
+    ]
+
+
+def test_debug_sweep_inherits_the_available_m890_smoke_default() -> None:
+    debug = _workflow(DEBUG_WORKFLOW)
+    caller = debug["jobs"]["pr-lanes"]
+    assert caller["uses"] == "./.github/workflows/ppu-build-and-test.yaml"
+    assert "models" not in caller["with"]
+    pipeline = _workflow(MODEL_WORKFLOW.parent / "ppu-build-and-test.yaml")
+    smoke = pipeline["jobs"]["model-tests"]
+    assert smoke["uses"] == "./.github/workflows/_ppu-model-tests.yaml"
+    assert "models" not in smoke["with"]
+    models = _workflow(MODEL_WORKFLOW)[True]["workflow_call"]["inputs"]["models"]
+    matrix = _load_select().build_matrix(_catalog(), models["default"])
     assert [(entry["key"], entry["board"]) for entry in matrix["include"]] == [
         ("qwen3.8-27b-m890p", "ZW-M890P")
     ]
@@ -732,36 +747,28 @@ def test_accuracy_workflow_is_call_only_and_uses_docker_runner() -> None:
     assert text.count("actions/download-artifact@v4") == 1
 
 
-def test_accuracy_entrypoints_are_the_manual_debug_and_the_nightly_runs() -> None:
+def test_existing_entrypoints_separate_wheel_build_from_manual_accuracy() -> None:
+    wheels = _workflow(WHEEL_WORKFLOW)
+    assert set(wheels[True]) == {"workflow_dispatch"}
+    assert set(wheels["jobs"]) == {"build"}
+    assert wheels["jobs"]["build"]["with"]["skip_device_tests"] is True
+
     debug = _workflow(DEBUG_WORKFLOW)
     assert set(debug[True]) == {"workflow_dispatch"}
     inputs = debug[True]["workflow_dispatch"]["inputs"]
-    assert set(inputs) == {
-        "build_run_id",
-        "wheel_source_sha",
-        "target",
-        "models",
-        "accuracy_models",
-    }
-    assert "accuracy-tests" in inputs["target"]["options"]
-    assert "kernel-perf" in inputs["target"]["options"]
-    assert debug["jobs"]["accuracy-tests"]["uses"] == (
-        "./.github/workflows/_ppu-accuracy-tests.yaml"
-    )
-
-    nightly = _workflow(NIGHTLY_WORKFLOW)
-    assert set(nightly[True]) == {"workflow_dispatch", "schedule"}
-    assert nightly[True]["schedule"] == [{"cron": "0 12 * * *"}]
-    assert set(nightly["jobs"]["accuracy"]["with"]) >= {
+    assert set(inputs) == {"run_accuracy", "run_kernel_perf", "accuracy_models"}
+    assert inputs["run_accuracy"]["default"] is True
+    assert inputs["run_kernel_perf"]["default"] is True
+    assert inputs["accuracy_models"]["default"] == ""
+    accuracy = debug["jobs"]["accuracy"]
+    assert accuracy["if"] == "inputs.run_accuracy"
+    assert accuracy["uses"] == "./.github/workflows/_ppu-accuracy-tests.yaml"
+    assert set(accuracy["with"]) >= {
         "build_run_id",
         "models",
         "pr_head_sha",
         "wheel_source_sha",
     }
-    assert nightly["jobs"]["accuracy"]["uses"] == (
-        "./.github/workflows/_ppu-accuracy-tests.yaml"
-    )
-
     assert debug["jobs"]["kernel-perf"]["uses"] == (
         "./.github/workflows/_ppu-kernel-perf.yaml"
     )
@@ -773,47 +780,40 @@ def test_accuracy_entrypoints_are_the_manual_debug_and_the_nightly_runs() -> Non
     assert "_ppu-kernel-perf.yaml" not in automatic
 
 
-def test_nightly_select_step_labels_jobs_with_the_case_id() -> None:
+def test_debug_select_step_labels_jobs_with_the_case_id() -> None:
     """The select step must key on case_id, not on the shared model_key.
 
     Two cases over one checkpoint share a model_key, so a model_key-keyed
     mapping collapses them into one matrix row and the other case silently
     never runs.
     """
-    text = NIGHTLY_WORKFLOW.read_text()
+    text = DEBUG_WORKFLOW.read_text()
     assert '{"model": entry["case_id"]}' in text
     assert "ACCURACY_MODEL_KEYS" not in text
 
 
-def test_accuracy_nightly_is_serial_and_wheel_sourced_from_the_build_commit() -> None:
-    nightly = _workflow(NIGHTLY_WORKFLOW)
-    accuracy = nightly["jobs"]["accuracy"]
-    # Every lane needs all eight devices and the runtime wrapper holds an
-    # exclusive lock, so a parallel matrix would abort instead of queueing.
+def test_debug_accuracy_is_serial_and_uses_the_build_commit() -> None:
+    debug = _workflow(DEBUG_WORKFLOW)
+    accuracy = debug["jobs"]["accuracy"]
     assert accuracy["strategy"]["max-parallel"] == 1
     assert accuracy["strategy"]["fail-fast"] is False
     assert accuracy["strategy"]["matrix"] == (
         "${{ fromJson(needs.select.outputs.matrix) }}"
     )
-    # The nightly builds its own wheels, so github.sha is both the source
-    # checkout and the commit whose artifact names carry this run.
-    assert nightly["jobs"]["build"]["uses"] == (
+    assert debug["jobs"]["build"]["uses"] == (
         "./.github/workflows/ppu-build-and-test.yaml"
     )
-    assert nightly["jobs"]["build"]["with"] == {
+    assert debug["jobs"]["build"]["with"] == {
         "pr_head_sha": "${{ github.sha }}",
         "skip_device_tests": True,
     }
     assert accuracy["needs"] == ["build", "select"]
-    # Checkout and wheels must describe the same SAIL tree.
     assert accuracy["with"]["pr_head_sha"] == "${{ github.sha }}"
     assert accuracy["with"]["wheel_source_sha"] == "${{ github.sha }}"
     assert accuracy["with"]["build_run_id"] == "${{ github.run_id }}"
     assert accuracy["with"]["pr_mode"] is False
-    # The accuracy work runs inside the reusable call, not on a hosted shell.
     assert "runs-on" not in accuracy
-    text = NIGHTLY_WORKFLOW.read_text()
-    # Each case must reach the reusable workflow with one catalog key.
+    text = DEBUG_WORKFLOW.read_text()
     catalog = _catalog()
     matrix = _load_select().build_accuracy_matrix(catalog, "")
     assert len(matrix["include"]) == sum(

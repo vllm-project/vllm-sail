@@ -1,32 +1,45 @@
-name: PPU debug
-run-name: "PPU debug: ${{ inputs.target }} on build ${{ inputs.build_run_id }}"
+name: PPU test sweep
+
+# Runs every PPU suite that has a working runner on the M890 hosts today,
+# against wheels built once from the dispatched commit:
+#
+#   build       -- the wheel build of ppu-accuracy-nightly.yaml: the
+#                  orchestrator with skip_device_tests.
+#   pr-lanes    -- the same orchestrator again, reusing those wheels, for the
+#                  pin UT, model smoke and upstream reuse lanes of the formal
+#                  PPU CI. Calling the orchestrator keeps upstream reuse inside
+#                  its authorized pipeline.
+#   kernel-perf -- the eight-device kernel performance lane.
+#   accuracy    -- one call per accuracy catalog entry, serialized exactly like
+#                  the accuracy nightly; the full catalog takes most of a day.
+#   summary     -- one verdict over every selected lane.
+#
+# Every lane only needs the build, so one failing lane does not stop the others.
+#
+# Not included, because no working runner exists for them today:
+#   * operator tests: PPU ops tests needs a digest-pinned runtime image that is
+#     not stored in the repository, and its environment is not qualified yet;
+#   * 810E: there is no 810E runner, so every lane here runs on ZW-M890P;
+#   * device test files that no catalog lists.
+#
+# Read-only like the accuracy nightly: no secrets, no Environment, no write
+# permission, and nothing is published.
 
 on:
   workflow_dispatch:
     inputs:
-      build_run_id:
-        description: Run ID whose ppu-wheels-<run_id> artifact holds the wheels under test
-        required: true
-        type: string
-      wheel_source_sha:
-        description: Exact SAIL commit recorded in the selected wheel manifest
-        required: true
-        type: string
-      target:
-        description: Stages to rerun against the existing build
-        required: true
-        type: choice
-        options: [both, pin-ut, model-tests, accuracy-tests, kernel-perf]
-        default: both
-      models:
-        description: Comma-separated smoke model catalog keys
-        required: false
-        default: qwen3.8-27b-m890p
-        type: string
+      run_kernel_perf:
+        description: Run the eight-device kernel performance lane
+        type: boolean
+        default: true
+      run_accuracy:
+        description: Run the serial accuracy lane (most of a day for every entry)
+        type: boolean
+        default: true
       accuracy_models:
-        description: Comma-separated accuracy model catalog keys
+        description: Comma-separated accuracy catalog keys (blank = every accuracy entry)
         required: false
-        default: deepseek-v4-mxfp4
+        default: ""
         type: string
 
 permissions:
@@ -34,53 +47,161 @@ permissions:
   actions: read
 cache-mode: none
 
+concurrency:
+  # Cancelling would throw away a finished build and the serial lanes behind
+  # it, so a second sweep waits instead of replacing the first.
+  group: ppu-test-sweep-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
-  pin-unit-tests:
-    name: PPU pin UT
-    if: inputs.target == 'both' || inputs.target == 'pin-ut'
-    permissions:
-      contents: read
-      actions: read
-    uses: ./.github/workflows/_ppu-pin-ut.yaml
+  build:
+    name: Build wheels
+    uses: ./.github/workflows/ppu-build-and-test.yaml
     with:
-      pr_mode: false
-      build_run_id: ${{ inputs.build_run_id }}
-      wheel_source_sha: ${{ inputs.wheel_source_sha }}
+      pr_head_sha: ${{ github.sha }}
+      skip_device_tests: true
 
-  model-tests:
-    name: PPU model tests
-    if: inputs.target == 'both' || inputs.target == 'model-tests'
-    permissions:
-      contents: read
-      actions: read
-    uses: ./.github/workflows/_ppu-model-tests.yaml
+  pr-lanes:
+    name: PR lanes
+    needs: build
+    uses: ./.github/workflows/ppu-build-and-test.yaml
     with:
-      pr_mode: false
-      build_run_id: ${{ inputs.build_run_id }}
-      wheel_source_sha: ${{ inputs.wheel_source_sha }}
-      models: ${{ inputs.models }}
-
-  accuracy-tests:
-    name: PPU accuracy tests
-    if: inputs.target == 'accuracy-tests'
-    permissions:
-      contents: read
-      actions: read
-    uses: ./.github/workflows/_ppu-accuracy-tests.yaml
-    with:
-      pr_mode: false
-      build_run_id: ${{ inputs.build_run_id }}
-      wheel_source_sha: ${{ inputs.wheel_source_sha }}
-      models: ${{ inputs.accuracy_models }}
+      pr_head_sha: ${{ github.sha }}
+      # Reuse the wheels the build job of this run uploaded.
+      existing_build_run_id: ${{ github.run_id }}
+      wheel_source_sha: ${{ github.sha }}
 
   kernel-perf:
     name: PPU kernel perf
-    if: inputs.target == 'both' || inputs.target == 'kernel-perf'
+    needs: build
+    if: inputs.run_kernel_perf
     permissions:
       contents: read
       actions: read
     uses: ./.github/workflows/_ppu-kernel-perf.yaml
     with:
       pr_mode: false
-      build_run_id: ${{ inputs.build_run_id }}
-      wheel_source_sha: ${{ inputs.wheel_source_sha }}
+      build_run_id: ${{ github.run_id }}
+      wheel_source_sha: ${{ github.sha }}
+
+  select:
+    name: Select accuracy models
+    if: inputs.run_accuracy
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      matrix: ${{ steps.select.outputs.matrix }}
+    steps:
+      - name: Check out vLLM SAIL
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Select accuracy models
+        id: select
+        env:
+          MODELS: ${{ inputs.accuracy_models }}
+        run: |
+          python3 - <<'PY'
+          import importlib.util
+          import json
+          import os
+          import sys
+          from pathlib import Path
+
+          spec = importlib.util.spec_from_file_location(
+              "ppu_e2e_select", Path("scripts/ci/ppu_e2e_select.py")
+          )
+          select = importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(select)
+
+          catalog = json.loads(select.CATALOG.read_text())
+          requested = os.environ.get("MODELS", "")
+          try:
+              selected = select.build_accuracy_matrix(catalog, requested)["include"]
+          except ValueError as error:
+              # A typo in the dispatch input must fail the run, not crash it.
+              sys.exit(str(error))
+          # The reusable call takes catalog keys, so hand it the case id: it is
+          # the catalog key and the only label that stays unique when two cases
+          # exercise one checkpoint with different serve arguments.
+          include = [{"model": entry["case_id"]} for entry in selected]
+          if not include:
+              sys.exit(f"no accuracy model selected by MODELS={requested!r}")
+
+          matrix = json.dumps({"include": include}, separators=(",", ":"))
+          print(f"accuracy matrix: {matrix}")
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as handle:
+              handle.write(f"matrix={matrix}\n")
+          PY
+
+  accuracy:
+    name: Accuracy ${{ matrix.model }}
+    needs: [build, select]
+    if: inputs.run_accuracy
+    permissions:
+      contents: read
+      actions: read
+    strategy:
+      fail-fast: false
+      # Every model needs all eight devices and the runtime wrapper holds an
+      # exclusive flock on the runner, so a second concurrent lane aborts.
+      max-parallel: 1
+      matrix: ${{ fromJson(needs.select.outputs.matrix) }}
+    uses: ./.github/workflows/_ppu-accuracy-tests.yaml
+    with:
+      pr_mode: false
+      pr_head_sha: ${{ github.sha }}
+      wheel_source_sha: ${{ github.sha }}
+      build_run_id: ${{ github.run_id }}
+      models: ${{ matrix.model }}
+
+  summary:
+    name: Summary
+    needs: [build, pr-lanes, kernel-perf, select, accuracy]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require every selected lane to succeed
+        env:
+          JOB_RESULTS: ${{ toJSON(needs) }}
+          RUN_KERNEL_PERF: ${{ inputs.run_kernel_perf }}
+          RUN_ACCURACY: ${{ inputs.run_accuracy }}
+        run: |
+          python - <<'PYTHON'
+          import json
+          import os
+          from pathlib import Path
+
+          results = json.loads(os.environ["JOB_RESULTS"])
+          selected = {
+              "kernel-perf": os.environ["RUN_KERNEL_PERF"] == "true",
+              "select": os.environ["RUN_ACCURACY"] == "true",
+              "accuracy": os.environ["RUN_ACCURACY"] == "true",
+          }
+          lines = ["## PPU test sweep", "", "| Lane | Result |", "| --- | --- |"]
+          failed = []
+          for job, value in results.items():
+              result = value["result"]
+              lines.append(f"| {job} | {result} |")
+              # Only a lane the dispatcher switched off may be skipped.
+              if result == "success" or (
+                  result == "skipped" and not selected.get(job, True)
+              ):
+                  continue
+              failed.append(f"{job}: {result}")
+          lines += [
+              "",
+              "Not covered: operator tests, 810E, and device test files that no "
+              "catalog lists.",
+          ]
+          text = "\n".join(lines) + "\n"
+          print(text)
+          summary = os.environ.get("GITHUB_STEP_SUMMARY")
+          if summary:
+              with Path(summary).open("a", encoding="utf-8") as stream:
+                  stream.write(text)
+          if failed:
+              raise SystemExit("lanes did not succeed: " + ", ".join(failed))
+          PYTHON
