@@ -158,15 +158,6 @@ reason = "v1 scheduler output dataclasses; pure CPU structures."
 min_tests = 1
 
 [[entry]]
-id = "spec_decode_ngram"
-path = "tests/v1/spec_decode/test_ngram.py"
-mode = "direct"
-chips = ["cpu", "810e", "890p"]
-category = "spec_decode"
-reason = "ngram proposer is pure-CPU matching logic (analysis: near-L1 subset of spec_decode)."
-min_tests = 1
-
-[[entry]]
 id = "logits_processor_loader"
 path = "tests/v1/logits_processors/test_loader.py"
 mode = "direct"
@@ -184,14 +175,10 @@ category = "tokenization"
 reason = "Incremental detokenize / stop-string scanning; pure CPU text logic."
 min_tests = 1
 
-[[entry]]
-id = "v1_sample_sampler"
-path = "tests/v1/sample/test_sampler.py"
-mode = "direct"
-chips = ["cpu", "810e", "890p"]
-category = "sample"
-reason = "Sampler applies top-k/top-p/penalties on current_platform.device_type; runs verbatim on CPU and on PPU (cuda-disguised), no narrowing required."
-min_tests = 1
+# spec_decode_ngram (tests/v1/spec_decode/test_ngram.py) and v1_sample_sampler
+# (tests/v1/sample/test_sampler.py) were deleted upstream by aac1b2a4f
+# "[Core] Remove Model Runner V1 (#63373)", which is inside the v0.34 pin;
+# their coverage moved to device-only files with no direct CPU replacement.
 
 # ---------------------------------------------------------------------------
 # L2 少量适配 -- skeleton reusable, but the file mixes CPU logic with
