@@ -82,6 +82,19 @@ quantization and checkpoint-name mappings. These source adaptations still need
 device, model-load and inference verification; see the
 [verification guide](verification_guide.md).
 
+### MegaAttention output projection
+
+On Zhenwu M890, MegaAttention automatically selects the output format from the
+loaded `wo_a` weights. `DeepSeek-V4.1-Flash-1017` keeps the BF16 projection with
+dequantization. A checkpoint with per-channel FP8 `wo_a`, such as
+`DeepSeek-V4.1-Flash-1017-MoE-Quant-W-MXFP4-A-MXFP4-Dense-Quant-W-FP8-PerChannel-A-FP8-PerToken`,
+uses FlashMLA per-token FP8 output and FP32 scales directly in DeepGEMM's
+channelwise FP8 einsum for both prefill and decode.
+
+Enable MegaAttention with `VLLM_SAIL_FUSED_NORM_ROPE_ATTN=1` and
+`VLLM_SAIL_PPU_KV_MXFP8=1`. The direct FP8 projection requires FlashMLA-for-sail
+PR #59 or later and a DeepGEMM-for-sail build with channelwise FP8 einsum.
+
 ### MegaMoE
 
 On Zhenwu M890, select MegaMoE with expert parallelism:
