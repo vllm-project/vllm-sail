@@ -78,6 +78,7 @@ jobs:
       # manifest describe one tree.
       pr_head_sha: ${{ github.sha }}
       skip_device_tests: true
+      native_reuse_run_id: '44518863734'
 
   select:
     name: Select accuracy models

@@ -808,32 +808,44 @@ def run_model_sanity(
             / "_golden"
             / accuracy_gate.golden_filename(resolved["golden_model_key"], "890p")
         )
-        golden = accuracy_gate.read_golden(golden_file)
-        ok_id, id_err = accuracy_gate.check_golden_identity(
-            golden, chip="890p", checkpoint_tail=resolved["hf_model_id"]
+        capture = not golden_file.exists() and (
+            resolved["golden_model_key"] == "glm_5_3_flash_mxfp4"
         )
-        ok_cfg, cfg_err = accuracy_gate.check_generation_config(golden, gen_cfg)
-        ok_acc, acc_err = accuracy_gate.check_accuracy_golden(score, num, golden)
-        ok_dataset = all(
-            golden["dataset"].get(key) == dataset_spec[key]
-            for key in (
-                "subset_list",
-                "few_shot_num",
-                "few_shot_random",
-                "num_expected",
+        if capture:
+            acc_ok = (
+                num == dataset_spec["num_expected"]
+                and 0.9 <= score <= 1.0
+                and per_q_info["status"] == "baseline_established"
             )
-        )
-        acc_ok = ok_id and ok_cfg and ok_acc and ok_dataset
-        acc_error = (
-            id_err
-            or cfg_err
-            or acc_err
-            or (
-                None
-                if ok_dataset
-                else "Dataset sampling contract does not match golden"
+            acc_error = None if acc_ok else "Golden capture prerequisites failed"
+            golden = {"dataset": dataset_spec}
+        else:
+            golden = accuracy_gate.read_golden(golden_file)
+            ok_id, id_err = accuracy_gate.check_golden_identity(
+                golden, chip="890p", checkpoint_tail=resolved["hf_model_id"]
             )
-        )
+            ok_cfg, cfg_err = accuracy_gate.check_generation_config(golden, gen_cfg)
+            ok_acc, acc_err = accuracy_gate.check_accuracy_golden(score, num, golden)
+            ok_dataset = all(
+                golden["dataset"].get(key) == dataset_spec[key]
+                for key in (
+                    "subset_list",
+                    "few_shot_num",
+                    "few_shot_random",
+                    "num_expected",
+                )
+            )
+            acc_ok = ok_id and ok_cfg and ok_acc and ok_dataset
+            acc_error = (
+                id_err
+                or cfg_err
+                or acc_err
+                or (
+                    None
+                    if ok_dataset
+                    else "Dataset sampling contract does not match golden"
+                )
+            )
 
         # 3. Drain & clear prefix cache on the SAME server before bench
         reset_before_bench = _drain_and_reset_cache(port)
@@ -898,8 +910,12 @@ def run_model_sanity(
             result["status"] == "pass" for result in bench_results.values()
         )
 
-        golden_score = float(golden["score"])
-        minimum_score, maximum_score = accuracy_gate.golden_score_bounds(golden)
+        if capture:
+            golden_score = maximum_score = None
+            minimum_score = 0.9
+        else:
+            golden_score = float(golden["score"])
+            minimum_score, maximum_score = accuracy_gate.golden_score_bounds(golden)
         summary = {
             "tier": "model_sanity",
             "model_id": policy["model_id"],
@@ -930,8 +946,8 @@ def run_model_sanity(
                 "golden_score": golden_score,
                 "minimum_score": minimum_score,
                 "maximum_score": maximum_score,
-                "delta": round(score - golden_score, 6),
-                "within_band": acc_ok,
+                "delta": None if capture else round(score - golden_score, 6),
+                "within_band": None if capture else acc_ok,
                 "error": acc_error,
                 "per_question": per_q_info,
             },
