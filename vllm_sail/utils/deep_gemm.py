@@ -476,6 +476,14 @@ def fp8_einsum(*args, **kwargs):
     return _fp8_einsum_impl(*args, **kwargs)
 
 
+def has_fp8_einsum() -> bool:
+    """Whether DeepGEMM exposes its FP8 einsum entry point."""
+    if not is_deep_gemm_supported():
+        return False
+    _lazy_init()
+    return _fp8_einsum_impl is not None
+
+
 def int8_einsum(*args, **kwargs):
     _lazy_init()
     if _int8_einsum_impl is None:
@@ -1546,6 +1554,7 @@ __all__ = [
     "DeepGemmQuantScaleFMT",
     "fp8_gemm_nt",
     "fp8_einsum",
+    "has_fp8_einsum",
     "m_grouped_fp8_gemm_nt_nopad",
     "fp8_m_grouped_gemm_nt_masked",
     "int8_gemm_nt",

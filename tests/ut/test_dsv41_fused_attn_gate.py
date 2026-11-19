@@ -900,7 +900,7 @@ def test_gate_open_report_names_the_default_arm(gate) -> None:
     gate.set_wheel("api")
     ok, report = gate.module.fused_gate(_config())
     assert ok is True
-    assert "output_scale=per32_ue8m0" in report
+    assert "output_scale=auto" in report
 
 
 def test_per_token_switch_alone_does_not_enable_the_fused_path(gate) -> None:
@@ -918,7 +918,7 @@ def test_alloc_attn_out_is_arm_aware() -> None:
     body = _method_source("_alloc_attn_out")
     for needle in (
         "alloc_mega_attn_output",
-        "_per_token_scale()",
+        "_per_token_scale(self._uses_channelwise_o_proj)",
         "torch.float32",
         "kFp8DynamicTokenSym",
         "replace(",
@@ -926,9 +926,126 @@ def test_alloc_attn_out_is_arm_aware() -> None:
         assert needle in body, f"_alloc_attn_out lost {needle!r}"
 
 
+@pytest.mark.parametrize(
+    (
+        "weight_dtype",
+        "scale_dtype",
+        "scale_shape",
+        "k_stride",
+        "minor",
+        "has_einsum",
+        "expected",
+    ),
+    [
+        ("float8_e4m3fn", "float32", (1024, 1), 1, 9, True, True),
+        ("float8_e4m3fn", "float32", (1024,), 1, 9, True, True),
+        ("float8_e4m3fn", "uint8", (1024, 128), 1, 9, True, False),
+        ("bfloat16", None, None, 1, 9, True, False),
+        ("float8_e4m3fn", "float32", (1024, 1), 1, 9, False, False),
+        ("float8_e4m3fn", "float32", (1024, 1), 1, 0, True, False),
+        ("float8_e4m3fn", "float32", (1024, 1), 2, 9, True, False),
+    ],
+)
+def test_loaded_wo_a_selects_attention_output_format(
+    gate,
+    modules,
+    weight_dtype,
+    scale_dtype,
+    scale_shape,
+    k_stride,
+    minor,
+    has_einsum,
+    expected,
+) -> None:
+    from unittest.mock import Mock
+
+    gate.set_capability(SimpleNamespace(major=8, minor=minor))
+    torch = gate.module.torch
+    torch.bfloat16, torch.float8_e4m3fn, torch.float32, torch.uint8 = (
+        object(),
+        object(),
+        object(),
+        object(),
+    )
+    probe = Mock(return_value=has_einsum)
+    modules("vllm_sail.utils.deep_gemm", has_fp8_einsum=probe)
+    cls = gate.module.PPUDeepseekV4MegaAttnAttention
+    layer = cls.__new__(cls)
+    layer.n_local_groups, layer.o_lora_rank = 1, 1024
+    layer.wo_a = SimpleNamespace(
+        weight=SimpleNamespace(
+            shape=(1024, 4096),
+            dtype=getattr(torch, weight_dtype),
+            stride=lambda _dim: k_stride,
+        ),
+        weight_scale=(
+            None
+            if scale_dtype is None
+            else SimpleNamespace(shape=scale_shape, dtype=getattr(torch, scale_dtype))
+        ),
+    )
+    layer.process_weights_after_loading(torch.bfloat16)
+    assert layer._uses_channelwise_o_proj is expected
+    args = gate.module._output_scale_args(layer._uses_channelwise_o_proj)
+    assert args["num_per_channels"] == (4096 if expected else 32)
+    assert args["use_packed_ue8m0"] is not expected
+    if scale_dtype != "float32" or minor != 9 or k_stride != 1:
+        probe.assert_not_called()
+
+
+def test_fp8_o_proj_passes_attention_data_and_scale_to_einsum(gate, modules):
+    from unittest.mock import MagicMock, Mock
+
+    module = gate.module
+    torch = module.torch
+    torch.bfloat16, torch.float8_e4m3fn, torch.float32 = object(), object(), object()
+    torch.empty = Mock()
+    einsum = Mock()
+    torch.ops = SimpleNamespace(
+        vllm=SimpleNamespace(deepseek_v4_fp8_channel_einsum=einsum)
+    )
+    gate.set_capability(SimpleNamespace(major=8, minor=9))
+    modules("vllm_sail.utils.deep_gemm", has_fp8_einsum=lambda: True)
+    gate.monkeypatch.setattr(
+        module, "_dequant_fused_output", Mock(side_effect=AssertionError)
+    )
+    attn_out = module.QuantizedActivation()
+    attn_out.data = MagicMock(shape=(3, 8, 4096), ndim=3, dtype=torch.float8_e4m3fn)
+    attn_out.scale = MagicMock(shape=(3, 8, 1), dtype=torch.float32)
+    layer = module.PPUDeepseekV4MegaAttnAttention.__new__(
+        module.PPUDeepseekV4MegaAttnAttention
+    )
+    layer.n_local_groups, layer.n_wv_group = 1, 8
+    layer.o_lora_rank, layer._o_proj_block_size = 1024, 32
+    layer._einsum_recipe = (1, 1, 32)
+    layer._wo_b_proj = Mock()
+    layer.wo_a = SimpleNamespace(
+        weight=Mock(shape=(1024, 4096), ndim=2, dtype=torch.float8_e4m3fn),
+        weight_scale=Mock(shape=(1024, 1), dtype=torch.float32),
+    )
+    layer.wo_a.weight.stride.return_value = 1
+    layer.wo_a.weight_scale.numel.return_value = 1024
+    layer.process_weights_after_loading(torch.bfloat16)
+
+    assert layer._o_proj(attn_out, None) is layer._wo_b_proj.return_value
+    einsum.assert_called_once_with(
+        attn_out.data.__getitem__.return_value,
+        attn_out.scale.__getitem__.return_value,
+        layer.wo_a.weight.view.return_value,
+        layer.wo_a.weight_scale.reshape.return_value,
+        torch.empty.return_value,
+        "bhr,hdr->bhd",
+        [1, 1, 4096],
+    )
+    attn_out.data.__getitem__.assert_called_once_with((slice(None), slice(None, 1)))
+    attn_out.scale.__getitem__.assert_called_once_with((slice(None), slice(None, 1)))
+    layer.wo_a.weight.view.assert_called_once_with(1, 1024, 4096)
+    layer.wo_a.weight_scale.reshape.assert_called_once_with(1, 1024, 1)
+
+
 def test_o_proj_asserts_the_selected_scale_format() -> None:
     body = _method_source("_o_proj")
-    for needle in ("_per_token_scale()", "torch.float32", "torch.int32"):
+    for needle in ("_per_token_scale(channelwise)", "torch.float32", "torch.int32"):
         assert needle in body, f"_o_proj lost the arm-aware check {needle!r}"
 
 
@@ -936,7 +1053,7 @@ def test_both_call_sites_share_the_output_scale_args() -> None:
     """No call site may hardcode one arm's flags independently."""
     for name in ("_forward_decode_mega", "_forward_prefill_mega"):
         body = _method_source(name)
-        assert "**_output_scale_args()" in body, (
+        assert "**_output_scale_args(self._uses_channelwise_o_proj)" in body, (
             f"{name} no longer takes the shared PR#59 output-format arguments"
         )
         assert "num_per_channels=" not in body, (
@@ -947,14 +1064,12 @@ def test_both_call_sites_share_the_output_scale_args() -> None:
 
 
 def test_call_fused_names_the_wheel_requirement_on_format_rejection(gate) -> None:
-    gate.monkeypatch.setenv("VLLM_SAIL_FUSED_ATTN_PER_TOKEN_SCALE", "1")
-
     def reject(**kwargs):
         raise RuntimeError("num_per_channels == 32")
 
     gate.monkeypatch.setattr(gate.module, "_API", SimpleNamespace(decode=reject))
     with pytest.raises(RuntimeError, match="PR#59"):
-        gate.module._call_fused("decode", num_per_channels=4096)
+        gate.module._call_fused("decode", **gate.module._output_scale_args(True))
 
 
 def test_call_fused_does_not_relabel_default_arm_errors(gate) -> None:
