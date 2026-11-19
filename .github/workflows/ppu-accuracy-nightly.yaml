@@ -14,13 +14,22 @@ permissions:
 cache-mode: none
 
 jobs:
+  build:
+    name: Repackage verified native wheels
+    if: ${{ inputs.models == 'recipe:glm-5.3-flash' }}
+    uses: ./.github/workflows/_ppu-build.yaml
+    with:
+      pr_head_sha: '3cb7a46c1147d76bace6708d1553ad95433f9e00'
+      native_reuse_run_id: '44504802787'
+
   recipe-model-sanity:
     name: Recipe model sanity & micro-E2E
-    if: ${{ inputs.models == 'recipe:glm-5.3-flash' }}
+    needs: build
+    if: ${{ needs.build.result == 'success' && inputs.models == 'recipe:glm-5.3-flash' }}
     uses: ./.github/workflows/_ppu-recipe-model-sanity.yaml
     with:
       pr_mode: false
       pr_head_sha: '3cb7a46c1147d76bace6708d1553ad95433f9e00'
-      wheel_source_sha: '807b4528a515f42ce3aa1eb9f37935f45152276d'
-      build_run_id: '44504802787'
+      wheel_source_sha: '3cb7a46c1147d76bace6708d1553ad95433f9e00'
+      build_run_id: ${{ github.run_id }}
       models: 'glm-5.3-flash'
