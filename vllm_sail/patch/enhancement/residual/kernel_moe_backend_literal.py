@@ -35,7 +35,15 @@ from vllm_sail.patch.utils import PATCH_REGISTRY, PatchRecord
 
 _MODULE = "vllm.config.kernel"
 _TARGET = "vllm.config.kernel.MoEBackend"
-PPU_MOE_BACKENDS = ("ppu_deep_gemm", "ppu_acext", "ppu_deep_gemm_w4a16", "ppu_deep_gemm_w4a8")
+PPU_MOE_BACKENDS = (
+    "ppu_deep_gemm",
+    "ppu_acext",
+    "ppu_deep_gemm_w4a16",
+    "ppu_deep_gemm_w4a8",
+    # INT4-per-channel x INT8-per-token (MixedPrecisionW4). Deliberately distinct
+    # from "ppu_deep_gemm_w4a8", which is the MXFP4 block-format backend.
+    "ppu_deep_gemm_w4a8_int8",
+)
 REASON = (
     "KernelConfig validates moe_backend against the MoEBackend Literal, which "
     "upstream does not extend. The PPU backend names must pass validation for "
