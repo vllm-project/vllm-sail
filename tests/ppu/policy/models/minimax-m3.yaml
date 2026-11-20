@@ -14,7 +14,9 @@ accuracy_gate:
 tiers:
   fast_sanity:
     dummy_weights: true
-    layer_override: 2
+    # MiniMax-M3 layers 0-2 are dense and MoE starts at layer 3, so 2 would
+    # silently skip MoE kernels in fast_sanity; 4 exercises the first MoE layer.
+    layer_override: 4
     fallback_full_layers: true
     cache: enabled
     probe:
