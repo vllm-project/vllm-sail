@@ -99,14 +99,18 @@ def test_check_rejects_unverifiable_shallow_clone_dev_build(
         compat.check_vllm_compatibility(force=True)
 
 
+@pytest.mark.parametrize(
+    "version", ["0.32.1.dev5+g1234567", "0.33.0rc1.dev342+g1234567"]
+)
 def test_check_accepts_supported_dev_build_with_meaningful_version(
-    compat, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    compat,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    version: str,
 ) -> None:
-    """A v0.32-based source build remains usable without an override."""
+    """A source build inside the release line remains usable without an override."""
     monkeypatch.delenv("VLLM_VERSION", raising=False)
-    monkeypatch.setattr(
-        compat, "installed_vllm_version", lambda: "0.32.1.dev5+g1234567"
-    )
+    monkeypatch.setattr(compat, "installed_vllm_version", lambda: version)
     with caplog.at_level(logging.WARNING):
         compat.check_vllm_compatibility(force=True)
     assert "development build" in caplog.text
@@ -116,8 +120,8 @@ def test_check_accepts_supported_dev_build_with_meaningful_version(
     "version",
     [
         "0.31.1.dev5+gabcdef0",
-        "0.33.1.dev58+g40cf03ae64",
-        "0.33.0.dev1+gabcdef0",
+        "0.34.1.dev58+g40cf03ae64",
+        "0.34.0.dev1+gabcdef0",
     ],
 )
 def test_check_rejects_unsupported_dev_build_without_override(
@@ -173,7 +177,9 @@ def test_vllm_version_at_least_unparseable_is_false(
     assert not compat.vllm_version_at_least("0.31.0")
 
 
-@pytest.mark.parametrize("version", ["0.32.0", "0.32.9", "0.32.1+cu128"])
+@pytest.mark.parametrize(
+    "version", ["0.32.0", "0.32.9", "0.32.1+cu128", "0.33.0", "0.33.1+cu128"]
+)
 def test_check_accepts_supported_range(
     compat, monkeypatch: pytest.MonkeyPatch, version: str
 ) -> None:
@@ -181,7 +187,7 @@ def test_check_accepts_supported_range(
     compat.check_vllm_compatibility(force=True)  # must not raise
 
 
-@pytest.mark.parametrize("version", ["0.27.0", "0.30.0", "0.31.0", "0.33.0", "1.0.0"])
+@pytest.mark.parametrize("version", ["0.27.0", "0.30.0", "0.31.0", "0.34.0", "1.0.0"])
 def test_check_rejects_out_of_range(
     compat, monkeypatch: pytest.MonkeyPatch, version: str
 ) -> None:
@@ -199,7 +205,7 @@ def test_check_rejects_unparseable(compat, monkeypatch: pytest.MonkeyPatch) -> N
 
 def test_failed_check_is_not_cached(compat, monkeypatch: pytest.MonkeyPatch) -> None:
     """A caught failure must not make the next no-force check skip validation."""
-    monkeypatch.setenv("VLLM_VERSION", "0.33.0")
+    monkeypatch.setenv("VLLM_VERSION", "0.34.0")
     with pytest.raises(RuntimeError, match="requires vLLM"):
         compat.check_vllm_compatibility(force=True)
 

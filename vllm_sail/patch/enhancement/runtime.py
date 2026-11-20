@@ -28,7 +28,7 @@ def _install(module, owner, attribute, body):
     target = attribute if owner is module else owner.__name__ + "." + attribute
     metadata = dict(
         reason="PPU must reinitialize batches on context-length changes and insert speculative tokens within one warp.",
-        affected_versions=">=0.32.0,<0.33.0",
+        affected_versions=">=0.32.0,<0.34.0",
         remove_when="Upstream includes the context-length invalidation and one-warp insertion fixes.",
     )
     patch(module.__name__, target, **metadata)(dispatch)

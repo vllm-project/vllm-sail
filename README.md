@@ -54,7 +54,7 @@ for validating a deployment.
 | Hardware | Zhenwu 810E and Zhenwu M890 AI chips; build targets `ppu_10` and `ppu_15` |
 | Operating system | Linux for PPU builds and inference |
 | Python | 3.10–3.13; choose a version supported by your SDK packages |
-| vLLM | `>=0.32.0,<0.33.0` release line, exact source pin, built with `VLLM_TARGET_DEVICE=empty` |
+| vLLM | `>=0.32.0,<0.34.0` release line, exact source pin, built with `VLLM_TARGET_DEVICE=empty` |
 | SAIL software | SAIL SDK, SAIL PyTorch and matching PPU compute libraries |
 | Build tools | `hgcc`, CMake, Ninja and a C++ compiler; CMake fetches pinned cmake-hgcc sources when needed |
 

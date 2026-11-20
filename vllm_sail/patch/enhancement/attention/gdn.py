@@ -14,7 +14,7 @@ from vllm_sail.patch.utils import PATCH_MARKER, patch
 
 _META = dict(
     reason="PPU GDN uses PLA for supported decode/prefill layouts and Triton for other shapes.",
-    affected_versions=">=0.32.0,<0.33.0",
+    affected_versions=">=0.32.0,<0.34.0",
     remove_when="GDN exposes platform backend registration for PLA prefill and recurrent kernels.",
 )
 

@@ -23,7 +23,7 @@ logger = init_logger(__name__)
 
 #: Inclusive lower bound / exclusive upper bound of the supported vLLM range.
 MIN_VLLM_VERSION = "0.32.0"
-MAX_VLLM_VERSION_EXCLUSIVE = "0.33.0"
+MAX_VLLM_VERSION_EXCLUSIVE = "0.34.0"
 
 _checked = False
 
