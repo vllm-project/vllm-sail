@@ -74,6 +74,9 @@ def _model_classes():
 
 
 def _make_quant_config() -> Mxfp4Config:
+    from vllm_sail import register_out_of_tree
+
+    register_out_of_tree()
     return Mxfp4Config(fp8_channelwise_layers=list(FP8_CHANNELWISE_LAYERS))
 
 

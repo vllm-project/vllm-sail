@@ -43,7 +43,12 @@ def definition(path: Path, name: str):
         matches = [
             child
             for child in node.body
-            if isinstance(child, ast.ClassDef | ast.FunctionDef) and child.name == part
+            if isinstance(child, ast.ClassDef | ast.FunctionDef)
+            and child.name == part
+            and not any(
+                ast.unparse(decorator) in ("overload", "typing.overload")
+                for decorator in child.decorator_list
+            )
         ]
         assert len(matches) == 1, f"Missing or ambiguous definition {name!r} in {path}"
         node = matches[0]

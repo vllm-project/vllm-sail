@@ -357,19 +357,19 @@ _EXPECTED_TARGETS = {
     ("vllm.models.step5.nvidia.flashinfer_sparse.Step5FlashInferSparse.select_regions"),
     "vllm.models.step5.nvidia.layernorm.apply_step5_rms_norm",
     "vllm.models.step5.nvidia.layernorm.apply_step5_add_rms_norm",
-    "vllm.models.step5.nvidia.ops.summary_update._store_summary",
+    "vllm.models.step5.common.ops.summary_update._store_summary",
     "vllm.models.step5.nvidia.ops.qkv_indexer_norm_rope._indexer_norm_rope",
     "vllm.models.step5.nvidia.ops.qkv_indexer_norm_rope._joint_prepare",
-    "vllm.models.step5.nvidia.ops.indexer_norm_rope._indexer_norm_rope",
-    "vllm.models.step5.nvidia.ops.sparse_indexer_scores._direct_scores",
-    "vllm.models.step5.nvidia.ops.sparse_indexer_scores._paged_scores_sm90",
-    "vllm.models.step5.nvidia.ops.sparse_indexer._copy_summary_page",
-    "vllm.models.step5.nvidia.ops.sparse_indexer._copy_summary_tile",
-    "vllm.models.step5.nvidia.ops.sparse_indexer._pack_summaries",
-    "vllm.models.step5.nvidia.ops.indexer_norm_rope.indexer_norm_rope",
+    "vllm.models.step5.common.ops.indexer_norm_rope._indexer_norm_rope",
+    "vllm.models.step5.common.ops.sparse_indexer_scores._direct_scores",
+    "vllm.models.step5.common.ops.sparse_indexer_scores._paged_scores_sm90",
+    "vllm.models.step5.common.ops.sparse_indexer._copy_summary_page",
+    "vllm.models.step5.common.ops.sparse_indexer._copy_summary_tile",
+    "vllm.models.step5.common.ops.sparse_indexer._pack_summaries",
+    "vllm.models.step5.common.ops.indexer_norm_rope.indexer_norm_rope",
     "vllm.models.step5.nvidia.ops.qkv_indexer_norm_rope.qkv_indexer_norm_rope",
     (
-        "vllm.models.step5.nvidia.sparse_summary_cache."
+        "vllm.models.step5.common.sparse_summary_cache."
         "Step5SparseSummaryCacheLayer.get_kv_cache_spec"
     ),
     "vllm.models.step5.nvidia.flashinfer_sparse.Step5FlashInferSparse.decode_logits",
@@ -604,7 +604,7 @@ def installed_step5_patches(monkeypatch):
     for name, target in (
         (
             "step5_soft_fp8",
-            "vllm.models.step5.nvidia.ops.summary_update._store_summary",
+            "vllm.models.step5.common.ops.summary_update._store_summary",
         ),
         (
             "step5_dsa_backend",
@@ -612,7 +612,7 @@ def installed_step5_patches(monkeypatch):
         ),
         (
             "step5_indexer_fp16",
-            "vllm.models.step5.nvidia.ops.indexer_norm_rope.indexer_norm_rope",
+            "vllm.models.step5.common.ops.indexer_norm_rope.indexer_norm_rope",
         ),
     ):
         if any(record.target == target for record in PATCH_REGISTRY):
@@ -633,7 +633,7 @@ def test_step5_summary_cache_dtype_follows_fp16_switch(
     from types import SimpleNamespace
 
     import torch
-    from vllm.models.step5.nvidia.sparse_summary_cache import (
+    from vllm.models.step5.common.sparse_summary_cache import (
         Step5SparseSummaryCacheLayer,
     )
 
