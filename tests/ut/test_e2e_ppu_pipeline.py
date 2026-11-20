@@ -156,6 +156,38 @@ def test_scheduled_recipe_rejects_invalid_policy_claims(
         select.scheduled_legacy_accuracy_cases(selected)
 
 
+def test_scheduled_recipe_replaces_kimi_tp8_but_keeps_other_legacy() -> None:
+    """The TP8 recipe claims only its own legacy case.
+
+    Sibling cases over other checkpoints or layouts keep running on the
+    legacy lane until their own recipes land, so the nightly must not drop
+    them early.
+    """
+    select = _load_select()
+    selected = select.build_accuracy_matrix(_catalog(), "")["include"]
+    remaining = select.scheduled_legacy_accuracy_cases(selected)
+    assert "kimi-k2.6-mxfp4-tp8" not in remaining
+    assert "deepseek-v4-mxfp4-dp-ep" in remaining
+    assert "minimax-m3-fp8" in remaining
+
+
+def test_scheduled_recipe_restores_kimi_tp8_when_the_policy_is_removed(
+    tmp_path, monkeypatch
+) -> None:
+    """Disabling the recipe must fall back to the full legacy schedule."""
+    select = _load_select()
+    shutil.copytree(ROOT / "tests/ppu", tmp_path / "tests/ppu")
+    (tmp_path / "tests/ppu/policy/models/kimi-k2.6.yaml").unlink()
+    monkeypatch.setattr(select, "REPO_ROOT", tmp_path)
+    monkeypatch.syspath_prepend(str(SELECT.parent))
+    import ppu_recipe
+
+    monkeypatch.setattr(ppu_recipe, "REPO_ROOT", tmp_path)
+    selected = select.build_accuracy_matrix(_catalog(), "")["include"]
+    remaining = select.scheduled_legacy_accuracy_cases(selected)
+    assert "kimi-k2.6-mxfp4-tp8" in remaining
+
+
 @pytest.mark.parametrize(
     ("key", "board"),
     [
