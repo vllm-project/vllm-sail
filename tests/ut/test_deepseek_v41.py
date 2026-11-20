@@ -807,14 +807,14 @@ def test_v41_model_resolves_int8_at_construction_like_v4(
         get_current_vllm_config=unavailable,
     )
 
-    def make_mapper(expert_dtype, linear_scale_name):
-        assert (expert_dtype, linear_scale_name) == ("fp4", "weight_scale_inv")
+    def make_mapper(*, orig_to_new_prefix):
+        assert orig_to_new_prefix["layers."] == "language_model.model.layers."
         return class_mapper
 
+    modules("vllm.model_executor.models.utils", WeightsMapper=make_mapper)
     modules(
         "vllm.models.deepseek_v41.nvidia.vl_model",
         DeepseekV41ForCausalLM=Base,
-        _make_deepseek_v4_vl_weights_mapper=make_mapper,
     )
     modules("vllm.platforms", current_platform=SimpleNamespace(is_ppu=lambda: ppu))
     modules(

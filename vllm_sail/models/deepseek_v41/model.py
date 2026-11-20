@@ -3,11 +3,9 @@
 
 from copy import deepcopy
 
+from vllm.model_executor.models.utils import WeightsMapper
 from vllm.models.deepseek_v41.nvidia.vl_model import (
     DeepseekV41ForCausalLM as UpstreamDeepseekV41ForCausalLM,
-)
-from vllm.models.deepseek_v41.nvidia.vl_model import (
-    _make_deepseek_v4_vl_weights_mapper,
 )
 from vllm.platforms import current_platform
 
@@ -38,9 +36,18 @@ class DeepseekV41ForCausalLM(UpstreamDeepseekV41ForCausalLM):
     # The upstream VL wrapper only installs an instance mapper after constructing
     # its language model, which is too late to remap compressed-tensors ignores
     # such as layers.1.engram.wkv into language_model.model.layers.1.engram.wkv.
-    # Keep the upstream default here; __init__ still selects the actual weight
-    # scale mapping independently for each checkpoint.
-    hf_to_vllm_mapper = _make_deepseek_v4_vl_weights_mapper("fp4", "weight_scale_inv")
+    # Only map module prefixes here, independently of expert dtype or scale
+    # naming. The upstream initializer still installs the checkpoint-specific
+    # instance mapper for loading weights.
+    hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_prefix={
+            "layers.": "language_model.model.layers.",
+            "embed.": "language_model.model.embed.",
+            "norm.": "language_model.model.norm.",
+            "hc_head": "language_model.model.hc_head",
+            "mtp.": "language_model.model.mtp.",
+        }
+    )
 
     def __init__(self, *, vllm_config, prefix=""):
         use_int8 = current_platform.is_ppu() and uses_int8_w8a8(vllm_config)
