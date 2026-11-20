@@ -112,9 +112,8 @@ PRs on pre-Recipe branches run the legacy Qwen smoke, which is also available
 through the manual PPU debug workflow.
 The registered accuracy nightly runs `model_sanity` (including GSM8K and
 micro-E2E). When recipes are enabled, scheduled Nightly skips the legacy
-GLM-5.3 TP4, DeepSeek-V4-Flash MXFP4 TP8 and Kimi-K2.6 MXFP4 TP8 cases
-covered by recipes. Other cases, including DeepSeek INT8 and DP+EP, still
-run. With recipes disabled, the full legacy matrix runs; manual legacy case
+accuracy cases covered by recipes. Other cases still run on the legacy lane.
+With recipes disabled, the full legacy matrix runs; manual legacy case
 selection is unchanged.
 Each replacement is declared in the model policy's `replaces_legacy_cases`
 list and requires a matching legacy accuracy case and a `model_sanity` tier.

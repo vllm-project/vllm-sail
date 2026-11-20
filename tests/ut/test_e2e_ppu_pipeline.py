@@ -159,16 +159,24 @@ def test_scheduled_recipe_rejects_invalid_policy_claims(
 def test_scheduled_recipe_replaces_kimi_tp8_but_keeps_other_legacy() -> None:
     """The TP8 recipe claims only its own legacy case.
 
-    Sibling cases over other checkpoints or layouts keep running on the
-    legacy lane until their own recipes land, so the nightly must not drop
-    them early.
+    Sibling cases keep running on the legacy lane until their own recipes
+    land, so the nightly must drop exactly the claimed set -- no more, no
+    fewer. Computing that set from the checked-in policies keeps this test
+    green as other migration PRs land.
     """
     select = _load_select()
     selected = select.build_accuracy_matrix(_catalog(), "")["include"]
     remaining = select.scheduled_legacy_accuracy_cases(selected)
+    claimed = set()
+    for path in (ROOT / "tests/ppu/policy/models").glob("*.yaml"):
+        claimed.update(
+            yaml.safe_load(path.read_text()).get("replaces_legacy_cases", [])
+        )
+    assert "kimi-k2.6-mxfp4-tp8" in claimed
     assert "kimi-k2.6-mxfp4-tp8" not in remaining
-    assert "deepseek-v4-mxfp4-dp-ep" in remaining
-    assert "minimax-m3-fp8" in remaining
+    assert remaining == [
+        entry["case_id"] for entry in selected if entry["case_id"] not in claimed
+    ]
 
 
 def test_scheduled_recipe_restores_kimi_tp8_when_the_policy_is_removed(
