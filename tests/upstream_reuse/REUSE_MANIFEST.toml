@@ -193,11 +193,8 @@ path = "tests/test_pooling_params.py"
 mode = "adapted"
 chips = ["cpu", "810e", "890p"]
 category = "params"
-reason = "PoolingParams validation excluding both embedding-dimension cases: they resolve multilingual-e5-small and Snowflake checkpoints from the Hugging Face hub, and the offline M890 runner cache provisions neither."
-deselect = [
-    "tests/test_pooling_params.py::test_embed_dimensions[model_info0]",
-    "tests/test_pooling_params.py::test_embed_dimensions[model_info1]",
-]
+reason = "PoolingParams validation excluding the Snowflake embedding-dimension case; its offline model configuration is not provisioned."
+deselect = ["tests/test_pooling_params.py::test_embed_dimensions[model_info1]"]
 min_tests = 40
 
 [[entry]]
