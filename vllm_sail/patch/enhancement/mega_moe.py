@@ -15,6 +15,7 @@ _EXPERT_CONSUMERS = (
     "vllm.models.kimi_k3.nvidia.model",
     "vllm.models.minimax_m3.nvidia.model",
 )
+_GATE_CONSUMERS = ("vllm.models.deepseek_v4.nvidia.model",)
 _installed = False
 
 
@@ -31,6 +32,8 @@ def install() -> None:
     from vllm_sail.model_executor.layers.fused_moe.experts.deep_gemm_mega_moe import (
         PPUDeepGemmMegaMoEExperts,
     )
+    from vllm_sail.model_executor.layers.fused_moe.mega_gate import bf16_mega_gate
+    from vllm.utils import deep_gemm
 
     original = deep_gemm_mega_moe.DeepGemmMegaMoEExperts
     patch(
@@ -55,4 +58,21 @@ def install() -> None:
                 affected_versions=_AFFECTED,
                 remove_when=_REMOVE_WHEN,
             )(PPUDeepGemmMegaMoEExperts)
+    original_gate = deep_gemm.bf16_mega_gate
+    gate_owners = [deep_gemm]
+    for module_name in _GATE_CONSUMERS:
+        consumer = sys.modules.get(module_name)
+        if (
+            consumer is not None
+            and getattr(consumer, "bf16_mega_gate", None) is original_gate
+        ):
+            gate_owners.append(consumer)
+    for owner in gate_owners:
+        patch(
+            owner.__name__,
+            "bf16_mega_gate",
+            reason="MegaGate must exclude padding before validating routing scores.",
+            affected_versions=_AFFECTED,
+            remove_when="vLLM bf16_mega_gate forwards token validity to DeepGEMM.",
+        )(bf16_mega_gate)
     _installed = True

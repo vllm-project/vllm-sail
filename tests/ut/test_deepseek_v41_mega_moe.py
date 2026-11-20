@@ -111,12 +111,26 @@ def test_megamoe_redirects_late_imports_and_preserves_other_bindings(
     assert kimi.DeepGemmMegaMoEExperts is other_experts
 
 
-def test_megamoe_leaves_native_gate_unmodified(megamoe_patch):
+def test_megamoe_redirects_gate_provider_and_preloaded_model(megamoe_patch):
     harness = megamoe_patch
     harness.patch.install()
 
-    assert harness.gate_provider.bf16_mega_gate is harness.native_gate
-    assert harness.model.bf16_mega_gate is harness.native_gate
+    assert harness.gate_provider.bf16_mega_gate is not harness.native_gate
+    assert harness.model.bf16_mega_gate is harness.gate_provider.bf16_mega_gate
+
+
+def test_megamoe_gate_late_import_and_idempotency(megamoe_patch, modules):
+    harness = megamoe_patch
+    replacement = object()
+    harness.model.bf16_mega_gate = replacement
+    harness.patch.install()
+    installed = harness.gate_provider.bf16_mega_gate
+    harness.patch.install()
+    late = modules("late_gate_consumer")
+    exec(f"from {_MEGAMOE_GATE_PROVIDER} import bf16_mega_gate", vars(late))
+    assert late.bf16_mega_gate is installed
+    assert harness.gate_provider.bf16_mega_gate is installed
+    assert harness.model.bf16_mega_gate is replacement
 
 
 def test_megamoe_leaves_non_ppu_unmodified(megamoe_patch, monkeypatch):
