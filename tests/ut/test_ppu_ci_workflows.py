@@ -1949,6 +1949,14 @@ def test_recipe_retention_and_publication(
             "extra_s": 9999,
         },
     }
+    if tier == "model_sanity":
+        private_summary["timings"] = {
+            "queue_s": 2.5,
+            "cold_start_s": 10,
+            "eval_s": str(retention_root),
+            "bench_s": -1,
+            "private": str(retention_root),
+        }
     launch_result = subprocess.run(
         ["bash", "-e", "-c", runtime["run"]],
         env={
@@ -2113,6 +2121,12 @@ def test_recipe_retention_and_publication(
                 "maximum_score": 0.99,
                 "gate": "pass",
             },
+            timings={
+                "queue_s": 2.5,
+                "cold_start_s": 10,
+                "eval_s": None,
+                "bench_s": None,
+            },
             baseline_completeness="baseline_established",
             micro_e2e=micro_e2e,
         )
@@ -2150,6 +2164,18 @@ def test_recipe_retention_and_publication(
     "tier,server_label,error,reason",
     [
         ("fast_sanity", None, None, "runtime_setup_failed"),
+        (
+            "fast_sanity",
+            "fast_full",
+            "CUDA out of memory while initializing synthetic-private-weights",
+            "server_startup_out_of_memory",
+        ),
+        (
+            "fast_sanity",
+            "fast_2l",
+            "MoE backend for synthetic-private-layer is unsupported",
+            "server_startup_moe_backend",
+        ),
         (
             "model_sanity",
             "model_sanity",

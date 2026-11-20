@@ -29,6 +29,36 @@ PHASES = {
 }
 
 
+# Publish stable categories for concrete startup errors. Raw log lines stay
+# in private retention, including for errors that do not match the allowlist.
+STARTUP_ERRORS = (
+    (
+        r"(?:OutOfMemoryError:|RuntimeError: [^\n]*out of memory)",
+        "server_startup_out_of_memory",
+    ),
+    (
+        r"(?:RuntimeError|ValueError): [^\n]*(?:moe backend|moe_backend)"
+        r"[^\n]*(?:unsupported|not supported|no available)",
+        "server_startup_moe_backend",
+    ),
+    (
+        r"(?:RuntimeError|ValueError): [^\n]*(?:cuda.?graph|graph capture)"
+        r"[^\n]*(?:failed|unsupported|not supported|not permitted)",
+        "server_startup_graph_capture",
+    ),
+    (
+        r"(?:RuntimeError|ValueError): [^\n]*(?:shape mismatch|"
+        r"must match the size of tensor|invalid for input of size)",
+        "server_startup_shape_mismatch",
+    ),
+    (
+        r"(?:RuntimeError|ValueError|NotImplementedError): [^\n]*"
+        r"(?:qwen4exp|qwen4_exp)[^\n]*(?:unsupported|not supported|supports .* only)",
+        "server_startup_qwen_architecture",
+    ),
+)
+
+
 def _read_file(path: Path, limit: int, *, tail: bool = False) -> str:
     try:
         info = path.lstat()
@@ -83,7 +113,9 @@ def failure_reason(source: Path, tier: str) -> str:
                     )
                 ):
                     return "mla_metadata_shape_mismatch"
-                break
+                for pattern, reason in STARTUP_ERRORS:
+                    if re.search(pattern, server, re.IGNORECASE):
+                        return reason
     if phase in PHASES:
         return PHASES[phase]
     runtime = _read_file(source / "runtime.log", 1, tail=True)

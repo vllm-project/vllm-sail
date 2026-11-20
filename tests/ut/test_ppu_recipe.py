@@ -62,7 +62,10 @@ def _sample_vllm_parser() -> argparse.ArgumentParser:
     parser.add_argument("--reasoning-parser")
     parser.add_argument("--reasoning-config")
     parser.add_argument("--speculative-config")
+    parser.add_argument("--moe-backend")
     parser.add_argument("--compilation-config")
+    parser.add_argument("--engram-config")
+    parser.add_argument("--enforce-eager", action="store_true")
     parser.add_argument("--seed", type=int)
     parser.add_argument("--enable-prefix-caching", action="store_true")
     parser.add_argument("--no-enable-prefix-caching", action="store_true")
@@ -90,6 +93,7 @@ def test_checked_in_recipes_and_policies_validate_cleanly() -> None:
         [
             RECIPES_DIR / "zai-org" / "GLM-5.3.yaml",
             RECIPES_DIR / "deepseek-ai" / "DeepSeek-V4-Flash.yaml",
+            RECIPES_DIR / "Qwen" / "Qwen3.8-Flash-Next.yaml",
         ],
         vllm_parser_mode="required",
         parser=_sample_vllm_parser(),
@@ -210,6 +214,115 @@ def test_resolve_dsv4_matches_catalog_and_dpep_preset() -> None:
     assert "--data-parallel-size" in resolved_dpep["flags"]
     assert "--no-enable-prefix-caching" in resolved_dpep["flags"]
     assert "--enable-prefix-caching" not in resolved_dpep["flags"]
+
+
+@pytest.mark.parametrize(
+    ("base_slug", "legacy_case"),
+    [
+        ("deepseek-v4-flash", "deepseek-v4-mxfp4-dp-ep"),
+        ("qwen3.8-flash-next", "qwen3.8-flash-next-dp-ep"),
+    ],
+)
+def test_model_sanity_policy_selects_eight_card_dp_ep_preset(
+    base_slug: str, legacy_case: str
+) -> None:
+    slug = f"{base_slug}-dp-ep"
+    matrix = ppu_e2e_select.build_recipe_matrix(slug, "model_sanity")
+    (entry,) = matrix["include"]
+    recipe = ROOT / entry["recipe_path"]
+    resolved = ppu_recipe.resolve_recipe(
+        recipe,
+        policy_path=ROOT / entry["policy_path"],
+        tier="model_sanity",
+        preset=entry["preset"],
+    )
+    base = ppu_recipe.resolve_recipe(
+        recipe,
+        policy_path=POLICY_DIR / "models" / f"{base_slug}.yaml",
+        tier="model_sanity",
+    )
+    legacy = next(
+        case
+        for case in json.loads((CI_DIR / "ppu_e2e_models.json").read_text())
+        if case["key"] == legacy_case
+    )
+    assert entry["ppu_count"] == resolved["ppu_count"] == 8
+    assert entry["preset"] == resolved["preset"] == "dp_ep_low_latency"
+    assert entry["config_digest"] == resolved["config_digest"] != base["config_digest"]
+    assert set(legacy["server_env"].items()) <= set(resolved["server_env"].items())
+
+    def flags(args):
+        return {name: value for name, value, _ in ppu_recipe._parse_flag_entries(args)}
+
+    effective = flags(resolved["flags"])
+    assert "--tensor-parallel-size" not in effective
+    for key, value in flags(legacy["server_cmd"][9:]).items():
+        if key.endswith("-config"):
+            assert json.loads(effective[key]) == json.loads(value)
+        else:
+            assert effective[key] == value
+    fast_matrix = ppu_e2e_select.build_recipe_matrix("", "fast_sanity")
+    assert slug not in {item["key"] for item in fast_matrix["include"]}
+
+
+def test_resolve_qwen38_flash_next_matches_catalog_and_sampling_contract() -> None:
+    recipe = RECIPES_DIR / "Qwen" / "Qwen3.8-Flash-Next.yaml"
+    policy = POLICY_DIR / "models" / "qwen3.8-flash-next.yaml"
+    catalog = {
+        entry["key"]: entry
+        for entry in json.loads((CI_DIR / "ppu_e2e_models.json").read_text())
+    }
+    legacy = catalog["qwen3.8-flash-next-tp4"]
+    cat_flags = legacy["server_cmd"][9:]
+
+    resolved_ms = ppu_recipe.resolve_recipe(
+        recipe, policy_path=policy, tier="model_sanity"
+    )
+    assert resolved_ms["ppu_count"] == 4
+    assert resolved_ms["server_env"] == legacy["server_env"]
+    # The executor injects prefix caching from the policy; the recipe itself
+    # must not hardcode it, and the resolved command still covers every
+    # legacy serve flag.
+    assert resolved_ms["flags"][-1] == "--enable-prefix-caching"
+    assert set(cat_flags) <= set(resolved_ms["flags"])
+    recipe_doc = yaml.safe_load(recipe.read_text())
+    assert "--enable-prefix-caching" not in recipe_doc["model"]["base_args"]
+    assert "--load-format" not in recipe_doc["model"]["base_args"]
+
+    resolved_fs = ppu_recipe.resolve_recipe(
+        recipe, policy_path=policy, tier="fast_sanity"
+    )
+    assert "--load-format" in resolved_fs["flags"]
+    assert "dummy" in resolved_fs["flags"]
+    assert resolved_fs["preset"] == "fast_sanity"
+    assert "--enforce-eager" in resolved_fs["flags"]
+    assert resolved_fs["ppu_count"] == 4
+    assert "--speculative-config" not in resolved_fs["flags"]
+    idx_ov = resolved_fs["flags"].index("--hf-overrides")
+    assert json.loads(resolved_fs["flags"][idx_ov + 1]) == {"num_hidden_layers": 2}
+
+    # The eval generation block is the sampling contract the golden gate
+    # compares key by key: any drift from the committed 890p golden fails
+    # the run before a score is even compared.
+    policy_doc = yaml.safe_load(policy.read_text())
+    eval_stage = next(
+        stage
+        for stage in policy_doc["tiers"]["model_sanity"]["stages"]
+        if stage["kind"] == "evalscope"
+    )
+    golden = json.loads(
+        (
+            ROOT
+            / "tests"
+            / "e2e"
+            / "models"
+            / "_golden"
+            / "accuracy_qwen3.8-flash-next_890p.json"
+        ).read_text()
+    )
+    assert eval_stage["generation"] == golden["generation"]
+    assert resolved_ms["golden_model_key"] == golden["model"]
+    assert resolved_ms["hf_model_id"] == golden["checkpoint_tail"]
 
 
 def test_resolve_and_validate_variant_overrides_and_policy_variant(
@@ -1017,6 +1130,7 @@ def test_recipe_workflows_follow_security_and_shell_contracts() -> None:
         if step.get("id") == "recipe"
     )
     assert model_recipe["env"]["TIER"] == "model_sanity"
+    assert model_recipe["env"]["PRESET"] == "${{ matrix.model.preset || '' }}"
     pr_wf = yaml.safe_load(
         (ROOT / ".github" / "workflows" / "ppu-build-and-test.yaml").read_text()
     )
@@ -1430,7 +1544,7 @@ def test_checked_in_recipe_matrix_doc_is_up_to_date() -> None:
     ]
     assert "| `deepseek-v4-mxfp4` |" not in legacy_section
     assert "| `glm-5.3-mxfp4-tp4` |" not in legacy_section
-    assert "| `deepseek-v4-mxfp4-dp-ep` |" in legacy_section
+    assert "| `deepseek-v4-int8-dp-ep` |" in legacy_section
 
 
 def test_render_matrix_cli_check_passes_and_detects_drift(
