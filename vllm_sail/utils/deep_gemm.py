@@ -1057,29 +1057,29 @@ def fp4_mqa_avg_logits(
             instead of the whole packed key space.
         q_scale: Optional scalar or per-Q-row multiplier applied after the head
             reduction.
-        logits_dtype: Output dtype. Defaults to `torch.float32` because the
-            DeepGEMM FP4 entries default to `torch.bfloat16`.
+        logits_dtype: Optional output dtype override. When omitted it is not
+            forwarded at all, so the DeepGEMM FP4 entries' own bf16 default
+            applies; the entries plan to drop this parameter.
 
     Returns:
-        Logits of shape `[M, max_seqlen_k]`, dtype `logits_dtype`, compacted
+        Logits of shape `[M, max_seqlen_k]`, bf16 by default, compacted
         relative to `cu_seqlen_ks`. Entries outside a row's valid range are left
         undefined rather than masked, so the caller has to keep them out of the
         selection itself: the QSA select passes the per-row valid block count to
-        `persistent_topk` instead of pre-masking the row.
+        DeepSelect's ``end`` instead of pre-masking the row.
     """
     _lazy_init()
     if _fp4_mqa_avg_logits_impl is None:
         return _missing()
-    if logits_dtype is None:
-        logits_dtype = torch.float32
     kwargs = {} if q_scale is None else {"q_scale": q_scale}
+    if logits_dtype is not None:
+        kwargs["logits_dtype"] = logits_dtype
     return _fp4_mqa_avg_logits_impl(
         q,
         kv,
         cu_seqlen_ks,
         cu_seqlen_ke,
         max_seqlen_k=max_seqlen_k,
-        logits_dtype=logits_dtype,
         **kwargs,
     )
 
@@ -1123,18 +1123,18 @@ def fp4_paged_mqa_avg_logits(
             `metadata_extra=fp4_avg_metadata_extra(next_n)`. DeepGEMM asserts its
             size matches `get_num_sms() * tb_per_cu` at launch.
         max_context_len: Maximum sequence length used to size the logits output.
-        logits_dtype: Output dtype. Defaults to `torch.float32` because the
-            DeepGEMM FP4 entries default to `torch.bfloat16`.
+        logits_dtype: Optional output dtype override. When omitted it is not
+            forwarded at all, so the DeepGEMM FP4 entries' own bf16 default
+            applies; the entries plan to drop this parameter.
 
     Returns:
-        Logits of shape `[B * next_n, max_context_len]`, dtype `logits_dtype`,
+        Logits of shape `[B * next_n, max_context_len]`, bf16 by default,
         indexed by absolute KV position.
     """
     _lazy_init()
     if _fp4_paged_mqa_avg_logits_impl is None:
         return _missing()
-    if logits_dtype is None:
-        logits_dtype = torch.float32
+    kwargs = {} if logits_dtype is None else {"logits_dtype": logits_dtype}
     return _fp4_paged_mqa_avg_logits_impl(
         q,
         kv_cache,
@@ -1142,7 +1142,7 @@ def fp4_paged_mqa_avg_logits(
         block_tables,
         schedule_metadata,
         max_context_len,
-        logits_dtype=logits_dtype,
+        **kwargs,
     )
 
 
