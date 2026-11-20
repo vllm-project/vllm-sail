@@ -156,6 +156,37 @@ def test_scheduled_recipe_rejects_invalid_policy_claims(
         select.scheduled_legacy_accuracy_cases(selected)
 
 
+def test_scheduled_recipe_replaces_qwen_tp4_but_keeps_dp_ep() -> None:
+    """The TP4 recipe claims only its own legacy case.
+
+    The 8-card DP+EP case keeps running on the legacy lane until its own
+    preset lands, so the nightly must not drop it early.
+    """
+    select = _load_select()
+    selected = select.build_accuracy_matrix(_catalog(), "")["include"]
+    remaining = select.scheduled_legacy_accuracy_cases(selected)
+    assert "qwen3.8-flash-next-tp4" not in remaining
+    assert "qwen3.8-flash-next-dp-ep" in remaining
+
+
+def test_scheduled_recipe_restores_qwen_tp4_when_the_policy_is_removed(
+    tmp_path, monkeypatch
+) -> None:
+    """Disabling the recipe must fall back to the full legacy schedule."""
+    select = _load_select()
+    shutil.copytree(ROOT / "tests/ppu", tmp_path / "tests/ppu")
+    (tmp_path / "tests/ppu/policy/models/qwen3.8-flash-next.yaml").unlink()
+    monkeypatch.setattr(select, "REPO_ROOT", tmp_path)
+    monkeypatch.syspath_prepend(str(SELECT.parent))
+    import ppu_recipe
+
+    monkeypatch.setattr(ppu_recipe, "REPO_ROOT", tmp_path)
+    selected = select.build_accuracy_matrix(_catalog(), "")["include"]
+    remaining = select.scheduled_legacy_accuracy_cases(selected)
+    assert "qwen3.8-flash-next-tp4" in remaining
+    assert "qwen3.8-flash-next-dp-ep" in remaining
+
+
 @pytest.mark.parametrize(
     ("key", "board"),
     [

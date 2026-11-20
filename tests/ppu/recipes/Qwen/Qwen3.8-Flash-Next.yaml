@@ -1,0 +1,74 @@
+schema_version: ppu-serving/v1
+ppu:
+  framework: vllm
+  visibility: public
+  upstream_schema: vllm-project/recipes@b08ad738
+  assets:
+    model: qwen3.8-flash-next-mxfp4
+    tokenizer: qwen3.8-flash-next-mxfp4
+  hf_model_id: T-HEAD/Qwen3.8-Flash-Next-MoE-Quant-W-MXFP4-A-MXFP4-Dense-Quant-W-FP8-PerChannel-A-FP8-PerToken
+  golden_model_key: qwen3.8-flash-next
+  served_name: Qwen3.8-Flash-Next
+  topology:
+    kind: single_node
+    nodes: 1
+    devices_per_node: 4
+  default_features:
+    - tool_calling
+    - reasoning
+    - spec_decoding
+  external_env: []
+model:
+  model_id: Qwen/Qwen3.8-Flash-Next
+  base_args:
+    - --tensor-parallel-size
+    - "4"
+    - --gpu-memory-utilization
+    - "0.95"
+    - --max-num-seqs
+    - "256"
+    - --max-model-len
+    - "16384"
+    - --trust-remote-code
+    - --moe-backend
+    - ppu-deep-gemm
+    - --distributed-timeout-seconds
+    - "3600"
+    - --cpu-distributed-timeout-seconds
+    - "3600"
+  base_env:
+    VLLM_ENGINE_READY_TIMEOUT_S: "6000"
+features:
+  tool_calling:
+    args:
+      - --enable-auto-tool-choice
+      - --tool-call-parser
+      - qwen3_xml
+  reasoning:
+    args:
+      - --reasoning-parser
+      - qwen3
+  spec_decoding:
+    default_mode: mtp
+    modes:
+      mtp:
+        args:
+          - --speculative-config
+          - '{"method": "mtp", "num_speculative_tokens": 3}'
+variants:
+  default:
+    precision: mxfp4
+    extra_args: []
+    extra_env: {}
+hardware_overrides:
+  zhenwu_m890:
+    extra_args: []
+    extra_env: {}
+presets: {}
+notes: >-
+  Default baseline matches the qwen3.8-flash-next-tp4 catalog entry (TP4 on 4
+  Zhenwu M890 cards with qwen3_xml tool-call and qwen3 reasoning parsers, MTP
+  speculative decoding with 3 draft tokens, and the ppu-deep-gemm MoE
+  backend). Prefix caching is injected by the executor from the test policy,
+  not hardcoded here. The dp_ep_low_latency preset for the 8-card DP+EP case
+  is tracked separately and will replace qwen3.8-flash-next-dp-ep.

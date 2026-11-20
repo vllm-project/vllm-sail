@@ -59,6 +59,7 @@ def _sample_vllm_parser() -> argparse.ArgumentParser:
     parser.add_argument("--reasoning-parser")
     parser.add_argument("--reasoning-config")
     parser.add_argument("--speculative-config")
+    parser.add_argument("--moe-backend")
     parser.add_argument("--compilation-config")
     parser.add_argument("--seed", type=int)
     parser.add_argument("--enable-prefix-caching", action="store_true")
@@ -87,6 +88,7 @@ def test_checked_in_recipes_and_policies_validate_cleanly() -> None:
         [
             RECIPES_DIR / "zai-org" / "GLM-5.3.yaml",
             RECIPES_DIR / "deepseek-ai" / "DeepSeek-V4-Flash.yaml",
+            RECIPES_DIR / "Qwen" / "Qwen3.8-Flash-Next.yaml",
         ],
         vllm_parser_mode="required",
         parser=_sample_vllm_parser(),
@@ -179,6 +181,62 @@ def test_resolve_dsv4_matches_catalog_and_dpep_preset() -> None:
     assert "--data-parallel-size" in resolved_dpep["flags"]
     assert "--no-enable-prefix-caching" in resolved_dpep["flags"]
     assert "--enable-prefix-caching" not in resolved_dpep["flags"]
+
+
+def test_resolve_qwen38_flash_next_matches_catalog_and_sampling_contract() -> None:
+    recipe = RECIPES_DIR / "Qwen" / "Qwen3.8-Flash-Next.yaml"
+    policy = POLICY_DIR / "models" / "qwen3.8-flash-next.yaml"
+    catalog = {
+        entry["key"]: entry
+        for entry in json.loads((CI_DIR / "ppu_e2e_models.json").read_text())
+    }
+    legacy = catalog["qwen3.8-flash-next-tp4"]
+    cat_flags = legacy["server_cmd"][9:]
+
+    resolved_ms = ppu_recipe.resolve_recipe(
+        recipe, policy_path=policy, tier="model_sanity"
+    )
+    assert resolved_ms["ppu_count"] == 4
+    assert resolved_ms["server_env"] == legacy["server_env"]
+    # The executor injects prefix caching from the policy; the recipe itself
+    # must not hardcode it, and the resolved command still covers every
+    # legacy serve flag.
+    assert resolved_ms["flags"][-1] == "--enable-prefix-caching"
+    assert set(cat_flags) <= set(resolved_ms["flags"])
+    recipe_doc = yaml.safe_load(recipe.read_text())
+    assert "--enable-prefix-caching" not in recipe_doc["model"]["base_args"]
+    assert "--load-format" not in recipe_doc["model"]["base_args"]
+
+    resolved_fs = ppu_recipe.resolve_recipe(
+        recipe, policy_path=policy, tier="fast_sanity"
+    )
+    assert "--load-format" in resolved_fs["flags"]
+    assert "dummy" in resolved_fs["flags"]
+    idx_ov = resolved_fs["flags"].index("--hf-overrides")
+    assert json.loads(resolved_fs["flags"][idx_ov + 1]) == {"num_hidden_layers": 2}
+
+    # The eval generation block is the sampling contract the golden gate
+    # compares key by key: any drift from the committed 890p golden fails
+    # the run before a score is even compared.
+    policy_doc = yaml.safe_load(policy.read_text())
+    eval_stage = next(
+        stage
+        for stage in policy_doc["tiers"]["model_sanity"]["stages"]
+        if stage["kind"] == "evalscope"
+    )
+    golden = json.loads(
+        (
+            ROOT
+            / "tests"
+            / "e2e"
+            / "models"
+            / "_golden"
+            / "accuracy_qwen3.8-flash-next_890p.json"
+        ).read_text()
+    )
+    assert eval_stage["generation"] == golden["generation"]
+    assert resolved_ms["golden_model_key"] == golden["model"]
+    assert resolved_ms["hf_model_id"] == golden["checkpoint_tail"]
 
 
 def test_config_digest_ignores_ephemeral_endpoint_and_tracks_changes() -> None:
