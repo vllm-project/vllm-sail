@@ -1,0 +1,53 @@
+schema_version: ppu-serving/v1
+ppu:
+  framework: vllm
+  visibility: public
+  upstream_schema: vllm-project/recipes@b08ad738
+  assets:
+    model: minimax-m3-fp8
+    tokenizer: minimax-m3-fp8
+  hf_model_id: T-HEAD/MiniMax-M3-Quant-W-FP8-PerChannel-A-FP8-PerToken
+  golden_model_key: minimax-m3-fp8
+  served_name: MiniMax-M3-Quant-W-FP8-PerChannel-A-FP8-PerToken
+  topology:
+    kind: single_node
+    nodes: 1
+    devices_per_node: 8
+  default_features: []
+  external_env: []
+model:
+  model_id: MiniMaxAI/MiniMax-M3
+  base_args:
+    - --tensor-parallel-size
+    - "8"
+    - --gpu-memory-utilization
+    - "0.9"
+    - --max-model-len
+    - "16384"
+    - --trust-remote-code
+    - --seed
+    - "0"
+    - --distributed-timeout-seconds
+    - "3600"
+    - --cpu-distributed-timeout-seconds
+    - "3600"
+  base_env: {}
+features: {}
+variants:
+  default:
+    precision: fp8
+    extra_args: []
+    extra_env: {}
+hardware_overrides:
+  zhenwu_m890:
+    extra_args: []
+    extra_env: {}
+presets: {}
+notes: >-
+  Mirrors the checked-in minimax-m3-fp8 accuracy case (TP8 on eight Zhenwu M890
+  cards, 0.9 memory utilization, 16K context, seed 0) so the reviewed 890p
+  golden stays comparable. The upstream registry recipe at b08ad738 also sets
+  --block-size 128 for MSA sparse attention, but the legacy accuracy argv never
+  passed it; this recipe keeps the legacy shape instead of silently changing a
+  parameter the golden was measured under. Feature parsers stay off on purpose:
+  the GSM8K lane strips the reasoning envelope with the dataset filter.

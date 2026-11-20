@@ -181,6 +181,54 @@ def test_resolve_dsv4_matches_catalog_and_dpep_preset() -> None:
     assert "--enable-prefix-caching" not in resolved_dpep["flags"]
 
 
+def test_resolve_minimax_reproduces_the_retired_catalog_case() -> None:
+    recipe = RECIPES_DIR / "MiniMaxAI" / "MiniMax-M3.yaml"
+    policy = POLICY_DIR / "models" / "minimax-m3.yaml"
+    catalog = {
+        entry["key"]: entry
+        for entry in json.loads((CI_DIR / "ppu_e2e_models.json").read_text())
+    }
+    legacy = catalog["minimax-m3-fp8"]
+    # The retired case leaves server_cmd unset, so the evaluator's built-in argv
+    # is the contract this recipe has to reproduce.
+    resolved_ms = ppu_recipe.resolve_recipe(
+        recipe, policy_path=policy, tier="model_sanity"
+    )
+    assert ppu_recipe._load_yaml(policy)["replaces_legacy_cases"] == ["minimax-m3-fp8"]
+    assert resolved_ms["ppu_count"] == legacy["ppu_count"] == 8
+    assert resolved_ms["hf_model_id"] == legacy["model_id"]
+    assert resolved_ms["golden_model_key"] == legacy["model_key"]
+    assert resolved_ms["served_name"] == legacy["served_name"]
+    assert resolved_ms["runtime_env"] == {"VLLM_SERVER_DEV_MODE": "1"}
+    assert resolved_ms["flags"] == [
+        "--tensor-parallel-size",
+        "8",
+        "--gpu-memory-utilization",
+        "0.9",
+        "--max-model-len",
+        "16384",
+        "--trust-remote-code",
+        "--seed",
+        "0",
+        "--distributed-timeout-seconds",
+        "3600",
+        "--cpu-distributed-timeout-seconds",
+        "3600",
+        "--enable-prefix-caching",
+    ]
+
+    resolved_fs = ppu_recipe.resolve_recipe(
+        recipe, policy_path=policy, tier="fast_sanity"
+    )
+    assert resolved_fs["ppu_count"] == 8
+    assert resolved_fs["dummy_weights"] is True
+    assert resolved_fs["layer_override"] == 2
+    assert "--load-format" in resolved_fs["flags"]
+    assert "dummy" in resolved_fs["flags"]
+    idx_ov = resolved_fs["flags"].index("--hf-overrides")
+    assert json.loads(resolved_fs["flags"][idx_ov + 1]) == {"num_hidden_layers": 2}
+
+
 def test_config_digest_ignores_ephemeral_endpoint_and_tracks_changes() -> None:
     recipe = RECIPES_DIR / "zai-org" / "GLM-5.3.yaml"
     policy = POLICY_DIR / "models" / "glm-5.3.yaml"
