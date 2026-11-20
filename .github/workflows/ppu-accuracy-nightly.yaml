@@ -14,22 +14,13 @@ permissions:
 cache-mode: none
 
 jobs:
-  build:
-    name: Repackage verified native wheels
-    if: ${{ inputs.models == 'recipe:deepseek-v4-flash-dp-ep' }}
-    uses: ./.github/workflows/_ppu-build.yaml
-    with:
-      pr_head_sha: 'daa3bd67129c7af0ae271622ec619edf7171cd87'
-      native_reuse_run_id: '44504802787'
-
   recipe-model-sanity:
     name: Recipe model sanity & micro-E2E
-    needs: build
-    if: ${{ needs.build.result == 'success' && inputs.models == 'recipe:deepseek-v4-flash-dp-ep' }}
+    if: ${{ inputs.models == 'recipe:deepseek-v4-flash-dp-ep' }}
     uses: ./.github/workflows/_ppu-recipe-model-sanity.yaml
     with:
       pr_mode: false
       pr_head_sha: 'daa3bd67129c7af0ae271622ec619edf7171cd87'
       wheel_source_sha: 'daa3bd67129c7af0ae271622ec619edf7171cd87'
-      build_run_id: ${{ github.run_id }}
+      build_run_id: '44660448842'
       models: 'deepseek-v4-flash-dp-ep'

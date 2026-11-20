@@ -261,6 +261,50 @@ jobs:
                   "measured_failed": count(measured.get("failed")),
               }
 
+
+          def startup_signatures(path):
+              signatures = {
+                  "deepselect_provider_unavailable": r"(?:error|requires|unavailable)[^\n]*deep[ _-]?select|deep[ _-]?select[^\n]*(?:unavailable|not found|not installed|cannot import|\bdisabled\b)",
+                  "out_of_memory": r"OutOfMemoryError|\bout of memory\b|alloc failed",
+                  "shape_mismatch": r"shape mismatch|must match the size of tensor|non-singleton dimension|invalid for input of size",
+                  "import_or_symbol_error": r"ImportError:|ModuleNotFoundError:|undefined symbol",
+                  "attribute_error": r"AttributeError:",
+                  "assertion_error": r"AssertionError",
+                  "type_error": r"TypeError:",
+                  "value_error": r"ValueError:",
+                  "engine_process_failed": r"EngineCore failed to start|Engine core initialization failed|worker[^\n]*died|child process[^\n]*failed",
+                  "device_error": r"illegal memory access|device-side assert|driver error",
+                  "graph_capture_error": r"(?:cuda.?graph|graph capture)[^\n]*(?:failed|unsupported|not supported|not permitted)",
+                  "distributed_backend_error": r"(?:DistBackendError|NCCL error|HCCL error|collective operation timeout|deep_ep[^\n]*(?:failed|error))",
+                  "model_load_error": r"(?:weight[^\n]*(?:missing|not found)|invalid checkpoint|safetensors[^\n]*(?:error|failed))",
+              }
+              areas = {
+                  "mla_sparse": "mla_sparse.py",
+                  "mla_indexer": "mla_indexer.py",
+                  "sparse_mqa_indexer": "sparse_mqa_indexer.py",
+                  "indexer_topk": "indexer_topk.py",
+                  "deepseek_v4": "deepseek_v4.py",
+                  "model_runner": "gpu_model_runner.py",
+                  "engine_core": "engine/core.py",
+                  "worker_executor": "multiproc_executor.py",
+              }
+              try:
+                  if not stat.S_ISDIR(path.parent.lstat().st_mode):
+                      return {"log_available": False}
+                  info = path.lstat()
+                  if not stat.S_ISREG(info.st_mode):
+                      return {"log_available": False}
+                  with path.open("rb") as stream:
+                      stream.seek(max(0, info.st_size - 512 * 1024))
+                      tail = stream.read(512 * 1024).decode("utf-8", errors="replace")
+              except OSError:
+                  return {"log_available": False}
+              return {
+                  "log_available": bool(tail),
+                  "signatures": [key for key, pattern in signatures.items() if re.search(pattern, tail, re.I)],
+                  "trace_areas": [key for key, filename in areas.items() if filename in tail],
+              }
+
           baseline = mapping(accuracy.get("per_question")).get("status")
           model = os.environ["MODEL_KEY"]
           if baseline not in ("baseline_established", "baseline_incomplete"):
@@ -289,6 +333,8 @@ jobs:
                   str(concurrency): bench_case(concurrency) for concurrency in (1, 16)
               },
           }
+          if public["status"] == "fail":
+              public["startup_diagnostics"] = startup_signatures(source.parent / "vllm_serve_model_sanity.log")
           (Path(os.environ["PUBLIC_DIR"]) / "summary.json").write_text(
               json.dumps(public, indent=2, allow_nan=False) + "\n", encoding="utf-8"
           )
