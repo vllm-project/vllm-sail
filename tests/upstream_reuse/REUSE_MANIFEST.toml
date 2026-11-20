@@ -193,12 +193,11 @@ path = "tests/test_pooling_params.py"
 mode = "adapted"
 chips = ["cpu", "810e", "890p"]
 category = "params"
-reason = "PoolingParams validation parked until the offline runner cache provisions multilingual-e5-small: the file-level hub guard scans the whole upstream file, so deselecting the two hub-resolved embedding-dimension cases cannot unblock it."
+reason = "PoolingParams validation excluding both embedding-dimension cases: they resolve multilingual-e5-small and Snowflake checkpoints from the Hugging Face hub, and the offline M890 runner cache provisions neither."
 deselect = [
     "tests/test_pooling_params.py::test_embed_dimensions[model_info0]",
     "tests/test_pooling_params.py::test_embed_dimensions[model_info1]",
 ]
-skip_reason = "the offline M890 runner HF cache lacks vllm-project/multilingual-e5-small and the file-level hub guard parks the whole entry; enable once the cache volume provisions it"
 min_tests = 40
 
 [[entry]]

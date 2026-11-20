@@ -138,11 +138,9 @@ actually pass at least one upstream case. Missing dependencies, import errors,
 empty runs and undeclared skips fail CI. Parked entries do not count as coverage.
 Reviewed skips identify the node, reason and maximum count; an all-skipped entry
 still fails. Reports retain per-entry JUnit XML, logs and execution counts.
-Pooling reuse is parked with a skip_reason: the upstream file resolves
-multilingual-e5-small from the Hugging Face hub, and the file-level offline
-guard parks the whole entry even though the hub-resolved embedding-dimension
-cases are deselected. It does not qualify either embedding model's support;
-re-enable it once the runner cache provisions the checkpoint.
+Pooling reuse excludes both hub-resolved embedding-dimension cases
+(multilingual-e5-small and Snowflake) and requires at least 40 of the remaining
+pooling cases; it does not qualify either embedding model's support.
 
 The PPU pipeline consumes validated wheels for single-card M890 reuse, records
 source/wheel/upstream identities and verifies installed-package imports and the

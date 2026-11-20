@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import json
 import socket
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -515,27 +516,38 @@ def test_strict_collection_minimum_is_retained():
     assert error is not None and "expected at least 3" in error
 
 
-def test_pooling_reuse_is_parked_until_the_hub_cache_is_provisioned(
-    monkeypatch: pytest.MonkeyPatch,
-):
-    """The file-level hub guard ignores --deselect, so the entry must be parked.
-
-    The upstream file still names multilingual-e5-small in the deselected
-    embedding-dimension cases; on the offline M890 runner the guard would park
-    the run as an undeclared environment gap and fail strict mode.
-    """
+def test_pooling_reuse_excludes_hub_resolved_embed_dimensions(tmp_path):
     entry = next(e for e in harness.load_manifest() if e.id == "pooling_params")
-    assert entry.skip_reason
+    target = tmp_path / entry.path
+    target.parent.mkdir(parents=True)
+    target.write_text(
+        "import pytest\n"
+        '@pytest.mark.parametrize("model_info", [\n'
+        '    {"name": "intfloat/multilingual-e5-small"},\n'
+        '    {"name": "Snowflake/snowflake-arctic-embed-m-v1.5"},\n'
+        "])\n"
+        "def test_embed_dimensions(model_info):\n"
+        '    raise AssertionError("hub-resolved case must be deselected")\n'
+        '@pytest.mark.parametrize("case", range(40))\n'
+        "def test_other_pooling_parameters(case):\n"
+        "    assert case >= 0\n"
+    )
+    runner = UpstreamRunner(tmp_path)
+    report = tmp_path / "report.xml"
+    result = subprocess.run(
+        runner.build_command(entry, report),
+        cwd=tmp_path,
+        env=runner.build_env(entry),
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert harness._parse_junit(report)[:4] == (40, 0, 0, 0)
     assert entry.mode == "adapted"
     assert entry.min_tests == 40
-
-    def refuse(*args: object, **kwargs: object) -> None:
-        raise AssertionError("a parked entry must not spawn a subprocess")
-
-    monkeypatch.setattr(harness.subprocess, "run", refuse)
-    result = UpstreamRunner(Path("/nonexistent-upstream")).run(entry)
-    assert result.skipped_by_manifest
-    assert result.tail == entry.skip_reason
+    assert not entry.skip_reason
 
 
 def test_strict_allowed_skip_requires_node_reason_and_bounded_count():
