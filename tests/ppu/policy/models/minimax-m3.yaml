@@ -2,6 +2,9 @@ schema_version: ppu-test-policy/v1
 model_id: MiniMaxAI/MiniMax-M3
 recipe: tests/ppu/recipes/MiniMaxAI/MiniMax-M3.yaml
 hardware: zhenwu_m890
+# The shared recipe also carries the MXFP4-FP8 variant; this policy retires the
+# FP8 legacy case, so it must pin the FP8 checkpoint explicitly.
+variant: default
 replaces_legacy_cases: [minimax-m3-fp8]
 accuracy_gate:
   method: golden_band
