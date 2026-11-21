@@ -49,7 +49,7 @@ if TYPE_CHECKING:
     VLLM_SAIL_USE_TRITON_INT8_QUANT: bool = True
     VLLM_SAIL_FP8_LOAD_POLICY: str | None = None
     VLLM_SAIL_ENABLE_FP8_TO_INT8: bool = False
-    VLLM_SAIL_KPOOL_DECODE_LOGITS: str = "non_paged"
+    VLLM_SAIL_KPOOL_DECODE_LOGITS: str = "paged"
     VLLM_SAIL_KPOOL_MAX_DENSE_POOLS: int = 1 << 21
     VLLM_SAIL_QSA_KERNEL: str = "auto"
     VLLM_SAIL_STEP5_DSA_SCORES: bool = False
@@ -108,7 +108,7 @@ _TRUTHY = ("true", "1", "yes", "on")
 #: Backend names accepted by both MoE and dense GEMM selection.
 GEMM_BACKENDS = ("deepgemm", "acext", "triton")
 GDN_DECODE_KERNELS = ("auto", "cuda", "pla", "triton")
-KPOOL_DECODE_LOGITS_BACKENDS = ("non_paged",)
+KPOOL_DECODE_LOGITS_BACKENDS = ("non_paged", "paged")
 #: Qwen4Exp QSA sparse-attention kernels. ``cuda`` is FA3's QSA path, which only
 #: exists on PPU builds carrying the ``qsa_allow_aiu`` argument.
 QSA_KERNELS = ("auto", "cuda", "triton")
@@ -255,11 +255,20 @@ environment_variables: dict[str, Callable[[], Any]] = {
     ),
     "VLLM_SAIL_ENABLE_FP8_TO_INT8": _bool("VLLM_SAIL_ENABLE_FP8_TO_INT8", False),
     # Decode-time logits backend for the glm5_next kpool indexer.
-    # ``non_paged`` (default) gathers the pool K cache and uses the non-paged
-    # int8 kernel (same one as prefill). The paged INT8 kernel writes only
-    # part of the logits on PPU, so selecting it is rejected until fixed.
+    # ``paged`` (default) calls the paged INT8 logits kernel directly. The
+    # earlier ``non_paged`` default gathered the whole pool K cache per step,
+    # which costs O(batch * context) and is bounded by
+    # VLLM_SAIL_KPOOL_MAX_DENSE_POOLS. ``non_paged`` stays available as an
+    # explicit opt-in for A/B work.
+    # NOTE: the original reason for the ``non_paged`` default was a probe
+    # claiming the paged INT8 kernel wrote only 2 of every 64 logits. That
+    # probe was wrong: it initialised the paged cache with a per-token
+    # ``[K, scale]`` interleaved layout, while the kernel expects each page to
+    # hold all K rows first and then the float32 scale plane. With the correct
+    # layout the kernel writes every column (verified over contexts 64 and
+    # 32768, three runs each), so there is no accuracy reason to avoid paged.
     "VLLM_SAIL_KPOOL_DECODE_LOGITS": _choice(
-        "VLLM_SAIL_KPOOL_DECODE_LOGITS", "non_paged", KPOOL_DECODE_LOGITS_BACKENDS
+        "VLLM_SAIL_KPOOL_DECODE_LOGITS", "paged", KPOOL_DECODE_LOGITS_BACKENDS
     ),
     # Dense decode fallback bound: batch * ceil(max_seq_len / kpool) pools.
     # Above it the fallback would materialise an O(batch * context) logits
