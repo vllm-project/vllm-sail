@@ -53,6 +53,9 @@ def installed(modules):
         return "cuda-result"
 
     class Topk:
+        # The patch module snapshots both methods at import; the stub must
+        # provide every upstream attribute it reads.
+        takes_bf16_logits = original
         resolve_backend = original
 
     modules("torch", int32="int32")
@@ -80,6 +83,12 @@ def installed(modules):
     layer = modules(
         "vllm.model_executor.layers.sparse_mqa_indexer", has_deep_select=original
     )
+    sparse_attn_layer = modules(
+        "vllm.model_executor.layers.sparse_attn_indexer",
+        has_deep_select=original,
+        is_deep_select_supported=original,
+        deep_select_topk=original,
+    )
     backend = modules(
         "vllm.v1.attention.backends.mla.sparse_indexer", has_deep_select=original
     )
@@ -94,6 +103,7 @@ def installed(modules):
         sparse=sparse,
         candidates=candidates,
         layer=layer,
+        sparse_attn_layer=sparse_attn_layer,
         backend=backend,
         step5=step5,
         platform=platform,
@@ -112,6 +122,12 @@ def test_preloaded_consumers_get_all_matching_replacements(
     assert installed.layer.has_deep_select is p.has_deep_select
     assert installed.backend.has_deep_select is p.has_deep_select
     assert installed.step5.is_deep_select_supported is p.is_deep_select_supported
+    for name in (
+        "has_deep_select",
+        "is_deep_select_supported",
+        "deep_select_topk",
+    ):
+        assert getattr(installed.sparse_attn_layer, name) is getattr(p, name)
     for owner in (installed.provider, installed.candidates):
         for name in (
             "get_deep_select_stride_requirement",

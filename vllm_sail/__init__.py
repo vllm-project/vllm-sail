@@ -15,7 +15,15 @@ including model registration. :func:`register_model` remains public for
 backward compatibility and focused tests, but is not a separate entry point.
 """
 
-from vllm_sail.version import __version__, __version_tuple__
+# Route ``vllm_sail.*`` loggers through vLLM's logging configuration before
+# any submodule creates its logger; without this, vLLM only configures its own
+# ``vllm.*`` namespace and our INFO records would be silently dropped. Must run
+# before the first ``vllm_sail.*`` import below.
+from vllm_sail.logger import configure_sail_logging
+
+configure_sail_logging()
+
+from vllm_sail.version import __version__, __version_tuple__  # noqa: E402
 
 __all__ = [
     "__version__",
