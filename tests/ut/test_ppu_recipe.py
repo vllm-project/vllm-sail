@@ -213,6 +213,108 @@ def test_resolve_dsv4_matches_catalog_and_dpep_preset() -> None:
     assert "--enable-prefix-caching" not in resolved_dpep["flags"]
 
 
+def test_resolve_minimax_reproduces_the_retired_catalog_case() -> None:
+    recipe = RECIPES_DIR / "MiniMaxAI" / "MiniMax-M3.yaml"
+    policy = POLICY_DIR / "models" / "minimax-m3.yaml"
+    catalog = {
+        entry["key"]: entry
+        for entry in json.loads((CI_DIR / "ppu_e2e_models.json").read_text())
+    }
+    legacy = catalog["minimax-m3-fp8"]
+    policy_doc = ppu_recipe._load_yaml(policy)
+    assert policy_doc["replaces_legacy_cases"] == ["minimax-m3-fp8"]
+    # The shared recipe also carries the MXFP4 variant, so the FP8 policy has to
+    # pin the default variant explicitly instead of inheriting whatever is first.
+    assert policy_doc["variant"] == "default"
+    resolved_ms = ppu_recipe.resolve_recipe(
+        recipe, policy_path=policy, tier="model_sanity"
+    )
+    assert resolved_ms["variant"] == "default"
+    assert resolved_ms["ppu_count"] == legacy["ppu_count"] == 8
+    assert resolved_ms["hf_model_id"] == legacy["model_id"]
+    assert resolved_ms["golden_model_key"] == legacy["model_key"]
+    assert resolved_ms["served_name"] == legacy["served_name"]
+    assert resolved_ms["runtime_env"] == {"VLLM_SERVER_DEV_MODE": "1"}
+    # The recipe follows the P0 single-node serving baseline (FP8 KV cache,
+    # block size 128, M3 tool-call/reasoning parsers), so the legacy argv is no
+    # longer reproduced flag by flag. Retirement only requires the TP layout,
+    # timeout and cache contract below; the accuracy claim rests on the golden
+    # band of the Nightly model_sanity run.
+    flags = resolved_ms["flags"]
+    assert flags[flags.index("--tensor-parallel-size") + 1] == "8"
+    assert flags[flags.index("--distributed-timeout-seconds") + 1] == "3600"
+    assert flags[flags.index("--cpu-distributed-timeout-seconds") + 1] == "3600"
+    assert "--enable-prefix-caching" in flags
+    assert "--no-enable-prefix-caching" not in flags
+
+    golden_path = (
+        ROOT
+        / "tests"
+        / "e2e"
+        / "models"
+        / "_golden"
+        / "accuracy_minimax-m3-fp8_890p.json"
+    )
+    golden = json.loads(golden_path.read_text())
+    model_sanity = policy_doc["tiers"]["model_sanity"]["stages"]
+    stages = {stage["id"]: stage for stage in model_sanity}
+    assert stages["eval-gsm8k"]["generation"] == golden["generation"]
+
+    resolved_fs = ppu_recipe.resolve_recipe(
+        recipe, policy_path=policy, tier="fast_sanity"
+    )
+    assert resolved_fs["ppu_count"] == 8
+    assert resolved_fs["dummy_weights"] is True
+    # MoE starts at layer 3, so the override has to reach past the dense stack.
+    assert resolved_fs["layer_override"] == 4
+    assert "--load-format" in resolved_fs["flags"]
+    assert "dummy" in resolved_fs["flags"]
+    idx_ov = resolved_fs["flags"].index("--hf-overrides")
+    assert json.loads(resolved_fs["flags"][idx_ov + 1]) == {"num_hidden_layers": 4}
+
+
+def test_model_sanity_policy_selects_eight_card_dp_ep_preset() -> None:
+    base_slug = "deepseek-v4-flash"
+    slug = f"{base_slug}-dp-ep"
+    legacy_case = "deepseek-v4-mxfp4-dp-ep"
+    matrix = ppu_e2e_select.build_recipe_matrix(slug, "model_sanity")
+    (entry,) = matrix["include"]
+    recipe = ROOT / entry["recipe_path"]
+    resolved = ppu_recipe.resolve_recipe(
+        recipe,
+        policy_path=ROOT / entry["policy_path"],
+        tier="model_sanity",
+        preset=entry["preset"],
+    )
+    base = ppu_recipe.resolve_recipe(
+        recipe,
+        policy_path=POLICY_DIR / "models" / f"{base_slug}.yaml",
+        tier="model_sanity",
+    )
+    legacy = next(
+        case
+        for case in json.loads((CI_DIR / "ppu_e2e_models.json").read_text())
+        if case["key"] == legacy_case
+    )
+    assert entry["ppu_count"] == resolved["ppu_count"] == 8
+    assert entry["preset"] == resolved["preset"] == "dp_ep_low_latency"
+    assert entry["config_digest"] == resolved["config_digest"] != base["config_digest"]
+    assert set(legacy["server_env"].items()) <= set(resolved["server_env"].items())
+
+    def flags(args):
+        return {name: value for name, value, _ in ppu_recipe._parse_flag_entries(args)}
+
+    effective = flags(resolved["flags"])
+    assert "--tensor-parallel-size" not in effective
+    for key, value in flags(legacy["server_cmd"][9:]).items():
+        if key.endswith("-config"):
+            assert json.loads(effective[key]) == json.loads(value)
+        else:
+            assert effective[key] == value
+    fast_matrix = ppu_e2e_select.build_recipe_matrix("", "fast_sanity")
+    assert slug not in {item["key"] for item in fast_matrix["include"]}
+
+
 def test_resolve_and_validate_variant_overrides_and_policy_variant(
     tmp_path: Path,
 ) -> None:
@@ -1075,6 +1177,7 @@ def test_recipe_workflows_follow_security_and_shell_contracts() -> None:
         if step.get("id") == "recipe"
     )
     assert model_recipe["env"]["TIER"] == "model_sanity"
+    assert model_recipe["env"]["PRESET"] == "${{ matrix.model.preset || '' }}"
     pr_wf = yaml.safe_load(
         (ROOT / ".github" / "workflows" / "ppu-build-and-test.yaml").read_text()
     )
@@ -1488,7 +1591,8 @@ def test_checked_in_recipe_matrix_doc_is_up_to_date() -> None:
     ]
     assert "| `deepseek-v4-mxfp4` |" not in legacy_section
     assert "| `glm-5.3-mxfp4-tp4` |" not in legacy_section
-    assert "| `deepseek-v4-mxfp4-dp-ep` |" in legacy_section
+    assert "| `deepseek-v4-mxfp4-dp-ep` |" not in legacy_section
+    assert "| `deepseek-v4-int8-dp-ep` |" in legacy_section
 
 
 def test_render_matrix_cli_check_passes_and_detects_drift(

@@ -63,7 +63,12 @@ def test_control_jobs_only_execute_trusted_code(name, job_id, ref):
         for step in job["steps"]
     )
     run_steps = [step["run"] for step in job["steps"] if "run" in step]
-    assert f"python3 -m scripts.ci.ppu_ci_command {job_id}" in run_steps
+    module = (
+        "scripts.ci.ppu_pr_nightly"
+        if name == "run-ci-command.yml"
+        else "scripts.ci.ppu_ci_command"
+    )
+    assert f"python3 -m {module} {job_id}" in run_steps
     if name == "ppu-pr-ci.yaml":
         assert DEFAULT_REF_GUARD in job.get("if", checkout.get("if", "")) or (
             job_id == "report"
@@ -1680,8 +1685,8 @@ def test_recipe_model_sanity_has_one_scheduled_entry():
 @pytest.mark.parametrize(
     "event,models,enabled,legacy_cases,recipe_slugs,error",
     [
-        ("schedule", "", "true", None, "", ""),
-        ("schedule", "", "TRUE", None, "", ""),
+        ("schedule", "", "true", [], "", ""),
+        ("schedule", "", "TRUE", [], "", ""),
         ("schedule", "", "false", None, None, ""),
         ("schedule", "", "", None, None, ""),
         ("workflow_dispatch", "", "true", None, None, ""),
@@ -1789,15 +1794,6 @@ def test_accuracy_nightly_routes_selected_models(
         expected = [
             entry["key"] for entry in catalog if entry["category"] == "accuracy"
         ]
-        if event == "schedule" and recipe_enabled:
-            claimed = {
-                case_id
-                for path in (ROOT / "tests/ppu/policy/models").glob("*.yaml")
-                for case_id in yaml.safe_load(path.read_text()).get(
-                    "replaces_legacy_cases", []
-                )
-            }
-            expected = [case_id for case_id in expected if case_id not in claimed]
         assert [
             entry["model"] for entry in json.loads(legacy_matrix)["include"]
         ] == expected
@@ -1805,6 +1801,8 @@ def test_accuracy_nightly_routes_selected_models(
         assert [
             entry["model"] for entry in json.loads(legacy_matrix)["include"]
         ] == legacy_cases
+    else:
+        assert legacy_matrix == ""
     recipe = jobs["recipe-model-sanity"]
     assert "accuracy" in recipe["needs"]
     assert bool(expression(recipe["if"], context)) == (recipe_slugs is not None)
@@ -1823,22 +1821,30 @@ def test_accuracy_nightly_routes_selected_models(
     ],
 )
 def test_recipe_workflow_refuses_arbitrary_wheel_run(
-    leaf_name, pr_mode, tier, build_run, allowed
+    tmp_path, leaf_name, pr_mode, tier, build_run, allowed
 ):
     prepare = workflow(leaf_name)["jobs"]["prepare"]
     select = next(step for step in prepare["steps"] if step.get("id") == "select")
-    script = select["run"].partition("python3 scripts/ci/ppu_e2e_select.py")[0]
+    selector = tmp_path / "scripts/ci/ppu_e2e_select.py"
+    selector.parent.mkdir(parents=True)
+    selector.write_text("print('recipe_matrix={\"include\":[]}')\n")
+    output = tmp_path / "github-output"
     result = subprocess.run(
-        ["bash", "-e", "-c", script],
+        ["bash", "-e", "-o", "pipefail", "-c", select["run"]],
+        cwd=tmp_path,
         env={
             **os.environ,
             "TIER": tier,
             "PR_MODE": pr_mode,
             "BUILD_RUN_ID": build_run,
             "GITHUB_RUN_ID": "101",
+            "GITHUB_OUTPUT": str(output),
+            "MODELS": "",
+            "SINGLE_CASE_MATRIX": "",
         },
     )
     assert (result.returncode == 0) is allowed
+    assert output.exists() is allowed
 
 
 @pytest.mark.parametrize(
@@ -1949,6 +1955,14 @@ def test_recipe_retention_and_publication(
             "extra_s": 9999,
         },
     }
+    if tier == "model_sanity":
+        private_summary["timings"] = {
+            "queue_s": 2.5,
+            "cold_start_s": 10,
+            "eval_s": str(retention_root),
+            "bench_s": -1,
+            "private": str(retention_root),
+        }
     launch_result = subprocess.run(
         ["bash", "-e", "-c", runtime["run"]],
         env={
@@ -2112,6 +2126,12 @@ def test_recipe_retention_and_publication(
                 "minimum_score": 0.95,
                 "maximum_score": 0.99,
                 "gate": "pass",
+            },
+            timings={
+                "queue_s": 2.5,
+                "cold_start_s": 10,
+                "eval_s": None,
+                "bench_s": None,
             },
             baseline_completeness="baseline_established",
             micro_e2e=micro_e2e,

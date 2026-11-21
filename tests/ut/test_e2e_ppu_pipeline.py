@@ -145,6 +145,7 @@ def test_scheduled_recipe_rejects_invalid_policy_claims(
 
     monkeypatch.setattr(ppu_recipe, "REPO_ROOT", tmp_path)
     policy_dir = tmp_path / "tests/ppu/policy/models"
+    (policy_dir / "deepseek-v4-flash-dp-ep.yaml").unlink()
     path = policy_dir / "deepseek-v4-flash.yaml"
     policy = yaml.safe_load(path.read_text())
     policy["replaces_legacy_cases"] = [claim]
@@ -194,6 +195,44 @@ def test_scheduled_recipe_restores_kimi_tp8_when_the_policy_is_removed(
     selected = select.build_accuracy_matrix(_catalog(), "")["include"]
     remaining = select.scheduled_legacy_accuracy_cases(selected)
     assert "kimi-k2.6-mxfp4-tp8" in remaining
+
+
+def test_scheduled_selector_retires_minimax_once_the_recipe_is_enabled() -> None:
+    select = _load_select()
+    selected = select.build_accuracy_matrix(_catalog(), "")["include"]
+    case_ids = [entry["case_id"] for entry in selected]
+    # The flag-off schedule still lists every catalog case, so the fallback is
+    # the untouched matrix this assertion starts from.
+    assert "minimax-m3-fp8" in case_ids
+    claimed = {
+        case_id
+        for path in (ROOT / "tests/ppu/policy/models").glob("*.yaml")
+        for case_id in yaml.safe_load(path.read_text()).get("replaces_legacy_cases", [])
+    }
+    assert "minimax-m3-fp8" in claimed
+    assert select.scheduled_legacy_accuracy_cases(selected) == [
+        case_id for case_id in case_ids if case_id not in claimed
+    ]
+
+
+def test_scheduled_recipe_dp_ep_removes_only_its_legacy_case(
+    tmp_path, monkeypatch
+) -> None:
+    select = _load_select()
+    selected = select.build_accuracy_matrix(_catalog(), "")["include"]
+    remaining = select.scheduled_legacy_accuracy_cases(selected)
+
+    shutil.copytree(ROOT / "tests/ppu", tmp_path / "tests/ppu")
+    policy_dir = tmp_path / "tests/ppu/policy/models"
+    (policy_dir / "deepseek-v4-flash-dp-ep.yaml").unlink()
+    monkeypatch.setattr(select, "REPO_ROOT", tmp_path)
+    import ppu_recipe
+
+    monkeypatch.setattr(ppu_recipe, "REPO_ROOT", tmp_path)
+    before_dp_ep = select.scheduled_legacy_accuracy_cases(selected)
+    retired = "deepseek-v4-mxfp4-dp-ep"
+    assert retired in before_dp_ep
+    assert remaining == [key for key in before_dp_ep if key != retired]
 
 
 @pytest.mark.parametrize(
