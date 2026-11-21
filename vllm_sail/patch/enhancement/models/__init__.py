@@ -30,7 +30,11 @@ Modules, and why each is import-on-install like the rest of the framework:
   is rebound by ``bugfix/glm5_next_int8_mla_dequant`` through its ``_CONSUMERS``
   list.
 * ``kimi_k3`` — quantized routed up-projection support for the latent-MoE
-  tail's fused tiers.
+  tail's fused tiers, plus the tensor-parallel sum of the shared-expert partial
+  that the eager MegaMoE path drops when sequence parallelism is off.
+* ``kimi_k3_dsa_indexer`` — 810E-class targets for the K3.1 DSA indexer:
+  software e4m3 encoder below capability 8.9 and the int8 mqa_logits path
+  when FP8 MMA is missing.
 * ``llama4`` — torch.compile on the custom router (+1).
 * ``minimax_m3`` — retain ordinary MoE finalize on PPU before NVIDIA imports.
 * ``minimax_m3_msa`` — route MiniMax M3 indexer + sparse attend to the SAIL
@@ -55,9 +59,11 @@ from vllm_sail.patch.enhancement.models import (
     deepseek_v41_indexer,  # noqa: F401
     deepseek_v41_mega_mhc,  # noqa: F401
     glm5_next,  # noqa: F401
+    glm5_next_indexer,  # noqa: F401
     glm5_next_mtp,  # noqa: F401
     kimi_k25_processor,  # noqa: F401
     kimi_k3,  # noqa: F401
+    kimi_k3_dsa_indexer,  # noqa: F401
     llama4,  # noqa: F401
     minimax_m3,  # noqa: F401
     minimax_m3_msa,  # noqa: F401
