@@ -614,11 +614,11 @@ def wrap_layer_forward(original, platform):
 
 def wrap_layer_pack(original):
     @functools.wraps(original, updated=())
-    def pack(self, mean, table, regions):
+    def pack(self, mean, block_table, regions):
         c = _LAYER_CONTEXT.get()
         if c is not None:
-            return c.pack(original, self, mean, table, regions)
-        return original(self, mean, table, regions)
+            return c.pack(original, self, mean, block_table, regions)
+        return original(self, mean, block_table, regions)
 
     return pack
 
