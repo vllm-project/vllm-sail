@@ -61,7 +61,8 @@ def _profile_forward(original, pd_type, selected_backend="default"):
             return original(*args, **kwargs)
         nvtx.range_push(label)
         try:
-            return original(*args, **kwargs)
+            with nvtx.step5_op_phase(pd_type):
+                return original(*args, **kwargs)
         finally:
             nvtx.range_pop()
 

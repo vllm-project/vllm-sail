@@ -32,6 +32,7 @@ from vllm.models.step5.nvidia.flashinfer_sparse import Step5FlashInferSparse
 from vllm.models.step5.nvidia.sparse_attention import Step5DSAAttentionBackend
 from vllm.platforms import current_platform
 
+from vllm_sail import envs
 from vllm_sail.models.step5.ops import soft_fp8
 from vllm_sail.patch.bodies import bind_body
 from vllm_sail.patch.utils import patch
@@ -196,12 +197,19 @@ def _use_triton_scorer() -> bool:
 )
 def _init(self, device):
     if not _use_triton_scorer():
-        return _upstream_init(self, device)
+        result = _upstream_init(self, device)
+        if envs.VLLM_SAIL_NVTX_PROFILE:
+            from vllm_sail.profiling.step5_sparse import instrument_adapter
+            instrument_adapter(self)
+        return result
     _ppu_init(self, device)
     if soft_fp8.indexer_fp16():
         # Upstream's scorer (and its performance wrapper) asserts E4M3 bytes;
         # this one also scores FP16 pages.
         self._logits = soft_fp8.paged_mqa_logits_sm90
+    if envs.VLLM_SAIL_NVTX_PROFILE:
+        from vllm_sail.profiling.step5_sparse import instrument_adapter
+        instrument_adapter(self)
 
 
 @patch(

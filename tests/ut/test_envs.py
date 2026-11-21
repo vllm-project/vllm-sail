@@ -29,6 +29,7 @@ BOOL_DEFAULTS = {
     "DISABLE_MEGA_MHC": False,
     "USE_TRITON_INT8_QUANT": True,
     "ENABLE_FP8_TO_INT8": False,
+    "STEP5_JOINT_PREPARE": False,
     "STEP5_DSA_SELECTOR_PPU": False,
     "STEP5_DSA_PREFILL_PPU": False,
     "STEP5_DSA_PREFILL_BATCH_ATTENTION": True,
@@ -45,6 +46,7 @@ BOOL_DEFAULTS = {
 }
 INT_DEFAULTS = {
     "KPOOL_MAX_DENSE_POOLS": 1 << 21,
+    "STEP5_DSA_SCORE_MAX_BYTES": 1 << 30,
 }
 BACKENDS = ("MOE_BACKEND", "DENSE_BACKEND")
 # String env vars with a non-None default.
@@ -52,6 +54,7 @@ STRING_DEFAULTS = {
     "KPOOL_DECODE_LOGITS": "non_paged",
     "MEGA_MOE_MMA_TYPE": "fp8xmxfp4",
     "STEP5_DSA_SCORES": "v0",
+    "STEP5_DSA_SCORE_DECODE": "v0",
 }
 
 
@@ -59,6 +62,80 @@ STRING_DEFAULTS = {
 def clean_plugin_environment(monkeypatch: pytest.MonkeyPatch) -> None:
     for name in dir(envs):
         monkeypatch.delenv(name, raising=False)
+
+
+@pytest.mark.parametrize(
+    "name,raw,expected",
+    [
+        ("VLLM_SAIL_STEP5_DSA_SCORES", " V3 ", "v3"),
+        ("VLLM_SAIL_STEP5_DSA_SCORE_DECODE", " V2 ", "v2"),
+        ("VLLM_SAIL_STEP5_DSA_SCORE_MAX_BYTES", "0", 0),
+        ("VLLM_SAIL_STEP5_JOINT_PREPARE", "1", True),
+        ("VLLM_SAIL_STEP5_DSA_SELECTOR_PPU", "1", True),
+        ("VLLM_SAIL_STEP5_DSA_PREFILL_PPU", "1", True),
+        ("VLLM_SAIL_STEP5_DSA_PREFILL_BACKEND", "NATIVE", "native"),
+        ("VLLM_SAIL_STEP5_DSA_PREFILL_BATCH_ATTENTION", "0", False),
+        ("VLLM_STEP5_INDEXER_FP8_AS_FP16", "1", True),
+    ],
+)
+def test_step5_settings_resolve_current_environment_on_each_read(
+    monkeypatch, name, raw, expected
+):
+    default = getattr(envs, name)
+    assert default != expected
+    names = (name, *envs._aliases.get(name, ()))
+    for value in (raw, None, raw):
+        if value is None:
+            monkeypatch.delenv(name)
+        else:
+            monkeypatch.setenv(name, value)
+        current = default if value is None else expected
+        for candidate in names:
+            assert getattr(envs, candidate) == current
+            assert envs.is_set(candidate) is (value is not None)
+        assert envs.snapshot()[name] == current
+
+
+@pytest.mark.parametrize("raw,expected", [(None, "v2"), ("", "v0"), ("V1", "v1")])
+def test_step5_lazy_reads_preserve_alias_precedence_and_explicit_empty(
+    monkeypatch, raw, expected
+):
+    sail = "VLLM_SAIL_STEP5_DSA_SCORES"
+    ppu = "VLLM_PPU_STEP5_DSA_SCORES"
+    monkeypatch.setenv(ppu, "v2")
+    if raw is not None:
+        monkeypatch.setenv(sail, raw)
+    assert getattr(envs, sail) == getattr(envs, ppu) == expected
+    assert envs.is_set(sail) and envs.is_set(ppu)
+    assert envs.snapshot()[sail] == expected
+    monkeypatch.delenv(sail, raising=False)
+    assert getattr(envs, sail) == getattr(envs, ppu) == "v2"
+    monkeypatch.delenv(ppu)
+    assert getattr(envs, sail) == getattr(envs, ppu) == "v0"
+    assert not envs.is_set(sail) and not envs.is_set(ppu)
+    assert envs.snapshot()[sail] == "v0"
+
+
+@pytest.mark.parametrize(
+    "name,raw",
+    [
+        ("VLLM_SAIL_STEP5_DSA_SCORES", "v4"),
+        ("VLLM_PPU_STEP5_DSA_SCORE_DECODE", "v3"),
+        ("VLLM_SAIL_STEP5_DSA_SCORE_MAX_BYTES", "-1"),
+        ("VLLM_SAIL_STEP5_DSA_PREFILL_BACKEND", "invalid"),
+    ],
+)
+def test_invalid_step5_value_is_checked_only_when_read(monkeypatch, name, raw):
+    monkeypatch.setenv(name, raw)
+    assert envs.VLLM_SAIL_USE_DEEPSELECT is True
+    with pytest.raises(ValueError, match=name):
+        getattr(envs, name)
+    monkeypatch.delenv(name)
+    assert (
+        getattr(envs, name)
+        == envs.environment_variables[envs._canonical_names.get(name, name)]()
+    )
+    assert envs.VLLM_SAIL_STEP5_DSA_SCORES == "v0"
 
 
 def test_defaults_and_canonical_snapshot() -> None:
@@ -92,16 +169,31 @@ def test_mega_moe_mma_type_is_lazy_and_checks_choices(monkeypatch):
 
 
 @pytest.mark.parametrize("prefix", ["VLLM_SAIL", "VLLM_PPU"])
-def test_step5_score_modes_are_lazy_and_check_choices(monkeypatch, prefix):
-    sail = "VLLM_SAIL_STEP5_DSA_SCORES"
-    ppu = "VLLM_PPU_STEP5_DSA_SCORES"
+@pytest.mark.parametrize(
+    "suffix,modes",
+    [
+        ("SCORES", ("v0", "v1", "v2", "v3")),
+        ("SCORE_DECODE", ("v0", "v1", "v2")),
+    ],
+)
+def test_step5_score_modes_are_lazy_and_check_choices(
+    monkeypatch, prefix, suffix, modes
+):
+    sail = "VLLM_SAIL_STEP5_DSA_" + suffix
+    ppu = "VLLM_PPU_STEP5_DSA_" + suffix
+    name = prefix + "_STEP5_DSA_" + suffix
     assert getattr(envs, sail) == getattr(envs, ppu) == "v0"
-    for mode in ("v0", "v1", "v2"):
-        monkeypatch.setenv(prefix + "_STEP5_DSA_SCORES", f" {mode.upper()} ")
+    for mode in modes:
+        monkeypatch.setenv(name, f" {mode.upper()} ")
         assert getattr(envs, sail) == getattr(envs, ppu) == mode
-    monkeypatch.setenv(prefix + "_STEP5_DSA_SCORES", "1")
-    with pytest.raises(ValueError, match="v0, v1, v2"):
-        getattr(envs, sail)
+    for invalid in ("1", "invalid", "v4"):
+        monkeypatch.setenv(name, invalid)
+        with pytest.raises(ValueError, match=", ".join(modes)):
+            getattr(envs, sail)
+    if suffix == "SCORE_DECODE":
+        monkeypatch.setenv(name, "v3")
+        with pytest.raises(ValueError, match=name):
+            getattr(envs, sail)
     monkeypatch.setenv(ppu, "v2")
     monkeypatch.setenv(sail, "")
     assert getattr(envs, sail) == "v0"
@@ -138,6 +230,9 @@ def test_prefill_backend_lazy_choices_and_precedence(monkeypatch, prefix):
     [
         "STEP5_FUSED_NORM",
         "STEP5_DSA_SCORE_COMPACT",
+        "STEP5_DSA_SCORE_GROUPED",
+        "STEP5_DSA_SCORE_DIRECT",
+        "STEP5_DSA_SCORE_DIRECT_MTP",
         "STEP5_DSA_SCORE_MQA",
         "STEP5_DSA_SCORE_MQA_BQ",
         "STEP5_DSA_PREFILL_MULTI_QUERY",

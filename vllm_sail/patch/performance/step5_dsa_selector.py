@@ -12,6 +12,7 @@ import sys
 from vllm.platforms import current_platform
 from vllm_sail import envs
 from vllm_sail.patch.utils import patch
+from vllm_sail.step5_sparse_cases import profiled
 
 _TARGET = "vllm.models.step5.nvidia.ops.sparse_indexer"
 _REASON = "Step5 selector_v2 exact FP32 radix candidate reusing stabilization; off by default, chosen by UT performance."
@@ -31,6 +32,7 @@ def install():
         raise
     original = module.select_regions
 
+    @profiled("topk")
     @functools.wraps(original)
     def select(scores, current, topk, backend="auto", **kwargs):
         if (not envs.VLLM_SAIL_STEP5_DSA_SELECTOR_PPU or not current_platform.is_ppu()

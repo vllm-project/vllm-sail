@@ -39,7 +39,7 @@ def is_enabled() -> bool:
 def install() -> None:
     """Install NVTX instrumentation patches if requested. Idempotent."""
     global _installed
-    if _installed or not is_enabled():
+    if not is_enabled():
         return
 
     # Norm installs on its own; drift in other instrumentation or a missing PyPI
@@ -47,6 +47,14 @@ def install() -> None:
     from vllm_sail.profiling.step5_norm import install as install_norm
 
     install_norm()
+    try:
+        from vllm_sail.profiling.step5_sparse import install as install_sparse
+
+        install_sparse()
+    except Exception as exc:
+        logger.warning("Step5 sparse profiling could not be installed: %s", exc)
+    if _installed:
+        return
 
     try:
         import nvtx  # noqa: F401

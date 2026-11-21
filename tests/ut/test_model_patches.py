@@ -26,7 +26,7 @@ import sys
 
 import pytest
 
-from tests.support.source import assert_accepts_upstream_keywords
+from tests.support.source import PACKAGE_ROOT, assert_accepts_upstream_keywords
 
 MODELS_PATCH_DIR = (
     pathlib.Path(__file__).parents[2] / "vllm_sail" / "patch" / "enhancement" / "models"
@@ -660,7 +660,7 @@ def test_step5_fp16_switch_selects_triton_scorer_off_ppu(
 
 def _load_step5_soft_bodies(names, namespace):
     """Run the real production bodies; CPU numeric tests import no device module."""
-    path = MODELS_PATCH_DIR.parents[2] / "models/step5/ops/soft_fp8.py"
+    path = PACKAGE_ROOT / "vllm_sail/models/step5/ops/soft_fp8.py"
     tree = ast.parse(path.read_text(), filename=str(path))
     bodies = [
         node
@@ -797,6 +797,501 @@ def test_step5_kernel_launch_modes_are_lazy_on_cpu(monkeypatch, ppu, half):
         assert args[0].dtype == ("byte" if not half and ppu else query.dtype)
         assert args[1] is main_cache
         assert kw == {"sentinel": 3}
+
+
+def _joint_launch_fixture(*, tokens=32, ppu=True, capability=(8, 9)):
+    from types import SimpleNamespace
+
+    from vllm_sail import envs
+
+    class Tensor:
+        def __init__(self, dtype, shape):
+            self.dtype, self.shape = dtype, shape
+            self.ndim, self.is_cuda, self.device = len(shape), True, "cuda:0"
+            self.contiguous = True
+            self.strides = []
+            size = 1
+            for extent in reversed(shape):
+                self.strides.insert(0, size)
+                size *= extent
+
+        def stride(self, index):
+            return self.strides[index]
+
+        def is_contiguous(self):
+            return self.contiguous
+
+        def view(self, dtype):
+            return Tensor(dtype, self.shape)
+
+    class Kernel:
+        def __getitem__(self, grid):
+            return lambda *args, **kw: (grid, args, kw)
+
+    namespace = dict(
+        torch=SimpleNamespace(
+            Tensor=Tensor,
+            float16="half",
+            bfloat16="bf16",
+            int64="int64",
+            float8_e4m3fn="fp8",
+            uint8="byte",
+            float32="float",
+            cuda=SimpleNamespace(get_device_capability=lambda device: capability),
+        ),
+        current_platform=SimpleNamespace(is_ppu=lambda: ppu),
+        envs=envs,
+    )
+    _load_step5_soft_bodies(["ByteFP8Launch"], namespace)
+    path = PACKAGE_ROOT / "vllm_sail/models/step5/ops/joint_prepare.py"
+    tree = ast.parse(path.read_text(), filename=str(path))
+    body = next(n for n in tree.body if isinstance(n, ast.ClassDef))
+    exec(
+        compile(ast.Module(body=[body], type_ignores=[]), str(path), "exec"), namespace
+    )
+    args = [None] * 60
+    shapes = {
+        0: ("bf16", (tokens, 1024)),
+        1: ("bf16", (tokens, 256)),
+        2: ("bf16", (tokens, 4)),
+        3: ("bf16", (256,)),
+        4: ("bf16", (256,)),
+        5: ("bf16", (256,)),
+        6: ("bf16", (65544, 32)),
+        7: ("int64", (tokens,)),
+        8: ("fp8", (1, tokens, 8, 256)),
+        9: ("bf16", (tokens, 1, 256)),
+        10: ("float", (1, tokens, 8)),
+        35: ("bf16", (tokens, 3456)),
+        36: ("float", (192,)),
+        37: ("float", (192,)),
+        38: ("bf16", (65544, 64)),
+        39: ("int64", (tokens,)),
+        40: ("bf16", (tokens, 3072)),
+        41: ("bf16", (tokens, 192)),
+        42: ("bf16", (tokens, 192)),
+        43: ("fp8", (tokens + 2, 64, 1, 192)),
+        44: ("fp8", (tokens + 2, 64, 1, 192)),
+        57: ("float", ()),
+        58: ("float", ()),
+    }
+    for index, (dtype, shape) in shapes.items():
+        args[index] = Tensor(dtype, shape)
+    args[16:35] = [
+        False,
+        0,
+        0,
+        0,
+        8,
+        0,
+        8,
+        1024,
+        256,
+        4,
+        4,
+        8,
+        1,
+        tokens,
+        32,
+        32,
+        1e-5,
+        1.0,
+        False,
+    ]
+    args[45:57] = [16, 1, 3456, 64, 64, tokens, 64, 12288, 192, 192, 1e-5, 1.0]
+    args[59] = True
+    launch = namespace["JointPrepareLaunch"](Kernel(), Kernel(), (8,))
+    return launch, args
+
+
+@pytest.mark.parametrize("tokens", [32, 64])
+def test_joint_switch_is_lazy_and_only_changes_warps(monkeypatch, tokens):
+    monkeypatch.delenv("VLLM_SAIL_STEP5_JOINT_PREPARE", raising=False)
+    monkeypatch.delenv("VLLM_PPU_STEP5_JOINT_PREPARE", raising=False)
+    launch, args = _joint_launch_fixture(tokens=tokens)
+    run = launch[(tokens, 12)]
+    for enabled in (0, 1, 0, 1):
+        monkeypatch.setenv("VLLM_SAIL_STEP5_JOINT_PREPARE", str(enabled))
+        grid, actual, kwargs = run(*args, num_warps=4, enable_fp_fusion=False)
+        assert grid == (tokens, 12)
+        assert actual[8].dtype == "byte"
+        assert all(actual[i] is args[i] for i in range(60) if i != 8)
+        assert kwargs == {"num_warps": 8 if enabled else 4, "enable_fp_fusion": False}
+
+
+@pytest.mark.parametrize(
+    "invalid",
+    [
+        "platform",
+        "capability",
+        "tokens",
+        "grid",
+        "count",
+        "kwargs",
+        "csa",
+        "eps",
+        "rotary",
+        "half",
+        "dtype",
+        "device",
+        "stride",
+        "outputs",
+        "cache",
+        "cache_stride",
+        "rope",
+        "slots",
+    ],
+)
+def test_joint_unvalidated_contract_keeps_baseline(monkeypatch, invalid):
+    monkeypatch.setenv("VLLM_SAIL_STEP5_JOINT_PREPARE", "1")
+    launch, args = _joint_launch_fixture(
+        ppu=invalid != "platform",
+        capability=(8, 0) if invalid == "capability" else (8, 9),
+    )
+    grid, options = (32, 12), dict(num_warps=4, enable_fp_fusion=False)
+    if invalid == "tokens":
+        grid = (16, 12)
+    elif invalid == "grid":
+        grid = (32, 14)
+    elif invalid == "count":
+        args.append(None)
+    elif invalid == "kwargs":
+        options["debug"] = True
+    elif invalid == "csa":
+        args[16] = True
+    elif invalid == "eps":
+        args[32] = 1e-6
+    elif invalid == "rotary":
+        args[48] = 192
+    elif invalid == "half":
+        args[8].dtype = "half"
+    elif invalid == "dtype":
+        args[36].dtype = "bf16"
+    elif invalid == "device":
+        args[1].device = "cuda:1"
+    elif invalid == "stride":
+        args[23] += 1
+    elif invalid == "outputs":
+        args[40].contiguous = False
+    elif invalid == "cache":
+        args[44].dtype = "byte"
+    elif invalid == "cache_stride":
+        args[52] += 1
+    elif invalid == "rope":
+        args[38].shape = (65544, 192)
+    elif invalid == "slots":
+        args[50] = 16
+    assert not launch._eligible(grid, tuple(args), options)
+    _, actual, kwargs = launch[grid](*args, **options)
+    assert kwargs == options
+    assert actual[43] is args[43] and actual[44] is args[44]
+
+
+def test_joint_launch_errors_propagate(monkeypatch):
+    monkeypatch.setenv("VLLM_SAIL_STEP5_JOINT_PREPARE", "1")
+    launch, args = _joint_launch_fixture()
+
+    class Broken:
+        def __getitem__(self, grid):
+            def run(*args, **kwargs):
+                raise RuntimeError("JIT failure")
+
+            return run
+
+    launch.ppu = Broken()
+    with pytest.raises(RuntimeError, match="JIT failure"):
+        launch[(32, 12)](*args, num_warps=4, enable_fp_fusion=False)
+
+
+def _direct_launch_fixture(
+    monkeypatch, *, ppu=True, capability=(8, 9), guarded_mtp=None
+):
+    from types import SimpleNamespace
+
+    from vllm_sail import envs
+
+    class Tensor:
+        def __init__(self, dtype, shape, strides):
+            self.dtype, self.shape, self.strides = dtype, shape, strides
+            self.ndim, self.is_cuda, self.device = len(shape), True, "cuda:0"
+
+        def stride(self, index):
+            return self.strides[index]
+
+        def view(self, dtype):
+            return Tensor(dtype, self.shape, self.strides)
+
+    class Kernel:
+        def __init__(self, name):
+            self.name = name
+
+        def __getitem__(self, grid):
+            return lambda *args, **kw: (self.name, grid, args, kw)
+
+    namespace = dict(
+        torch=SimpleNamespace(
+            Tensor=Tensor,
+            float16="half",
+            float8_e4m3fn="fp8",
+            uint8="byte",
+            float32="float",
+            cuda=SimpleNamespace(get_device_capability=lambda device: capability),
+        ),
+        current_platform=SimpleNamespace(is_ppu=lambda: ppu),
+        envs=envs,
+    )
+    _load_step5_soft_bodies(["ByteFP8Launch", "DirectScoresLaunch"], namespace)
+    cls = namespace["DirectScoresLaunch"]
+    monkeypatch.setattr(cls, "_resident_kernel", staticmethod(lambda: Kernel("direct")))
+    launch = cls(Kernel("upstream"), Kernel("software"), (0,), guarded_mtp=guarded_mtp)
+    args = [object() for _ in range(30)]
+    args[:3] = [
+        Tensor("fp8", (4, 3, 8, 256), (6144, 2048, 256, 1)),
+        Tensor("float", (4, 3, 8), (24, 8, 1)),
+        Tensor("byte", (40, 8, 256), (2048, 256, 1)),
+    ]
+    args[25:] = [8, 128, 2, 3, 2]
+    return launch, args, cls
+
+
+def _recorded_direct_fixture(monkeypatch):
+    launch, args, cls = _direct_launch_fixture(monkeypatch)
+    tensor = type(args[0])
+    args[:3] = [
+        tensor("fp8", (64, 1, 8, 256), (2048, 131072, 256, 1)),
+        tensor("float", (64, 1, 8), (8, 512, 1)),
+        tensor("byte", (64530, 8, 256), (1179648, 256, 1)),
+    ]
+    args[12:] = [
+        2048,
+        131072,
+        8,
+        512,
+        16384,
+        16384,
+        1,
+        1,
+        64530,
+        8,
+        1179648,
+        131072,
+        131072,
+        8,
+        128,
+        1,
+        1,
+        4,
+    ]
+    return launch, args, cls
+
+
+def test_decode_modes_preserve_recorded_tuning_and_trace_workers(monkeypatch):
+    """Lazy v1 retains r21 tuning; v0 and v2 never acquire its launch overrides."""
+    launch, args, cls = _recorded_direct_fixture(monkeypatch)
+    original = tuple(args)
+    submitted = []
+
+    def submit(call, actual, kwargs, backend, source_args=None):
+        submitted.append((backend, source_args))
+        return call(*actual, **kwargs)
+
+    monkeypatch.setattr(cls, "_submit", staticmethod(submit))
+    run = launch[(1, 64)]
+    for mode in ("v0", "v1", "v2", "v1", "v0"):
+        monkeypatch.setenv("VLLM_SAIL_STEP5_DSA_SCORE_DECODE", mode)
+        name, grid, actual, kwargs = run(
+            *args, num_warps=8, num_stages=3, enable_fp_fusion=False
+        )
+        tuned = mode == "v1"
+        assert name == ("software" if mode == "v0" else "direct")
+        assert grid == ((192,) if tuned else (1, 64))
+        assert actual[27] == (3 if tuned else 1)
+        assert kwargs == dict(
+            num_warps=4 if tuned else 8,
+            num_stages=1 if tuned else 3,
+            enable_fp_fusion=False,
+            **(dict(HOIST=True, SPLIT=True) if tuned else {}),
+            **(dict(GUARD_MTP=True) if mode == "v2" else {}),
+        )
+        assert (
+            submitted[-1][0]
+            == {"v0": "direct_baseline", "v1": "direct_resident", "v2": "direct_mtp"}[
+                mode
+            ]
+        )
+        if mode != "v0":
+            assert submitted[-1][1][27] == (3 if tuned else 1)
+        assert tuple(args) == original
+        assert all(actual[i] is args[i] for i in range(1, 30) if i != 27)
+
+
+@pytest.mark.parametrize("index", [12, 13, 14, 15, 16, 17, 20, 21, 22, 23, 24])
+def test_decode_tuning_does_not_extend_unmeasured_layouts(monkeypatch, index):
+    monkeypatch.setenv("VLLM_SAIL_STEP5_DSA_SCORE_DECODE", "v1")
+    launch, args, _ = _recorded_direct_fixture(monkeypatch)
+    args[index] += 1
+    name, grid, actual, kwargs = launch[(1, 64)](*args, num_warps=8, num_stages=3)
+    assert name == "direct" and grid == (64,) and actual[27] == 1
+    assert kwargs == dict(num_warps=8, num_stages=3)
+
+
+@pytest.mark.parametrize("mode", ["v0", "v1", "v2", "v3"])
+def test_decode_mode_is_lazy_and_independent_of_prefill(monkeypatch, mode):
+    monkeypatch.setenv("VLLM_SAIL_STEP5_DSA_SCORES", mode)
+    monkeypatch.setenv("VLLM_SAIL_STEP5_DSA_SCORE_MAX_BYTES", "0")
+    launch, args, _ = _direct_launch_fixture(monkeypatch)
+    run = launch[(2, 12)]
+    for decode in ("v0", "v1", "v2", "v1", "v0"):
+        monkeypatch.setenv("VLLM_SAIL_STEP5_DSA_SCORE_DECODE", decode)
+        name, grid, actual, kwargs = run(*args, enable_fp_fusion=False, num_warps=4)
+        resident = decode == "v1"
+        assert name == ("direct" if resident else "software")
+        assert grid == ((24,) if resident else (2, 12))
+        assert actual[0].dtype == "byte"
+        assert all(a is b for a, b in zip(actual[1:], args[1:], strict=True))
+        assert kwargs == {"enable_fp_fusion": False, "num_warps": 4}
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        "non_ppu",
+        "sm80",
+        "sm90",
+        "fp16",
+        "mean_half",
+        "weights_half",
+        "heads4",
+        "heads16",
+        "tile",
+        "workers",
+        "groups",
+        "query_len",
+        "q_stride",
+        "mean_stride",
+        "cpu",
+        "device",
+        "dimension",
+        "arity",
+    ],
+)
+@pytest.mark.parametrize("mode", ["v1", "v2"])
+def test_direct_unsupported_contract_falls_back(monkeypatch, change, mode):
+    monkeypatch.setenv("VLLM_SAIL_STEP5_DSA_SCORE_DECODE", mode)
+    launch, args, _ = _direct_launch_fixture(
+        monkeypatch,
+        ppu=change != "non_ppu",
+        capability={"sm80": (8, 0), "sm90": (9, 0)}.get(change, (8, 9)),
+    )
+    if change == "fp16":
+        args[0].dtype = "half"
+    elif change == "mean_half":
+        args[2].dtype = "half"
+    elif change == "weights_half":
+        args[1].dtype = "half"
+    elif change in ("heads4", "heads16", "tile", "workers", "groups", "query_len"):
+        index, value = {
+            "heads4": (25, 4),
+            "heads16": (25, 16),
+            "tile": (26, 64),
+            "workers": (27, 1),
+            "groups": (28, 1),
+            "query_len": (29, 3),
+        }[change]
+        args[index] = value
+    elif change == "q_stride":
+        args[0].strides = (6144, 2048, 512, 1)
+    elif change == "mean_stride":
+        args[2].strides = (2048, 512, 1)
+    elif change == "cpu":
+        args[0].is_cuda = False
+    elif change == "device":
+        args[2].device = "cuda:1"
+    elif change == "dimension":
+        args[0].shape = (4, 3, 8, 128)
+    elif change == "arity":
+        args.pop()
+    name, grid, _, _ = launch[(2, 12)](*args)
+    assert name == ("upstream" if change == "non_ppu" else "software")
+    assert grid == (2, 12)
+
+
+@pytest.mark.parametrize("override", [None, False, True])
+@pytest.mark.parametrize("requests", [7, 8])
+def test_decode_mtp_mode_and_offline_override_keep_geometry_gates(
+    monkeypatch, override, requests
+):
+    """One launcher selects all decode modes; offline overrides cannot bypass v0."""
+    launch, args, _ = _direct_launch_fixture(monkeypatch, guarded_mtp=override)
+    args[0].shape = (requests * 4, 1, 8, 256)
+    args[1].shape = (requests * 4, 1, 8)
+    args[23], args[28], args[29] = 131072, 1, 4
+    grid = (2, requests * 4)
+    run = launch[grid]
+    for mode in ("v0", "v1", "v2", "v1", "v0"):
+        monkeypatch.setenv("VLLM_SAIL_STEP5_DSA_SCORE_DECODE", mode)
+        guarded = (mode == "v2") if override is None else override
+        eligible = mode != "v0" and (not guarded or requests == 8)
+        name, actual_grid, _, kwargs = run(*args, num_warps=4)
+        assert name == ("direct" if eligible else "software")
+        assert actual_grid == (
+            (grid[0] * grid[1],) if eligible and not guarded else grid
+        )
+        assert kwargs == (
+            {"num_warps": 4, "GUARD_MTP": True}
+            if eligible and guarded
+            else {"num_warps": 4}
+        )
+
+
+@pytest.mark.parametrize("requests", [1, 7, 8, 16, 17, 32])
+@pytest.mark.parametrize("query_len", [1, 2, 3, 4])
+@pytest.mark.parametrize("groups,capacity", [(1, 8191), (1, 131072), (2, 131072)])
+def test_direct_guarded_mtp_falls_back_to_original_without_device_reads(
+    monkeypatch, requests, query_len, groups, capacity
+):
+    """Unproven geometries use the original path without reading seq/slots or attempting a second launch."""
+    monkeypatch.setenv("VLLM_SAIL_STEP5_DSA_SCORE_DECODE", "v2")
+    launch, args, _ = _direct_launch_fixture(monkeypatch)
+    tokens = requests * query_len
+    args[0].shape = (tokens, groups, 8, 256)
+    args[1].shape = (tokens, groups, 8)
+    args[23], args[28], args[29] = capacity, groups, query_len
+    grid = (2, tokens * groups)
+    name, actual_grid, actual, kwargs = launch[grid](*args, enable_fp_fusion=False)
+    eligible = (
+        requests in (8, 16) and query_len == 4 and groups == 1 and capacity >= 8192
+    )
+    assert name == ("direct" if eligible else "software")
+    assert actual_grid == grid
+    assert actual[0].dtype == "byte"
+    assert all(a is b for a, b in zip(actual[1:], args[1:], strict=True))
+    assert kwargs == (
+        {"enable_fp_fusion": False, "GUARD_MTP": True}
+        if eligible
+        else {"enable_fp_fusion": False}
+    )
+
+
+def test_direct_jit_error_propagates_without_retry(monkeypatch):
+    monkeypatch.setenv("VLLM_SAIL_STEP5_DSA_SCORE_DECODE", "v1")
+    launch, args, cls = _direct_launch_fixture(monkeypatch)
+
+    def fail():
+        raise RuntimeError("direct JIT failure")
+
+    monkeypatch.setattr(cls, "_resident_kernel", staticmethod(fail))
+    with pytest.raises(RuntimeError, match="direct JIT failure"):
+        launch[(2, 12)](*args)
+    tree = ast.parse(
+        (
+            PACKAGE_ROOT / "vllm_sail/patch/enhancement/models/step5_soft_fp8.py"
+        ).read_text()
+    )
+    assert any(
+        isinstance(node, ast.Attribute) and node.attr == "DirectScoresLaunch"
+        for node in ast.walk(tree)
+    )
 
 
 def _mock_is_ppu(platform, value: bool):

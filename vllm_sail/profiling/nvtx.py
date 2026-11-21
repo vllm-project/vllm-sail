@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import functools
 from collections.abc import Callable
+from contextlib import contextmanager
 from typing import Any, TypeVar
 
 from vllm.logger import init_logger
@@ -134,7 +135,7 @@ def step5_sparse_label(
         f"{proxy_prefix}_weights",
         f"{proxy_prefix}_z",
     )
-    values = dict(zip(names, args))
+    values = dict(zip(names, args, strict=False))
     values.update(kwargs)
     fields = [
         f"[FW_SPARSE] op:_forward_{pd_type}",
@@ -157,7 +158,10 @@ def step5_sparse_label(
                 for key, item in value.items():
                     if type(key) not in (str, int):
                         continue
-                    if isinstance(item, dict) or getattr(item, "shape", None) is not None:
+                    if (
+                        isinstance(item, dict)
+                        or getattr(item, "shape", None) is not None
+                    ):
                         tensor_field(f"{name}.{key}", item, depth + 1)
             finally:
                 active_dicts.remove(id(value))
@@ -184,6 +188,14 @@ def step5_sparse_label(
     if pd_type == "decode":
         tensor_field("gate", values.get("gate"))
     return ",".join(fields)
+
+
+@contextmanager
+def step5_op_phase(pd_type):
+    from vllm_sail.profiling.step5_sparse import phase
+
+    with phase(pd_type):
+        yield
 
 
 def prof_iter(iteration: int) -> None:

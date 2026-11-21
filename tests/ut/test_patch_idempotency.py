@@ -241,7 +241,9 @@ def _register_stubs(monkeypatch: pytest.MonkeyPatch, counter: Counter[str]) -> N
     for name, module in stubs.items():
         monkeypatch.setitem(sys.modules, name, module)
         parent, _, child = name.rpartition(".")
-        monkeypatch.setattr(sys.modules.get(parent, vllm_sail), child, module, raising=False)
+        monkeypatch.setattr(
+            sys.modules.get(parent, vllm_sail), child, module, raising=False
+        )
 
 
 def test_register_out_of_tree_runs_each_phase_once(

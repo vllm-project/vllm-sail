@@ -23,7 +23,9 @@ import sys
 from vllm.platforms import current_platform
 
 from vllm_sail import envs
+from vllm_sail.models.step5.ops import score_pipeline
 from vllm_sail.patch.utils import patch
+from vllm_sail.step5_sparse_cases import profiled
 
 _MODULE = "vllm.models.step5.nvidia.ops.sparse_indexer_scores"
 _CONSUMERS = ("vllm.models.step5.nvidia.flashinfer_sparse",)
@@ -32,7 +34,7 @@ _REASON = (
     "Step5's indexer scorer launches one block per (row, region tile), which "
     "reloads the row's query tile and gate once per tile -- 258 times on the "
     "production shape. The plugin keeps blocks resident per row instead "
-    "(3.188 -> 2.070 ms on ZW-M890P). Opt-in via VLLM_SAIL_STEP5_DSA_SCORES=v1/v2."
+    "(3.188 -> 2.070 ms on ZW-M890P). Opt-in via VLLM_SAIL_STEP5_DSA_SCORES=v1/v2/v3."
 )
 _AFFECTED = ">=0.33.0,<0.34.0"
 _REMOVE_WHEN = (
@@ -57,6 +59,7 @@ def install() -> None:
     original = getattr(module, _NAME)
     optimized = None
 
+    @profiled("score")
     @functools.wraps(original)
     def paged_mqa_logits_sm90(*args, **kwargs):
         # Read the switch per call to keep envs lazy; non-PPU stays upstream.
@@ -64,7 +67,7 @@ def install() -> None:
         # launcher, which reaches the software-E4M3 scorer.
         if not (
             current_platform.is_ppu()
-            and envs.VLLM_SAIL_STEP5_DSA_SCORES in ("v1", "v2")
+            and envs.VLLM_SAIL_STEP5_DSA_SCORES in ("v1", "v2", "v3")
             and current_platform.has_device_capability(89)
         ):
             return original(*args, **kwargs)
@@ -93,8 +96,23 @@ def install() -> None:
                 consumer, _NAME, reason=_REASON,
                 affected_versions=_AFFECTED, remove_when=_REMOVE_WHEN,
             )(paged_mqa_logits_sm90)
-    # Grouped delegation composes the existing logits/native prefill entries
-    # instead of patching the same target twice.
+    # Only new targets are installed here. Logits/plan/prefill delegation stays
+    # composed with the existing FP16/native wrappers, independent of order.
+    attention = "vllm.models.step5.nvidia.sparse_attention"
+    adapter = _CONSUMERS[0]
+    attention_module = importlib.import_module(attention)
+    adapter_module = importlib.import_module(adapter)
+    impl = attention_module.Step5DSAAttentionImpl
+    cls = adapter_module.Step5FlashInferSparse
+    for target, name, replacement in (
+        (attention, "Step5DSAAttentionImpl.forward",
+         score_pipeline.wrap_layer_forward(impl.forward, current_platform)),
+        (adapter, "Step5FlashInferSparse.pack_summaries",
+         score_pipeline.wrap_layer_pack(cls.pack_summaries)),
+    ):
+        patch(target, name, reason=score_pipeline.LAYER_REASON,
+              affected_versions=_AFFECTED,
+              remove_when=score_pipeline.LAYER_REMOVE_WHEN)(replacement)
     _installed = True
 
 

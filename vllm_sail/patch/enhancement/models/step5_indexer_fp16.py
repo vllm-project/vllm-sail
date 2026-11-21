@@ -43,6 +43,7 @@ from vllm.models.step5.nvidia.sparse_summary_cache import (
 from vllm_sail.models.step5.ops import score_pipeline, soft_fp8
 from vllm_sail.patch.bodies import bind_body
 from vllm_sail.patch.utils import patch
+from vllm_sail.step5_sparse_cases import profiled
 
 _AFFECTED = ">=0.33.0,<0.34.0"
 _REASON = (
@@ -59,7 +60,7 @@ _REMOVE_WHEN = (
 _LOGITS_REASON = (
     "FP16 indexer keeps E4M3 quantization and leaves the main attention KV "
     "cache unchanged; PPU SM89 FP8 prefill reuses packed K only under "
-    "VLLM_SAIL_STEP5_DSA_SCORES=v2, v0/v1 build no compact plan."
+    "VLLM_SAIL_STEP5_DSA_SCORES=v2/v3, v0/v1 build no compact plan."
 )
 _LOGITS_REMOVE_WHEN = (
     "Upstream Step5 DSA supports both FP16 indexer storage and multi-query "
@@ -614,6 +615,7 @@ def _get_kv_cache_spec(self, vllm_config):
     affected_versions=_AFFECTED,
     remove_when=_REMOVE_WHEN,
 )
+@profiled("score", pd_type="decode")
 def _decode_logits(
     self,
     query,
@@ -644,6 +646,7 @@ def _decode_logits(
     affected_versions=_AFFECTED,
     remove_when=_LOGITS_REMOVE_WHEN,
 )
+@profiled("score", pd_type="prefill")
 @score_pipeline.wrap_packed_logits
 def _logits(
     self,

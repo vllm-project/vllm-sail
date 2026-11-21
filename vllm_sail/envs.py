@@ -5,10 +5,10 @@ Rules (enforced in review):
 
 1. Every SAIL-specific runtime environment variable is declared here. Do **not**
    read ``VLLM_SAIL_*`` or legacy ``VLLM_PPU_*`` runtime names elsewhere.
-2. Access is lazy, via module ``__getattr__``, so a variable changed after
-   import is still observed. Use :func:`is_set` to distinguish "explicitly set
-   by the user" from "left at the default" — several PPU backend-selection paths
-   depend on that difference.
+2. Access is lazy: each attribute read resolves the current environment.
+   Use :func:`is_set` to distinguish "explicitly set by the user" from "left
+   at the default" — several PPU backend-selection paths depend on that
+   difference.
 3. ``VLLM_SAIL_*`` names take precedence over their ``VLLM_PPU_*`` aliases,
    including explicit false or empty values. Legacy Python attributes use the
    same resolution. Defaults are unchanged from the in-tree PPU fork.
@@ -52,6 +52,9 @@ if TYPE_CHECKING:
     VLLM_SAIL_KPOOL_DECODE_LOGITS: str = "non_paged"
     VLLM_SAIL_KPOOL_MAX_DENSE_POOLS: int = 1 << 21
     VLLM_SAIL_STEP5_DSA_SCORES: str = "v0"
+    VLLM_SAIL_STEP5_DSA_SCORE_MAX_BYTES: int = 1 << 30
+    VLLM_SAIL_STEP5_DSA_SCORE_DECODE: str = "v0"
+    VLLM_SAIL_STEP5_JOINT_PREPARE: bool = False
     VLLM_SAIL_STEP5_DSA_SELECTOR_PPU: bool = False
     VLLM_SAIL_STEP5_DSA_PREFILL_PPU: bool = False
     VLLM_SAIL_STEP5_DSA_PREFILL_BACKEND: str = "flashinfer"
@@ -88,6 +91,9 @@ if TYPE_CHECKING:
     VLLM_PPU_FP8_LOAD_POLICY: str | None = None
     VLLM_PPU_ENABLE_FP8_TO_INT8: bool = False
     VLLM_PPU_STEP5_DSA_SCORES: str = "v0"
+    VLLM_PPU_STEP5_DSA_SCORE_MAX_BYTES: int = 1 << 30
+    VLLM_PPU_STEP5_DSA_SCORE_DECODE: str = "v0"
+    VLLM_PPU_STEP5_JOINT_PREPARE: bool = False
     VLLM_PPU_STEP5_DSA_SELECTOR_PPU: bool = False
     VLLM_PPU_STEP5_DSA_PREFILL_PPU: bool = False
     VLLM_PPU_STEP5_DSA_PREFILL_BACKEND: str = "flashinfer"
@@ -108,7 +114,8 @@ GDN_DECODE_KERNELS = ("auto", "cuda", "pla", "triton")
 KPOOL_DECODE_LOGITS_BACKENDS = ("non_paged",)
 MEGA_MOE_MMA_TYPES = ("mxf4xmxf4", "fp8xmxfp4", "bf16xmxfp4")
 STEP5_PREFILL_BACKENDS = ("flashinfer", "native")
-STEP5_DSA_SCORE_MODES = ("v0", "v1", "v2")
+STEP5_DSA_SCORE_MODES = ("v0", "v1", "v2", "v3")
+STEP5_DSA_SCORE_DECODE_MODES = ("v0", "v1", "v2")
 
 
 def _env_names(name: str) -> tuple[str, ...]:
@@ -169,6 +176,20 @@ def _choice(
                 f"Invalid value {raw!r} for {source}. Expected one of "
                 f"{', '.join(choices)}."
             )
+        return value
+
+    return _get
+
+
+def _nonnegative_int(name: str, default: int) -> Callable[[], int]:
+    """Read a lazy score-output budget; zero explicitly disables consolidation."""
+    getter = _int(name, default)
+
+    def _get() -> int:
+        value = getter()
+        if value < 0:
+            source, _ = _read_env(name)
+            raise ValueError(f"{source} must be nonnegative, got {value}.")
         return value
 
     return _get
@@ -263,11 +284,20 @@ environment_variables: dict[str, Callable[[], Any]] = {
         "VLLM_SAIL_KPOOL_MAX_DENSE_POOLS", 1 << 21
     ),
     # -- Step5 DSA ----------------------------------------------------------
-    # v0 keeps upstream, v1 selects the resident-block Triton scorer, and v2
-    # additionally tries the grouped FP8 prefill scorer. Read on every call.
+    # Prefill: v0 keeps upstream, v1 uses resident, v2 prefers compact, and
+    # v3 forces chunks with grouped H4 enabled.
     "VLLM_SAIL_STEP5_DSA_SCORES": _choice(
         "VLLM_SAIL_STEP5_DSA_SCORES", "v0", STEP5_DSA_SCORE_MODES
     ),
+    # Only scores are bounded, not total temporary memory. Zero keeps chunks.
+    "VLLM_SAIL_STEP5_DSA_SCORE_MAX_BYTES": _nonnegative_int(
+        "VLLM_SAIL_STEP5_DSA_SCORE_MAX_BYTES", 1 << 30
+    ),
+    # Decode is independent of prefill: original, resident, or guarded MTP.
+    "VLLM_SAIL_STEP5_DSA_SCORE_DECODE": _choice(
+        "VLLM_SAIL_STEP5_DSA_SCORE_DECODE", "v0", STEP5_DSA_SCORE_DECODE_MODES
+    ),
+    "VLLM_SAIL_STEP5_JOINT_PREPARE": _bool("VLLM_SAIL_STEP5_JOINT_PREPARE", False),
     # per_row stays the default; the new selector is opt-in only.
     "VLLM_SAIL_STEP5_DSA_SELECTOR_PPU": _bool(
         "VLLM_SAIL_STEP5_DSA_SELECTOR_PPU", False
@@ -286,7 +316,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     ),
     # 0: E4M3 bytes; 1: E4M3-quantized values stored as FP16, using FP16 MMA.
     # The FP16 summary cache takes twice the memory; keeps the Step5 fork's name.
-    # Read lazily; set it before the server starts and keep it fixed at runtime.
     "VLLM_STEP5_INDEXER_FP8_AS_FP16": _bool("VLLM_STEP5_INDEXER_FP8_AS_FP16", False),
     # -- MiniMax M3 SAIL MSA sparse attention -------------------------------
     # Enabled by default: the SAIL path is selected whenever the platform, the

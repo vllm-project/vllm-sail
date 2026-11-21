@@ -745,6 +745,9 @@ def test_every_unresolved_installation_has_a_feature_contract():
             "name",
             "attr",
         ),
+        # Sparse providers, consumers, owned targets and opt-in retries are
+        # exercised in test_step5_sparse_cases.py.
+        ("profiling/step5_sparse.py", "_install_one", "module_name", "attribute"),
         # V1/V2 runner module paths come from the caller's literal loop;
         # covered by test_layerwise_nvtx.py.
         (
