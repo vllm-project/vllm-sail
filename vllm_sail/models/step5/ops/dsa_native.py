@@ -10,6 +10,8 @@ from collections import Counter
 
 import torch
 
+from vllm_sail.step5_sparse_cases import profiled
+
 _REJECTS = Counter()
 _SUBMISSIONS = Counter()
 _ROUTE_LOGGED = set()
@@ -23,6 +25,56 @@ def compiled_op(kind):
     from vllm_sail import _custom_ops
 
     return _custom_ops.step5_dsa_native_op(kind)
+
+
+def _submit_attention(op, kind, *args):
+    from vllm_sail import envs
+
+    if not envs.VLLM_SAIL_NVTX_PROFILE:
+        return op(*args)
+    from vllm_sail.profiling.step5_sparse import trace_call, trace_range
+
+    names = (
+        (
+            "query",
+            "kv_cache",
+            "indices",
+            "block_table",
+            "positions",
+            "active",
+            "output",
+            "scale",
+            "query_len",
+            "clear_inactive",
+            "gate",
+        )
+        if kind == "decode"
+        else (
+            "query",
+            "kv_cache",
+            "indices",
+            "block_table",
+            "owners",
+            "positions",
+            "tiles",
+            "output",
+            "max_seq_len",
+            "scale",
+            "query_tile",
+        )
+    )
+    values = dict(zip(names, args, strict=False))
+    impl = "step5_dsa_native_" + kind
+    with trace_range("attention", impl, "native_20261110", values, pd_type=kind):
+        return trace_call(
+            "attention",
+            impl,
+            "native_20261110",
+            values,
+            lambda: op(*args),
+            scope="kernel",
+            pd_type=kind,
+        )
 
 
 def reject(reason):
@@ -626,7 +678,9 @@ class NativePrefill:
         op = compiled_op("prefill")
         if op is None:
             raise RuntimeError("native op became unavailable after binding")
-        op(
+        _submit_attention(
+            op,
+            "prefill",
             query,
             cache,
             regions,
@@ -685,7 +739,9 @@ class NativePrefill:
                 raise RuntimeError("native op became unavailable after binding")
             # Never resubmit, even after a failed launch; the outer finally releases.
             self._finished = True
-            op(
+            _submit_attention(
+                op,
+                "prefill",
                 query,
                 cache,
                 regions,
@@ -703,6 +759,10 @@ class NativePrefill:
 
 
 def wrap_decode(original, backend, platform):
+    reference = profiled("attention", backend="upstream_triton", pd_type="decode")(
+        original
+    )
+
     def sparse_decode_attention(
         query,
         cache,
@@ -742,7 +802,9 @@ def wrap_decode(original, backend, platform):
                 reason = "missing_op"
             if reason is None:
                 record_route("decode", "native_20261110", None, "dispatch")
-                op(
+                _submit_attention(
+                    op,
+                    "decode",
                     query,
                     cache,
                     regions,
@@ -759,7 +821,7 @@ def wrap_decode(original, backend, platform):
                 return None
             reject("decode:" + reason)
             record_route("decode", "upstream", reason, "dispatch", cache_context(cache))
-        return original(
+        return reference(
             query,
             cache,
             regions,
@@ -776,4 +838,4 @@ def wrap_decode(original, backend, platform):
             gate=gate,
         )
 
-    return sparse_decode_attention
+    return profiled("attention", pd_type="decode")(sparse_decode_attention)

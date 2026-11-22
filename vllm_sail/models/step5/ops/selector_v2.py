@@ -5,6 +5,8 @@ page-write contract.
 
 from __future__ import annotations
 
+from vllm_sail.step5_sparse_cases import profiled
+
 
 def workspace_capacity(regions, topk):
     if type(regions) is not int or regions <= 0:
@@ -14,6 +16,7 @@ def workspace_capacity(regions, topk):
     return 0 if regions <= 16384 else ((regions + 16383) // 16384) * topk
 
 
+@profiled("topk", backend="selector_v2", scope="kernel")
 def raw_select(
     scores,
     positions,

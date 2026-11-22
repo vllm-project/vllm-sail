@@ -800,3 +800,189 @@ def test_sche_mark_format_with_nvtx(
         "total_tokens=5,req_id:num_tokens={'r1': 5}",
         "finish_req: {'z'}",
     ]
+
+
+@pytest.fixture
+def sparse_profiling_module(fake_vllm, patch_utils_module, monkeypatch):
+    """Load the real sparse installer with an isolated patch registry."""
+    from tests.support.source import PACKAGE_ROOT
+
+    name = "vllm_sail.profiling.step5_sparse"
+    spec = importlib.util.spec_from_file_location(
+        name, PACKAGE_ROOT / "vllm_sail/profiling/step5_sparse.py"
+    )
+    module = importlib.util.module_from_spec(spec)
+    monkeypatch.setitem(sys.modules, name, module)
+    spec.loader.exec_module(module)
+    monkeypatch.setattr(module, "patch", patch_utils_module.patch)
+    return module
+
+
+@pytest.mark.parametrize("enabled,owned", [(False, False), (True, False), (True, True)])
+def test_sparse_v034_install_preserves_routes_aliases_and_owned_targets(
+    sparse_profiling_module, patch_utils_module, monkeypatch, enabled, owned
+):
+    """Pinned providers and loaded consumers share one idempotent wrapper."""
+    sparse = sparse_profiling_module
+    monkeypatch.setenv("VLLM_SAIL_NVTX_PROFILE", str(int(enabled)))
+    for helper in ("_install_adapter_logits", "_install_launches"):
+        monkeypatch.setattr(sparse, helper, lambda: None)
+    targets = []
+    modules = {}
+    for suffix, attr, *_ in sparse._TARGETS:
+        name = f"vllm.models.step5.nvidia.{suffix}"
+        if name not in modules:
+            modules[name] = types.ModuleType(name)
+            monkeypatch.setitem(sys.modules, name, modules[name])
+        module = modules[name]
+        owner, attribute = module, attr
+        if "." in attr:
+            cls, attribute = attr.split(".", 1)
+            if not hasattr(module, cls):
+                setattr(module, cls, type(cls, (), {}))
+            owner = getattr(module, cls)
+
+        def original(*args, **kwargs):
+            return args, kwargs
+
+        if owned:
+            setattr(original, PATCH_MARKER, {f"{name}.{attr}": object()})
+        setattr(owner, attribute, original)
+        targets.append((owner, attribute, original))
+    provider = modules["vllm.models.step5.nvidia.ops.sparse_indexer"]
+    run = object()
+
+    def factory(backend):
+        assert backend == "requested"
+        return run
+
+    if owned:
+        setattr(factory, PATCH_MARKER, {"owned": object()})
+    provider.get_indexer_topk = factory
+    consumer = types.ModuleType("vllm.models.step5.nvidia.sparse_attention")
+    consumer.select_regions = provider.select_regions
+    monkeypatch.setitem(sys.modules, consumer.__name__, consumer)
+    assert sparse.install() is (enabled and not owned)
+    topk_factory = provider.get_indexer_topk
+    assert (topk_factory is factory) is (not enabled or owned)
+    assert topk_factory("requested") is run
+    wrapped = provider.select_regions
+    assert consumer.select_regions is wrapped
+    monkeypatch.setenv("VLLM_SAIL_NVTX_PROFILE", "0")
+    sentinel = object()
+    for owner, attr, original in targets:
+        replacement = getattr(owner, attr)
+        assert (replacement is original) is (not enabled or owned)
+        assert replacement(sentinel, value=sentinel) == (
+            (sentinel,),
+            {"value": sentinel},
+        )
+    records = list(patch_utils_module.PATCH_REGISTRY)
+    assert bool(records) is (enabled and not owned)
+    assert all(record.affected_versions == ">=0.32.0,<0.33.0" for record in records)
+    monkeypatch.setenv("VLLM_SAIL_NVTX_PROFILE", str(int(enabled)))
+    sparse.install()
+    assert patch_utils_module.PATCH_REGISTRY == records
+    assert provider.select_regions is wrapped
+    assert provider.get_indexer_topk is topk_factory
+
+
+@pytest.mark.upstream_source
+@pytest.mark.parametrize(
+    "suffix,kernel,scalar_names",
+    [
+        (
+            "sparse_decode_attention",
+            "_sparse_decode_split",
+            {
+                "heads": "HEADS",
+                "topk": "REGION_COUNT",
+                "block_size": "BLOCK_SIZE",
+                "splits": "SPLITS",
+                "clear_inactive": "CLEAR_INACTIVE",
+            },
+        ),
+        (
+            "sparse_decode_attention",
+            "_sparse_decode_combine",
+            {"heads": "HEADS", "splits": "SPLITS", "clear_inactive": "CLEAR_INACTIVE"},
+        ),
+        (
+            "sparse_indexer_scores",
+            "_paged_scores_sm90",
+            {
+                "max_seq_len": "REGIONS",
+                "next_n": "NEXT_N",
+                "heads": "HEADS",
+                "page_size": "PAGE_SIZE",
+                "tile": "TILE",
+            },
+        ),
+    ],
+)
+def test_sparse_v034_launch_observers_match_pinned_positions_and_delegate(
+    sparse_profiling_module,
+    upstream_source_root,
+    monkeypatch,
+    suffix,
+    kernel,
+    scalar_names,
+):
+    """Metadata indices follow the pinned JIT signature without changing a launch."""
+    from tests.support.source import definition
+    from tests.support.upstream import resolve_symbol
+
+    sparse = sparse_profiling_module
+    for target_suffix, attr, *_ in sparse._TARGETS:
+        target = f"vllm.models.step5.nvidia.{target_suffix}.{attr}"
+        assert resolve_symbol(upstream_source_root, target).present, target
+    sentinel = object()
+    calls, traces = [], []
+
+    class Kernel:
+        def __init__(self, name):
+            self.__name__ = name
+
+        def __getitem__(self, grid):
+            def launch(*args, **kwargs):
+                calls.append((grid, args, kwargs))
+                return sentinel
+
+            return launch
+
+    for module_suffix, names in (
+        ("sparse_decode_attention", ("_sparse_decode_split", "_sparse_decode_combine")),
+        ("sparse_indexer_scores", ("_paged_scores_sm90",)),
+    ):
+        name = f"vllm.models.step5.nvidia.ops.{module_suffix}"
+        module = types.ModuleType(name)
+        for attribute in names:
+            setattr(module, attribute, Kernel(attribute))
+        monkeypatch.setitem(sys.modules, name, module)
+    module = sys.modules[f"vllm.models.step5.nvidia.ops.{suffix}"]
+    sparse._install_launches()
+    observer = getattr(module, kernel)
+    assert isinstance(observer, sparse.LaunchObserver)
+    node = definition(
+        upstream_source_root / f"vllm/models/step5/nvidia/ops/{suffix}.py", kernel
+    )
+    parameters = [argument.arg for argument in node.args.args]
+    assert {
+        key: parameters[index] for key, index in observer.scalars.items()
+    } == scalar_names
+
+    def trace(op, impl, backend, values, call, **kwargs):
+        traces.append(values)
+        return call()
+
+    monkeypatch.setattr(sparse, "trace_call", trace)
+    args = tuple(range(len(parameters)))
+    grid = (3, 2)
+    for enabled in (False, True):
+        monkeypatch.setenv("VLLM_SAIL_NVTX_PROFILE", str(int(enabled)))
+        assert observer[grid](*args, num_warps=4) is sentinel
+    assert calls == [(grid, args, {"num_warps": 4})] * 2
+    assert len(traces) == 1
+    assert all(traces[0][key] == index for key, index in observer.scalars.items())
+    sparse._install_launches()
+    assert getattr(module, kernel) is observer
