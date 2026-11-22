@@ -654,6 +654,7 @@ class ByteFP8Launch:
         byte_args = self.byte_args
 
         def run(*args, **kwargs):
+            source = args
             args = list(args)
             half = any(
                 isinstance(args[index], torch.Tensor)
@@ -661,14 +662,227 @@ class ByteFP8Launch:
                 for index in byte_args
             )
             if not (half or current_platform.is_ppu()):
-                return self.upstream[grid](*args, **kwargs)
+                return self._submit_paged(
+                    self.upstream[grid], args, kwargs, source, "upstream_paged"
+                )
             for index in byte_args:
                 arg = args[index]
                 if isinstance(arg, torch.Tensor) and arg.dtype == torch.float8_e4m3fn:
                     args[index] = arg.view(torch.uint8)
-            return self.ppu[grid](*args, **kwargs)
+            return self._submit_paged(
+                self.ppu[grid],
+                args,
+                kwargs,
+                source,
+                "software_paged" if not half else "fp16_paged",
+            )
 
         return run
 
+    def _submit_paged(self, call, args, kwargs, source, backend):
+        if (
+            not getattr(envs, "VLLM_SAIL_NVTX_PROFILE", False)
+            or self.__name__ != "_paged_scores_sm90"
+            or len(source) != 20
+        ):
+            return call(*args, **kwargs)
+        from vllm_sail.profiling.step5_sparse import trace_call
+
+        values = dict(
+            zip(
+                ("query", "packed", "weights", "lengths", "block_table", "output"),
+                source[:6],
+                strict=False,
+            )
+        )
+        values.update(
+            max_seq_len=source[15],
+            next_n=source[16],
+            heads=source[17],
+            page_size=source[18],
+            tile=source[19],
+            num_warps=kwargs.get("num_warps", 4),
+        )
+        return trace_call(
+            "score",
+            self.__name__,
+            backend,
+            values,
+            lambda: call(*args, **kwargs),
+            scope="kernel",
+        )
+
     def __getattr__(self, name):
         return getattr(self.upstream, name)
+
+
+class DirectScoresLaunch(ByteFP8Launch):
+    """Keep the original direct path by default; enable experimental candidates only for contract-compatible calls."""
+
+    def __init__(self, upstream, ppu, byte_args, *, guarded_mtp=None):
+        super().__init__(upstream, ppu, byte_args)
+        # None follows the lazy decode mode; offline comparisons can pin a candidate.
+        self.guarded_mtp = guarded_mtp
+
+    @staticmethod
+    def _mtp_eligible(args):
+        return (
+            args[29] == 4
+            and args[25] == 8
+            and args[26] == 128
+            and args[0].dtype in (torch.float8_e4m3fn, torch.uint8)
+            and args[2].dtype == torch.uint8
+            and args[28] == 1
+            and args[0].shape[0] // 4 in (8, 16)
+            and args[23] >= 8192
+        )
+
+    @staticmethod
+    def _eligible(grid, args):
+        if (
+            envs.VLLM_SAIL_STEP5_DSA_SCORE_DECODE == "v0"
+            or not current_platform.is_ppu()
+        ):
+            return False
+        if len(args) != 30 or not isinstance(grid, tuple) or len(grid) != 2:
+            return False
+        if any(type(n) is not int or n <= 0 for n in grid):
+            return False
+        q, w, mean = args[:3]
+        if not all(isinstance(t, torch.Tensor) for t in (q, w, mean)):
+            return False
+        if not q.is_cuda or w.device != q.device or mean.device != q.device:
+            return False
+        if (q.dtype, w.dtype, mean.dtype) != (
+            torch.float8_e4m3fn,
+            torch.float32,
+            torch.uint8,
+        ):
+            return False
+        if q.ndim != 4 or q.shape[2:] != (8, 256):
+            return False
+        if w.shape != q.shape[:3] or mean.ndim != 3:
+            return False
+        if q.stride(3) != 1 or q.stride(2) != 256 or w.stride(2) != 1:
+            return False
+        if mean.stride(1) != 256 or mean.stride(2) != 1:
+            return False
+        if args[25:27] != (8, 128) or args[27] != grid[0]:
+            return False
+        if args[28] != q.shape[1] or grid[1] != q.shape[0] * q.shape[1]:
+            return False
+        if type(args[29]) is not int or args[29] <= 0 or q.shape[0] % args[29]:
+            return False
+        return tuple(torch.cuda.get_device_capability(q.device)) == (8, 9)
+
+    @staticmethod
+    def _nvtx_tuned_eligible(args):
+        """Restrict the experimental launch tuning to the measured decode layout."""
+        q, w, mean = args[:3]
+        return (
+            q.shape == (64, 1, 8, 256)
+            and w.shape == (64, 1, 8)
+            and mean.shape == (64530, 8, 256)
+            and (q.stride(0), q.stride(1), w.stride(0), w.stride(1))
+            == (2048, 131072, 8, 512)
+            and mean.stride(0) == 1179648
+            and args[12:16] == (2048, 131072, 8, 512)
+            and args[16:18] == (16384, 16384)
+            and args[20:27] == (64530, 8, 1179648, 131072, 131072, 8, 128)
+            and args[28:30] == (1, 4)
+        )
+
+    @staticmethod
+    def _resident_kernel():
+        from vllm_sail.models.step5.ops.sparse_attention_opt import (
+            _direct_scores_resident,
+        )
+
+        return _direct_scores_resident
+
+    @staticmethod
+    def _submit(call, args, kwargs, backend, source_args=None):
+        if not getattr(envs, "VLLM_SAIL_NVTX_PROFILE", False):
+            return call(*args, **kwargs)
+        from vllm_sail.profiling.step5_sparse import trace_call
+
+        source = args if source_args is None else source_args
+        if len(source) != 30:
+            return call(*args, **kwargs)
+        names = (
+            "query",
+            "weights",
+            "mean",
+            "block_table",
+            "slots",
+            "lengths",
+            "scores",
+            "active",
+            "positions",
+            "current",
+            "context_lengths",
+            "topk_lengths",
+        )
+        values = dict(zip(names, source[:12], strict=False))
+        values.update(
+            max_seq_len=source[23],
+            heads=source[25],
+            tile=source[26],
+            workers=source[27],
+            row_groups=source[28],
+            query_len=source[29],
+            num_warps=kwargs.get("num_warps", 4),
+        )
+        impl = (
+            "_direct_scores"
+            if backend == "direct_baseline"
+            else "_direct_scores_resident"
+        )
+        return trace_call(
+            "score",
+            impl,
+            backend,
+            values,
+            lambda: call(*args, **kwargs),
+            scope="kernel",
+            pd_type="decode",
+        )
+
+    def __getitem__(self, grid):
+        baseline = super().__getitem__(grid)
+
+        def run(*args, **kwargs):
+            if not self._eligible(grid, args):
+                return self._submit(baseline, args, kwargs, "direct_baseline")
+            guarded_mtp = (
+                envs.VLLM_SAIL_STEP5_DSA_SCORE_DECODE == "v2"
+                if self.guarded_mtp is None
+                else self.guarded_mtp
+            )
+            if guarded_mtp and not self._mtp_eligible(args):
+                return self._submit(baseline, args, kwargs, "direct_baseline")
+            converted = (args[0].view(torch.uint8), *args[1:])
+            if guarded_mtp:
+                return self._submit(
+                    self._resident_kernel()[grid],
+                    converted,
+                    dict(kwargs, GUARD_MTP=True),
+                    "direct_mtp",
+                    args,
+                )
+            source = args
+            workers = grid[0]
+            if self._nvtx_tuned_eligible(args):
+                workers = 3
+                converted = (*converted[:27], workers, *converted[28:])
+                source = (*args[:27], workers, *args[28:])
+                kwargs = dict(kwargs, num_warps=4, num_stages=1, HOIST=True, SPLIT=True)
+            return self._submit(
+                self._resident_kernel()[(workers * grid[1],)],
+                converted,
+                kwargs,
+                "direct_resident",
+                source,
+            )
+
+        return run

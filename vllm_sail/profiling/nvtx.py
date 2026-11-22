@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import functools
 from collections.abc import Callable
+from contextlib import contextmanager
 from typing import Any, TypeVar
 
 from vllm.logger import init_logger
@@ -187,6 +188,14 @@ def step5_sparse_label(
     if pd_type == "decode":
         tensor_field("gate", values.get("gate"))
     return ",".join(fields)
+
+
+@contextmanager
+def step5_op_phase(pd_type):
+    from vllm_sail.profiling.step5_sparse import phase
+
+    with phase(pd_type):
+        yield
 
 
 def prof_iter(iteration: int) -> None:

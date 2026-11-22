@@ -16,7 +16,7 @@ from vllm_sail.utils import deep_select as _sail
 _AFFECTED = ">=0.32.0,<0.33.0"
 _MODULE = "vllm.model_executor.layers.indexer_topk"
 _SPARSE_MODULE = "vllm.model_executor.kernels.attention.dsa.sparse_mqa_logits"
-_REASON = "PPU SM89 uses the SAIL BF16 DeepSelect wheel instead of vllm._deepselect_C."
+_REASON = "PPU SM89 uses the SAIL BF16/FP32 DeepSelect wheel instead of vllm._deepselect_C."
 _REMOVE_WHEN = "vLLM exposes a platform-selectable DeepSelect provider and capability hook."
 
 _original_has = _sparse.has_deep_select
@@ -112,7 +112,7 @@ def resolve_backend(self, logits, topk_tokens, num_rows):
             return "deep_select"
         if self._backend == "deep_select":
             raise RuntimeError(
-                "SAIL DeepSelect requires an enabled wheel, PPU SM89+, BF16 "
+                "SAIL DeepSelect requires an enabled wheel, PPU SM89+, BF16/FP32 "
                 "logits and a supported shape; FP32 scores are never rounded"
             )
     return _original_resolve(self, logits, topk_tokens, num_rows)
@@ -126,6 +126,7 @@ def _rebind_consumers():
             (
                 "vllm.model_executor.kernels.attention.dsa.candidate_blocks",
                 "vllm.model_executor.layers.sparse_mqa_indexer",
+                "vllm.model_executor.layers.sparse_attn_indexer",
                 "vllm.v1.attention.backends.mla.sparse_indexer",
             ),
             _original_has,
@@ -142,6 +143,7 @@ def _rebind_consumers():
         (
             (
                 "vllm.model_executor.kernels.attention.dsa.candidate_blocks",
+                "vllm.model_executor.layers.sparse_attn_indexer",
                 "vllm.models.step5.common.ops.sparse_indexer",
             ),
             _original_supported,
@@ -151,6 +153,7 @@ def _rebind_consumers():
             (
                 "vllm.model_executor.kernels.attention.dsa.candidate_blocks",
                 _SPARSE_MODULE,
+                "vllm.model_executor.layers.sparse_attn_indexer",
             ),
             _original_topk,
             deep_select_topk,
