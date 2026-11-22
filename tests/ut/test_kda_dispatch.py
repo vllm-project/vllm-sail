@@ -266,6 +266,29 @@ def test_forward_runs_the_pla_decode_kernel_on_ppu(monkeypatch):
     assert call["state_indices"].source == "state_indices"
 
 
+def test_forward_skips_zero_token_decode_on_pla(monkeypatch):
+    pla_calls, upstream_calls = [], []
+    fn = wrapper_forward(
+        monkeypatch,
+        {
+            "current_platform": SimpleNamespace(is_ppu=lambda: True),
+            "ppu_envs": SimpleNamespace(VLLM_SAIL_USE_PLA=True),
+            "get_forward_context": lambda: SimpleNamespace(
+                attn_metadata={"kda": decode_metadata(num_actual_tokens=0)}
+            ),
+            "logger": SimpleNamespace(info_once=lambda *args: None),
+            "is_conv_state_dim_first": lambda: False,
+            "_upstream_forward": lambda *args: upstream_calls.append(args),
+        },
+        pla_calls,
+    )
+    tensors = [decode_layer(), *(object() for _ in range(5))]
+    fn(*tensors)
+
+    assert pla_calls == []
+    assert upstream_calls == []
+
+
 @pytest.mark.parametrize(
     "overrides",
     [

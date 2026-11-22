@@ -35,6 +35,10 @@ Modules, and why each is import-on-install like the rest of the framework:
 * ``kimi_k3_dsa_indexer`` — 810E-class targets for the K3.1 DSA indexer:
   software e4m3 encoder below capability 8.9 and the int8 mqa_logits path
   when FP8 MMA is missing.
+* ``kimi_k3_pcp`` — Kimi K3.1 prefill context parallelism: MLA split-view
+  metadata and gathered KV insertion, DSA padded slot gathering, and globally
+  ordered KDA recurrence. Imported after the attention patches so its KDA
+  constructor wrapper preserves the existing PLA dispatch.
 * ``llama4`` — torch.compile on the custom router (+1).
 * ``minimax_m3`` — retain ordinary MoE finalize on PPU before NVIDIA imports.
 * ``minimax_m3_msa`` — route MiniMax M3 indexer + sparse attend to the SAIL
@@ -79,6 +83,7 @@ from vllm_sail.patch.enhancement.models import (
     kimi_k25_processor,  # noqa: F401
     kimi_k3,  # noqa: F401
     kimi_k3_dsa_indexer,  # noqa: F401
+    kimi_k3_pcp,  # noqa: F401
     llama4,  # noqa: F401
     minimax_m3,  # noqa: F401
     minimax_m3_msa,  # noqa: F401

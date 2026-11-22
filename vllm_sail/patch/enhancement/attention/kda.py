@@ -216,6 +216,11 @@ def _forward(
             and m.num_prefills == 0
             and m.num_decodes > 0
         ):
+            # PCP decode warmup can leave a rank with replicated decode
+            # requests but zero local rows. There is no state or output row
+            # to update, and both fused decode implementations require rows.
+            if m.num_actual_tokens == 0:
+                return
             from pla.decode.kda import fused_kda_decode_mega_forward
 
             logger.info_once("Using PLA KDA kernel: fused_kda_decode_mega_forward")

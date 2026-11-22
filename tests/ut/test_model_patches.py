@@ -52,6 +52,7 @@ EXPECTED_MODULES = {
     "kimi_k25_processor",
     "kimi_k3",
     "kimi_k3_dsa_indexer",
+    "kimi_k3_pcp",
     "llama4",
     "minimax_m3",
     "minimax_m3_msa",
@@ -335,6 +336,41 @@ _EXPECTED_TARGETS = {
     "vllm.models.kimi_k3.nvidia.ops.dsa_indexer.indexer_k_norm_quant_insert",
     "vllm.models.kimi_k3.nvidia.ops.dsa_indexer.indexer_q_quant_fold_weights",
     "vllm.models.kimi_k3.nvidia.ops.dsa_indexer.dsa_fused_prologue",
+    "vllm.v1.worker.gpu.pcp_manager.PCPManager.has_global_prefill",
+    "vllm.v1.worker.gpu.pcp_manager.get_current_pcp_manager",
+    "vllm.v1.worker.gpu.pcp_manager.maybe_build_pcp_manager",
+    (
+        "vllm.model_executor.layers.attention.mla_attention."
+        "MLACommonMetadataBuilder._pcp_split_prefill_requests"
+    ),
+    "vllm.model_executor.layers.attention.mla_attention.MLACommonMetadataBuilder.build",
+    "vllm.models.kimi_k3.nvidia.mla.MultiHeadLatentAttention.__init__",
+    "vllm.models.kimi_k3.nvidia.mla.MultiHeadLatentAttention._attention",
+    (
+        "vllm.models.kimi_k3.nvidia.mla.MultiHeadLatentAttention."
+        "_pcp_gathered_kv_insert"
+    ),
+    (
+        "vllm.models.kimi_k3.nvidia.mla.MultiHeadLatentAttention."
+        "_forward_prefill_fused"
+    ),
+    "vllm.models.kimi_k3.common.dsa_cache.kimi_k3_indexer_uses_fp4",
+    "vllm.models.kimi_k3.nvidia.dsa.kimi_k3_indexer_uses_fp4",
+    "vllm.models.kimi_k3.common.dsa_cache.KimiK3IndexerMetadataBuilder.__init__",
+    "vllm.models.kimi_k3.common.dsa_cache.KimiK3IndexerMetadataBuilder.build",
+    "vllm.models.kimi_k3.nvidia.dsa.KimiK3DSAIndexer.__init__",
+    "vllm.models.kimi_k3.nvidia.dsa.KimiK3DSAIndexer.score",
+    "vllm.models.kimi_k3.nvidia.ops.dsa_indexer_mxfp4._mxfp4_k_insert",
+    "vllm.models.kimi_k3.nvidia.ops.dsa_indexer_mxfp4._mxfp4_k_quant_insert",
+    "vllm.models.kimi_k3.nvidia.ops.dsa_indexer_mxfp4.mxfp4_k_quant_and_cache",
+    (
+        "vllm.models.kimi_k3.nvidia.kda_metadata."
+        "KimiK3KDAAttentionBackend.supports_pcp"
+    ),
+    "vllm.models.kimi_k3.nvidia.kda._reconstruct_pcp_global_batch",
+    "vllm.models.kimi_k3.nvidia.kda.KimiK3DeltaAttention.__init__",
+    "vllm.models.kimi_k3.nvidia.kda.KimiK3DeltaAttention._forward_pcp",
+    "vllm.models.kimi_k3.nvidia.kda.KimiK3DeltaAttention.forward",
     "vllm.model_executor.models.llama4.Llama4MoE.custom_routing_function",
     "vllm.models.minimax_m3.nvidia.model.MiniMaxM3Model._init_fused_moe_finalize",
     "vllm.models.minimax_m3.nvidia.model.MiniMaxM3MLP.__init__",
