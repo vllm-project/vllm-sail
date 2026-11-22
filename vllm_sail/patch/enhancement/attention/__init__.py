@@ -20,6 +20,8 @@ Import order notes:
   only, so it is order-independent with respect to the other patches here.
 """
 
+import os
+
 from vllm_sail.patch.enhancement.attention import (
     fa_utils,  # noqa: F401
     gdn,  # noqa: F401
@@ -46,3 +48,11 @@ from vllm_sail.patch.enhancement.attention import (
     dsv41_kv_record,  # noqa: F401
     packed_token_cache_split,  # noqa: F401
 )
+
+# TEMPORARY acceptance diagnostics: imports the speculative-decoding stack, so it
+# stays behind a switch and goes away with the module. Off by default; set
+# VLLM_SAIL_DSPARK_DIAG=1 to enable. See dspark_accept_diag.
+if os.getenv("VLLM_SAIL_DSPARK_DIAG", "0").lower() not in ("0", "false", ""):
+    from vllm_sail.patch.enhancement.attention import (  # noqa: E402
+        dspark_accept_diag,  # noqa: F401
+    )
