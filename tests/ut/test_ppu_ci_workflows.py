@@ -369,6 +369,7 @@ def test_pr_pipeline_structure():
         "existing_build_run_id",
         "resolve_native_donors",
         "skip_device_tests",
+        "runtime_version",
         "wheel_source_sha",
     }
     assert inputs["pr_head_sha"]["type"] == "string"
@@ -1265,7 +1266,7 @@ def expression(value, context):
 
     return eval(
         value.strip(),
-        {"__builtins__": {}, "contains_value": contains_value},
+        {"__builtins__": {}, "contains_value": contains_value, "format": str.format},
         {},
     )
 
@@ -1879,7 +1880,9 @@ def test_accuracy_nightly_devops_dispatch_dual_mode_and_cron_switch(tmp_path):
 
     # Validate dispatch inputs rejects illegal tags, digests, target_ref, and
     # skip_wheel_build without an image override.
-    validate_step = jobs["select"]["steps"][0]
+    validate_step = next(
+        step for step in jobs["select"]["steps"] if step.get("id") == "validate_inputs"
+    )
     valid_digest = "sha256:" + "a" * 64
     for bad_env in (
         {"IMAGE_TAG": "evil.example/vllm:nightly"},
@@ -2085,7 +2088,8 @@ def test_accuracy_nightly_hardening_target_trust_digest_pin_and_cron_concurrency
         if s.get("name") == "Resolve the runner-configured CUDA-compatible runtime"
     )
     assert resolve_step["env"] == {
-        "TRUSTED_DIR": "${{ steps.workspace.outputs.trusted }}"
+        "TRUSTED_DIR": "${{ steps.workspace.outputs.trusted }}",
+        "PPU_CI_RUNTIME_VERSION": "${{ inputs.runtime_version }}",
     }
     assert (
         'bash "${TRUSTED_DIR}/scripts/ci/ppu_runtime_image.sh"' in resolve_step["run"]
@@ -2170,7 +2174,56 @@ def test_accuracy_nightly_hardening_target_trust_digest_pin_and_cron_concurrency
     assert "PPU_NIGHTLY_SCHEDULE_DISABLED == 'true'" in group_expr
     assert "accuracy-nightly-disabled-schedule-" in group_expr
     assert "github.run_id" in group_expr
-    assert "accuracy-nightly-{0}" in group_expr
+    assert concurrency["queue"] == "max"
+    for ref, version in (
+        ("refs/heads/main", "main"),
+        ("refs/heads/releases/v0.34.0", "v0.34.0"),
+    ):
+        for event in ("workflow_dispatch", "schedule"):
+            context = {
+                "github.event_name": event,
+                "github.ref": ref,
+                "github.run_id": 42,
+                "github.run_attempt": "1",
+                "vars.PPU_NIGHTLY_SCHEDULE_DISABLED": "",
+            }
+            assert expression(group_expr, context) == "accuracy-nightly-refs/heads/main"
+            assert expression(wf["env"]["NIGHTLY_VERSION"], context) == version
+            dispatch = jobs["dispatch-release"]
+            assert bool(expression(dispatch["if"], context)) is (
+                event == "schedule" and version == "main"
+            )
+            context["vars.PPU_NIGHTLY_SCHEDULE_DISABLED"] = "true"
+            if event == "schedule":
+                assert (
+                    expression(group_expr, context)
+                    == "accuracy-nightly-disabled-schedule-42"
+                )
+            assert not expression(dispatch["if"], context)
+    for workflow_ref, target, version in (
+        ("refs/heads/main", "releases/v0.34.0", "v0.34.0"),
+        ("refs/heads/main", "refs/heads/releases/v0.34.0", "v0.34.0"),
+        ("refs/heads/releases/v0.34.0", "main", "main"),
+        ("refs/heads/releases/v0.34.0", "v0.34.0", "v0.34.0"),
+    ):
+        assert (
+            expression(
+                wf["env"]["NIGHTLY_VERSION"],
+                {"github.ref": workflow_ref, "inputs.target_ref": target},
+            )
+            == version
+        )
+    assert dispatch["permissions"] == {"actions": "write"}
+    assert "--ref releases/v0.34.0" in dispatch["steps"][0]["run"]
+    for consumer in ("build", "accuracy", "recipe-model-sanity"):
+        assert (
+            jobs[consumer]["with"]["runtime_version"]
+            == "${{ needs.select.outputs.version }}"
+        )
+    assert (
+        pin_step["env"]["PPU_CI_RUNTIME_VERSION"]
+        == "${{ needs.select.outputs.version }}"
+    )
 
 
 def test_nightly_public_summary_exports_safe_image_digest_and_versions(tmp_path):

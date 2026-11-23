@@ -338,3 +338,24 @@ def test_nightly_legacy_matrix_uses_only_public_artifact(tmp_path, monkeypatch):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_nightly_version_prefix_is_allowlisted(monkeypatch):
+    monkeypatch.setenv("GITHUB_REPOSITORY", "example/vllm-sail")
+    monkeypatch.setenv("GITHUB_RUN_ID", "123")
+    monkeypatch.setenv("GITHUB_EVENT_NAME", "workflow_dispatch")
+    monkeypatch.setenv("GITHUB_REF_NAME", "main")
+    for version in ("main", "v0.34.0", "masked.example/private"):
+        payload = notify.make_payload(
+            {"results": [{"model": "glm-5.3", "status": "pass"}]},
+            "",
+            "Monday",
+            version=version,
+        )
+        markdown = payload["markdown"]
+        if version in ("main", "v0.34.0"):
+            prefix = f"[vllm-sail | {version}]"
+            assert markdown["title"].startswith(prefix)
+            assert markdown["text"].startswith(f"### {prefix}")
+        else:
+            assert "masked.example" not in str(markdown)

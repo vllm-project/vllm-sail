@@ -257,7 +257,7 @@ def model_result(model, job, read_evidence):
     return result
 
 
-def make_payload(report, roster, weekday):
+def make_payload(report, roster, weekday, *, version=""):
     repo, ref, event, run_id = public_context()
     rows = report["results"]
     if not isinstance(rows, list) or not rows:
@@ -280,7 +280,8 @@ def make_payload(report, roster, weekday):
         if failures
         else f"[✅ 全绿 {passed}/{len(rows)}]"
     )
-    title = f"{headline} {repo} / {ref} · {event}"
+    prefix = f"[vllm-sail | {version}] " if version in {"main", "v0.34.0"} else ""
+    title = f"{prefix}{headline} {repo} / {ref} · {event}"
     elapsed = report.get("elapsed_s")
     duration = "未知"
     if type(elapsed) is int and elapsed >= 0:
@@ -289,7 +290,7 @@ def make_payload(report, roster, weekday):
         duration = f"{hours}h {minutes:02d}m {seconds:02d}s"
     link = f"https://github.com/{repo}/actions/runs/{run_id}"
     text = [
-        f"### {headline} `{repo} / {ref}` · {event}",
+        f"### {prefix}{headline} `{repo} / {ref}` · {event}",
         f"通过 **{passed}/{len(rows)}** · 总耗时 {duration} · [Run]({link})",
     ]
     for row in failures:
@@ -350,7 +351,12 @@ def main(argv=None):
             else:
                 report = json_file(args.report)
             weekday = WEEKDAYS[datetime.now(SHANGHAI).weekday()]
-            payload = make_payload(report, os.environ.get(ROSTER, ""), weekday)
+            version = (
+                os.environ.get("NOTIFY_NIGHTLY_VERSION", "") if args.nightly else ""
+            )
+            payload = make_payload(
+                report, os.environ.get(ROSTER, ""), weekday, version=version
+            )
     except (OSError, KeyError, TypeError, ValueError, RecursionError):
         warn("Could not assemble the public CI notification.")
         return 0

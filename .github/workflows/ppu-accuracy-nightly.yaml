@@ -54,7 +54,7 @@ on:
         default: ""
         type: string
       target_ref:
-        description: "Target repository branch, tag, or 40-char commit SHA (blank = default branch HEAD)"
+        description: "Target repository branch, tag, or 40-char commit SHA (blank = workflow commit; use --ref to select the workflow version)"
         required: false
         default: ""
         type: string
@@ -83,18 +83,46 @@ permissions:
   actions: read
 cache-mode: none
 
+env:
+  # Named branch overrides retain their own runtime version. For a tag or
+  # SHA override, --ref continues to specify the workflow and runtime version.
+  NIGHTLY_VERSION: >-
+    ${{ (inputs.target_ref == 'releases/v0.34.0' ||
+    inputs.target_ref == 'refs/heads/releases/v0.34.0' ||
+    (github.ref == 'refs/heads/releases/v0.34.0' &&
+    inputs.target_ref != 'main' && inputs.target_ref != 'refs/heads/main')) &&
+    'v0.34.0' || 'main' }}
+
 concurrency:
-  # Cancelling would throw away a finished build and the serial model runs
-  # behind it, so a second nightly waits instead of replacing the first.
-  # Route disabled scheduled triggers to a per-run group so a no-op cron
-  # cannot evict a queued DevOps dispatch in the active group.
+  # Both branches use the same literal group. Keep the old main key so
+  # runs queued before the rollout still hold the same lock.
+  # Disabled cron ticks do not need to wait for that lock.
   group: >-
     ${{ (github.event_name == 'schedule' && vars.PPU_NIGHTLY_SCHEDULE_DISABLED == 'true') &&
     format('accuracy-nightly-disabled-schedule-{0}', github.run_id) ||
-    format('accuracy-nightly-{0}', github.ref) }}
+    'accuracy-nightly-refs/heads/main' }}
   cancel-in-progress: false
+  queue: max
 
 jobs:
+  dispatch-release:
+    name: Queue v0.34.0 Nightly
+    if: >-
+      ${{ github.event_name == 'schedule' && github.ref == 'refs/heads/main' &&
+      github.run_attempt == '1' && vars.PPU_NIGHTLY_SCHEDULE_DISABLED != 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: write
+    steps:
+      - name: Dispatch the release workflow without waiting for it
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MODELS: ${{ vars.PPU_RECIPE_PUBLIC_ENABLED == 'true' && 'recipe:all' || '' }}
+        run: |
+          gh workflow run ppu-accuracy-nightly.yaml --repo "$GITHUB_REPOSITORY" \
+            --ref releases/v0.34.0 -f "models=$MODELS"
+
   build:
     name: Build nightly wheels
     needs: select
@@ -106,6 +134,7 @@ jobs:
       # manifest describe one tree.
       pr_head_sha: ${{ needs.select.outputs.target_sha }}
       skip_device_tests: true
+      runtime_version: ${{ needs.select.outputs.version }}
 
   select:
     name: Select accuracy models
@@ -120,8 +149,16 @@ jobs:
       recipe_matrix: ${{ steps.select.outputs.recipe_matrix }}
       run_recipe: ${{ steps.select.outputs.run_recipe }}
       target_sha: ${{ steps.select.outputs.target_sha }}
+      version: ${{ steps.version.outputs.version }}
     steps:
+      - name: Record Nightly version
+        id: version
+        run: |
+          printf 'version=%s\n' "$NIGHTLY_VERSION" >> "$GITHUB_OUTPUT"
+          printf '## [vllm-sail | %s] Nightly\n' "$NIGHTLY_VERSION" >> "$GITHUB_STEP_SUMMARY"
+
       - name: Validate dispatch inputs
+        id: validate_inputs
         env:
           TARGET_REF: ${{ inputs.target_ref }}
           IMAGE_TAG: ${{ inputs.image_tag }}
@@ -384,6 +421,7 @@ jobs:
         id: resolve
         env:
           TRUSTED_DIR: ${{ steps.workspace.outputs.trusted }}
+          PPU_CI_RUNTIME_VERSION: ${{ needs.select.outputs.version }}
           PPU_CI_RUNTIME_IMAGE_TAG: ${{ inputs.image_tag }}
         run: |
           digest_file="$(mktemp "${RUNNER_TEMP}/ppu-runtime-digest.XXXXXX")"
@@ -427,6 +465,7 @@ jobs:
       # which for a workflow_call is this nightly run.
       build_run_id: ${{ !inputs.skip_wheel_build && github.run_id || '' }}
       models: ${{ matrix.model }}
+      runtime_version: ${{ needs.select.outputs.version }}
       publish_nightly_summary: true
       image_tag: ${{ inputs.image_tag }}
       image_digest: ${{ needs.resolve-image.outputs.image_digest || inputs.image_digest }}
@@ -454,6 +493,7 @@ jobs:
       wheel_source_sha: ${{ !inputs.skip_wheel_build && needs.select.outputs.target_sha || '' }}
       build_run_id: ${{ !inputs.skip_wheel_build && github.run_id || '' }}
       models: ${{ needs.select.outputs.recipe_models }}
+      runtime_version: ${{ needs.select.outputs.version }}
       image_tag: ${{ inputs.image_tag }}
       image_digest: ${{ needs.resolve-image.outputs.image_digest || inputs.image_digest }}
       skip_wheel_build: ${{ inputs.skip_wheel_build == true }}
@@ -508,6 +548,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           NOTIFY_SELECT_RESULT: ${{ needs.select.result }}
           NOTIFY_REF: ${{ inputs.target_ref || github.ref_name }}
+          NOTIFY_NIGHTLY_VERSION: ${{ env.NIGHTLY_VERSION }}
           NOTIFY_BUILD_RESULT: ${{ needs.build.result }}
           NOTIFY_SKIP_BUILD: ${{ inputs.skip_wheel_build == true }}
           NOTIFY_IMAGE_RESULT: ${{ needs.resolve-image.result }}
