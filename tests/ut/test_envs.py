@@ -14,13 +14,25 @@ import pytest
 
 from vllm_sail import envs
 
+
+def _deepgemm_hw_default() -> bool:
+    """M890-and-later hardware default for the DeepGEMM switches."""
+    try:
+        from vllm.platforms import current_platform
+
+        return current_platform.is_ppu() and current_platform.has_device_capability(
+            (8, 9)
+        )
+    except Exception:
+        return False
+
+
 BOOL_DEFAULTS = {
     "FUSED_RMSNORM_QUANT": False,
     "USE_OPT_TOKEN_GROUP_QUANT": False,
-    "DENSE_BF16_DEEPGEMM": False,
     "USE_PLA": True,
-    "DEEPGEMM_MOE_TP_FUSED": False,
-    "DEEPGEMM_MOE_FUSED_ACT_QUANT": False,
+    "DEEPGEMM_MOE_TP_FUSED": True,
+    "DEEPGEMM_MOE_FUSED_ACT_QUANT": True,
     "USE_DEEPSELECT": True,
     "FUSED_GDN_DECODE": True,
     "DISABLE_MOE_WNA16_CUDA": False,
@@ -43,6 +55,7 @@ BOOL_DEFAULTS = {
     "FUSED_NORM_ROPE_ATTN": False,
     "PPU_KV_MXFP8": False,
     "PPU_KV_NVFP4": False,
+    "FUSED_ATTN_PER_TOKEN_SCALE": False,
 }
 INT_DEFAULTS = {
     "KPOOL_MAX_DENSE_POOLS": 1 << 21,
@@ -51,7 +64,7 @@ INT_DEFAULTS = {
 BACKENDS = ("MOE_BACKEND", "DENSE_BACKEND")
 # String env vars with a non-None default and no legacy VLLM_PPU_* alias.
 STRING_DEFAULTS = {
-    "KPOOL_DECODE_LOGITS": "non_paged",
+    "KPOOL_DECODE_LOGITS": "paged",
     "QSA_KERNEL": "auto",
     "MEGA_MOE_MMA_TYPE": "fp8xfp4",
     "STEP5_DSA_SCORES": "v0",
@@ -152,6 +165,8 @@ def test_defaults_and_canonical_snapshot() -> None:
     expected["VLLM_GDN_DECODE_KERNEL"] = "auto"
     expected["VLLM_SAIL_FP8_LOAD_POLICY"] = None
     expected["VLLM_SAIL_STEP5_DSA_PREFILL_BACKEND"] = "flashinfer"
+    # Hardware-dependent default: ON for M890 and later, opt-in on 810E.
+    expected["VLLM_SAIL_DENSE_BF16_DEEPGEMM"] = _deepgemm_hw_default()
     assert envs.snapshot() == expected
     assert set(envs.environment_variables) == set(expected)
     for suffix in (*BOOL_DEFAULTS, *INT_DEFAULTS, *BACKENDS, *STRING_DEFAULTS):
@@ -161,7 +176,7 @@ def test_defaults_and_canonical_snapshot() -> None:
 def test_mega_moe_mma_type_is_lazy_and_checks_choices(monkeypatch):
     name = "VLLM_SAIL_MEGA_MOE_MMA_TYPE"
     assert getattr(envs, name) == "fp8xfp4"
-    for mode in ("fp8xfp4", "bf16xfp4", "fp4xfp4"):
+    for mode in ("fp8xfp4", "bf16xfp4", "fp4xfp4", "int8xint8"):
         monkeypatch.setenv(name, f" {mode.upper()} ")
         assert getattr(envs, name) == mode
     monkeypatch.setenv(name, "unsupported")
@@ -528,11 +543,15 @@ def test_gdn_prefill_e2e_resolver_stubs_match_production(monkeypatch, name):
 @pytest.mark.parametrize(
     "name", ["VLLM_SAIL_KPOOL_DECODE_LOGITS", "VLLM_PPU_KPOOL_DECODE_LOGITS"]
 )
-def test_kpool_rejects_incomplete_paged_logits(monkeypatch, name):
+def test_kpool_accepts_both_decode_logits_backends(monkeypatch, name):
+    """``paged`` is the restored default and ``non_paged`` an explicit opt-in."""
     monkeypatch.delenv("VLLM_SAIL_KPOOL_DECODE_LOGITS", raising=False)
     monkeypatch.delenv("VLLM_PPU_KPOOL_DECODE_LOGITS", raising=False)
-    monkeypatch.setenv(name, "paged")
-    with pytest.raises(ValueError, match="Expected one of non_paged"):
+    for backend in ("non_paged", "paged"):
+        monkeypatch.setenv(name, backend)
+        assert envs.VLLM_SAIL_KPOOL_DECODE_LOGITS == backend
+    monkeypatch.setenv(name, "dense")
+    with pytest.raises(ValueError, match="Expected one of non_paged, paged"):
         _ = envs.VLLM_SAIL_KPOOL_DECODE_LOGITS
 
 
