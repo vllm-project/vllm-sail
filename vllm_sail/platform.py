@@ -259,6 +259,8 @@ class PPUPlatform(NvmlCudaPlatform):
                 raise ValueError(
                     "SAIL MegaMoE requires MXFP4 experts (expert_dtype=fp4)."
                 )
+            if mma_type == "int8xint8" and vllm_config.parallel_config.enable_eplb:
+                raise ValueError("SAIL INT8 MegaMoE does not yet support EPLB.")
 
             import torch
 
