@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# ruff: noqa: I001 (patch installation order)
 """PPU performance patches.
 
 Optimisations that PPU needs on top of upstream's code paths. Unlike the
@@ -21,6 +22,7 @@ from vllm_sail.patch.performance import step5_dsa_prefill  # noqa: F401
 from vllm_sail.patch.performance import step5_fused_router  # noqa: F401
 from vllm_sail.patch.performance import step5_norm  # noqa: F401
 from vllm_sail.patch.performance import step5_qknorm_rope_cache  # noqa: F401
+from vllm_sail.patch.performance import step5_small_kernels  # noqa: F401
 
 # Leaf-style module (like enhancement/mxfp4): defines its replacement without
 # vLLM imports at module scope, so installation is explicit.

@@ -49,6 +49,7 @@ def register() -> None:
         linear_kernels,
         moe_backends,
         quant_config,
+        step5_gate,
         tuned_configs,
     )
 
@@ -58,6 +59,7 @@ def register() -> None:
         tuned_configs.register()
         linear_kernels.register()
         quant_config.register()
+        step5_gate.register()
 
         # Imported last because the oracles resolve expert classes that the
         # kernel registrations above make selectable.

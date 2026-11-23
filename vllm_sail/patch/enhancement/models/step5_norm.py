@@ -89,8 +89,9 @@ def apply_step5_add_rms_norm(
             from vllm_sail.models.step5.ops import rms_norm
         except ImportError:
             rms_norm = None
-        if (rms_norm is not None
-                and rms_norm.supports_fused_add_rms_norm(x, residual, weight, out_dtype)):
+        if rms_norm is not None and rms_norm.supports_fused_add_rms_norm(
+            x, residual, weight, out_dtype
+        ):
             return rms_norm.fused_add_rms_norm(
                 x, residual, weight, variance_epsilon, zero_centered, out_dtype
             )
@@ -102,3 +103,60 @@ def apply_step5_add_rms_norm(
     )
     return output, residual_out
     # PPU MODIFICATION: end
+
+
+@patch(
+    _TARGET,
+    "apply_step5_three_input_rms_norm",
+    reason="Fuse Step5 deferred BF16 shared/routed additions on PPU.",
+    affected_versions=_AFFECTED,
+    remove_when="Step5 supports deferred three-input normalization natively.",
+    allow_missing=True,
+)
+def apply_step5_three_input_rms_norm(
+    x: torch.Tensor,
+    shared: torch.Tensor,
+    residual: torch.Tensor,
+    weight: torch.Tensor,
+    variance_epsilon: float,
+    zero_centered: bool = False,
+    out_dtype: torch.dtype | None = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    if (
+        current_platform.is_ppu()
+        and math.isfinite(variance_epsilon)
+        and variance_epsilon > 0
+    ):
+        try:
+            from vllm_sail.models.step5.ops import rms_norm
+        except ImportError:
+            rms_norm = None
+        if rms_norm is not None and rms_norm.supports_three_input_rms_norm(
+            x, shared, residual, weight, out_dtype
+        ):
+            return rms_norm.three_input_rms_norm(
+                x, shared, residual, weight, variance_epsilon, zero_centered, out_dtype
+            )
+    return _layernorm.apply_step5_add_rms_norm(
+        x + shared, residual, weight, variance_epsilon, zero_centered, out_dtype
+    )
+
+
+@patch(
+    _TARGET,
+    "Step5RMSNorm._forward_with_shared",
+    reason="Consume deferred Step5 shared outputs through the PPU three-input norm.",
+    affected_versions=_AFFECTED,
+    remove_when="Step5RMSNorm exposes a native shared-output normalization interface.",
+    allow_missing=True,
+)
+def _forward_with_shared(self, x, shared, residual):
+    return _layernorm.apply_step5_three_input_rms_norm(
+        x,
+        shared,
+        residual,
+        self.weight,
+        self.variance_epsilon,
+        self.zero_centered,
+        torch.bfloat16,
+    )

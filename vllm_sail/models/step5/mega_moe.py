@@ -172,6 +172,8 @@ class PPUStep5MegaMoEExperts(PPUDeepGemmMegaMoEExperts):
         self.quant_method = _MegaMoEMethod()
         self.ready = False
         self.pool = None
+        self.register_buffer("_padding_id", None, persistent=False)
+        self.register_buffer("_padding_weight", None, persistent=False)
         self.replica_pool = None
         self.ultra_ep = None
         transfer = vllm_config.kv_transfer_config
@@ -387,6 +389,12 @@ class PPUStep5MegaMoEExperts(PPUDeepGemmMegaMoEExperts):
                     mma_type=_MMA_TYPES[self.mma_type],
                     activation=self.activation.name,
                 )
+            self._padding_id = torch.full(
+                (), -1, dtype=torch.int64, device=self.w13_weight.device
+            )
+            self._padding_weight = torch.zeros(
+                (), dtype=torch.float32, device=self.w13_weight.device
+            )
             pool = self._symm_buffers[key]
             if use_replicas:
                 self.replica_pool = pool
@@ -433,13 +441,38 @@ class PPUStep5MegaMoEExperts(PPUDeepGemmMegaMoEExperts):
             raise ValueError("Step5 MegaMoE input exceeds its allocated token capacity")
         if hidden_states.dtype != torch.bfloat16:
             raise ValueError("Step5 MegaMoE expects BF16 hidden states")
-        if padding is not None:
-            topk_ids = torch.where(padding[:tokens, None], -1, topk_ids)
-            topk_weights = torch.where(padding[:tokens, None], 0, topk_weights)
-        api = mega_moe_api(self.mma_type)
-        l1, l2 = self._kernel_weights(api)
         use_replicas = self._use_replicas(tokens)
         buffer = self.get_symm_buffer(use_replicas)
+        if padding is not None:
+            if (
+                topk_ids.dtype == torch.int64
+                and topk_weights.dtype == torch.float32
+                and topk_ids.shape == topk_weights.shape == (tokens, self.top_k)
+                and not topk_ids.is_neg()
+                and not topk_weights.is_neg()
+                and topk_ids.is_contiguous()
+                and topk_weights.is_contiguous()
+                and padding.ndim == 1
+                and padding.dtype == torch.bool
+                and padding.shape[0] >= tokens
+                and padding.device == topk_ids.device == topk_weights.device
+                and not (torch.is_grad_enabled() and topk_weights.requires_grad)
+            ):
+                from vllm_sail.models.step5.ops.route_padding import mask_routes
+
+                topk_ids, topk_weights = mask_routes(topk_ids, topk_weights, padding)
+            elif topk_ids.dtype == torch.int64 and topk_weights.dtype == torch.float32:
+                topk_ids = torch.where(
+                    padding[:tokens, None], self._padding_id, topk_ids
+                )
+                topk_weights = torch.where(
+                    padding[:tokens, None], self._padding_weight, topk_weights
+                )
+            else:
+                topk_ids = torch.where(padding[:tokens, None], -1, topk_ids)
+                topk_weights = torch.where(padding[:tokens, None], 0, topk_weights)
+        api = mega_moe_api(self.mma_type)
+        l1, l2 = self._kernel_weights(api)
         replica_kwargs = {}
         if use_replicas:
             logger.info_once("Step5 UltraEP prefill dispatch active", scope="process")

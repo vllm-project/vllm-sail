@@ -81,7 +81,7 @@ def deep_select_topk(
     if end is not None and end.numel() != rows:
         raise ValueError("DeepSelect needs one exclusive end per query row")
     interface = _wheel()
-    run_bytes, _ = interface.get_stride_requirement()
+    run_bytes, output_bytes = interface.get_stride_requirement()
     # The wheel requires run-aligned row strides, including narrow views.
     if (
         logits.stride(1) != 1
@@ -98,8 +98,21 @@ def deep_select_topk(
         if end is not None
         else None
     )
-    # Allocate through the wheel: a caller's k/stride need not meet its 32B
-    # output alignment. In particular, preserve k instead of rounding it up.
+    direct_output = None
+    # BF16 unsorted selection is not bitwise repeatable in the current wheel.
+    if (
+        output_idx is not None
+        and logits.dtype == torch.float32
+        and not output_idx.is_neg()
+        and output_idx.device == logits.device
+        and output_idx.stride(1) == 1
+        and output_idx.stride(0) >= topk
+        and output_idx.stride(0) * output_idx.element_size() % output_bytes == 0
+        and output_idx.data_ptr() % output_bytes == 0
+        and output_idx.untyped_storage().data_ptr()
+        != logits.untyped_storage().data_ptr()
+    ):
+        direct_output = output_idx
     _, indices = interface.topk(
         logits,
         topk,
@@ -107,14 +120,15 @@ def deep_select_topk(
         end=ends,
         indices_type=indices_dtype,
         sorted_index=False,
-        output_idx=None,
+        output_idx=direct_output,
         output_idx_offset=None,
         idx_oob_fill_value=-1,
         return_value=False,
         abort_when_nan_found=False,
     )
     if output_idx is not None:
-        output_idx.copy_(indices)
+        if direct_output is None:
+            output_idx.copy_(indices)
         return output_idx
     return indices
 
