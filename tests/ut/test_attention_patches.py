@@ -82,6 +82,10 @@ _ATTENTION_TARGETS = (
         "FlashMLASparseMetadataBuilder.__init__",
     ),
     (
+        "vllm.v1.attention.backends.mla.flashmla_sparse",
+        "FlashMLASparseImpl.prefill_padding",
+    ),
+    (
         "vllm.v1.attention.backends.mla.prefill.flash_attn",
         "FlashAttnPrefillBackend.__init__",
     ),
@@ -518,6 +522,7 @@ def test_phase4_plugin_modules_import_without_hardware(installed) -> None:
         "vllm_sail.patch.enhancement.attention.flashmla_ops",
         "vllm_sail.patch.enhancement.attention.flashmla_backend",
         "vllm_sail.patch.enhancement.attention.flashmla_sparse_backend",
+        "vllm_sail.patch.enhancement.attention.sparse_mla_prefill_padding",
         "vllm_sail.patch.enhancement.attention.mla_prefill_flash_attn",
         "vllm_sail.patch.enhancement.attention.mla_attention",
         "vllm_sail.patch.enhancement.attention.mla_indexer",
