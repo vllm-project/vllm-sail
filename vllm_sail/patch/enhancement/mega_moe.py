@@ -14,6 +14,7 @@ _EXPERT_CONSUMERS = (
     "vllm.models.deepseek_v4.nvidia.model",
     "vllm.models.kimi_k3.nvidia.model",
     "vllm.models.minimax_m3.nvidia.model",
+    "vllm_sail.patch.enhancement.models.qwen4_exp_mega_moe",
 )
 _installed = False
 
