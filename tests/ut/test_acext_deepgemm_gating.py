@@ -16,9 +16,10 @@ Three gating branches, each asserted hard (fail on mismatch):
   leaves it unavailable.
 * **w8a8-fp8 / mxfp4 DeepGEMM** -- gated to ZW-890P ``(8, 9)``; never
   constructed on ZW-810E ``(8, 0)``.
-* **bf16 / w8a8-int8 DeepGEMM** -- constructible on both chips.
-  BF16 dense dispatch needs the feature flag and a supported shape on the
-  selected chip. The default-on policy is covered by the env tests.
+* **bf16 / w8a8-int8 DeepGEMM** -- hardware-supported (constructible) on *both*
+  chips, but BF16 *dense* auto-enable additionally requires
+  ``VLLM_SAIL_DENSE_BF16_DEEPGEMM`` and PPU 1.5, so it fires only on ZW-890P.
+  This is the "capability support != default auto-enable" distinction.
 """
 
 from __future__ import annotations
@@ -88,18 +89,12 @@ def platform_double(chip: str) -> types.SimpleNamespace:
             return capability == tuple(value)
         return capability[0] * 10 + capability[1] >= value
 
-    def has_device_capability(value) -> bool:
-        if isinstance(value, tuple):
-            return capability >= value
-        return capability[0] * 10 + capability[1] >= value
-
     return types.SimpleNamespace(
         is_ppu=lambda: True,
         is_cuda=lambda: True,
         get_device_capability=lambda device_id=0: capability,
         get_device_name=lambda device_id=0: CHIP_PROFILES[chip].name,
         is_device_capability=is_device_capability,
-        has_device_capability=has_device_capability,
     )
 
 
@@ -198,21 +193,16 @@ def _should_use_bf16_linear(
     bf16_env: bool,
     bias: bool,
     n: int = 64,
-    k: int = 16,
-    input_ptr: int = 16,
-    weight_ptr: int = 32,
 ) -> bool:
-    monkeypatch.setenv("VLLM_SAIL_DENSE_BF16_DEEPGEMM", "1" if bf16_env else "0")
+    if bf16_env:
+        monkeypatch.setenv("VLLM_SAIL_DENSE_BF16_DEEPGEMM", "1")
+    else:
+        monkeypatch.delenv("VLLM_SAIL_DENSE_BF16_DEEPGEMM", raising=False)
+        monkeypatch.delenv("VLLM_PPU_DENSE_BF16_DEEPGEMM", raising=False)
     platform = platform_double(chip)
-    x = types.SimpleNamespace(
-        dtype="bf16", is_contiguous=lambda: True, data_ptr=lambda: input_ptr
-    )
+    x = types.SimpleNamespace(dtype="bf16", is_contiguous=lambda: True)
     weight = types.SimpleNamespace(
-        dtype="bf16",
-        dim=lambda: 2,
-        shape=(n, k),
-        is_contiguous=lambda: True,
-        data_ptr=lambda: weight_ptr,
+        dtype="bf16", dim=lambda: 2, shape=(n, 16), is_contiguous=lambda: True
     )
     fn = extract(
         DEEP_GEMM_PATH,
@@ -222,6 +212,7 @@ def _should_use_bf16_linear(
             "torch": _TORCH,
             "current_platform": platform,
             "has_deep_gemm": lambda: True,
+            "is_ppu_15": lambda: platform.is_device_capability((8, 9)),
         },
     )
     return bool(fn(x, weight, object() if bias else None))
@@ -295,7 +286,7 @@ def test_mxfp4_deepgemm_gated_to_890p(monkeypatch, chip) -> None:
 
 
 # ===========================================================================
-# BF16 / INT8 DeepGEMM: availability and dense dispatch by capability.
+# BF16 / INT8 DeepGEMM: constructible on both, dense auto-enable only on 890P.
 # ===========================================================================
 @pytest.mark.parametrize("chip", CHIPS)
 def test_bf16_and_int8_deepgemm_constructible_on_both_chips(
@@ -307,17 +298,24 @@ def test_bf16_and_int8_deepgemm_constructible_on_both_chips(
 
 
 @pytest.mark.parametrize("chip", CHIPS)
-def test_bf16_dense_requires_feature_flag_and_no_bias(monkeypatch, chip) -> None:
-    assert not _should_use_bf16_linear(monkeypatch, chip, bf16_env=False, bias=False)
-    assert _should_use_bf16_linear(monkeypatch, chip, bf16_env=True, bias=False)
-    assert not _should_use_bf16_linear(monkeypatch, chip, bf16_env=True, bias=True)
+def test_bf16_dense_autoenable_only_on_890p_with_env(monkeypatch, chip) -> None:
+    """BF16 dense DeepGEMM auto-enable needs the env *and* PPU 1.5 (890P)."""
+    # Env unset: never auto-enabled, on either chip.
+    assert (
+        _should_use_bf16_linear(monkeypatch, chip, bf16_env=False, bias=False) is False
+    )
+    # Env set: auto-enabled only on ZW-890P; ZW-810E default dense stays ACEXT.
+    assert _should_use_bf16_linear(monkeypatch, chip, bf16_env=True, bias=False) is (
+        chip == "890p"
+    )
+    # A present bias always forces the acblas/F.linear fallback.
+    assert _should_use_bf16_linear(monkeypatch, chip, bf16_env=True, bias=True) is False
 
 
-@pytest.mark.parametrize("chip", CHIPS)
 @pytest.mark.parametrize(
-    ("n", "supported_on_810e"),
+    ("n", "expected"),
     [
-        (1, True),
+        (1, False),  # odd N, scalar projection included: kernel asserts even N
         (2, True),
         (64, True),
         (4096, True),
@@ -326,30 +324,15 @@ def test_bf16_dense_requires_feature_flag_and_no_bias(monkeypatch, chip) -> None
         (129, False),
     ],
 )
-def test_bf16_dense_respects_chip_n_limits(
-    monkeypatch, chip, n, supported_on_810e
-) -> None:
-    expected = chip == "890p" or supported_on_810e
+def test_bf16_dense_accepts_only_even_n(monkeypatch, n, expected) -> None:
+    """DeepGEMM BF16 dense NT tiling accepts an even N only.
+
+    Every odd N -- N == 1 (Kimi-K3 AttnRes scalar projections) included --
+    is rejected at dispatch so it falls back to acblas instead of failing
+    inside the kernel (the PPU "BF16 dense GEMM requires even N" JIT
+    assertion).
+    """
     assert (
-        _should_use_bf16_linear(monkeypatch, chip, bf16_env=True, bias=False, n=n)
+        _should_use_bf16_linear(monkeypatch, "890p", bf16_env=True, bias=False, n=n)
         is expected
-    )
-
-
-@pytest.mark.parametrize(
-    ("k", "input_ptr", "weight_ptr"),
-    [(12, 16, 32), (16, 17, 32), (16, 16, 33)],
-)
-def test_810e_scalar_gemv_requires_aligned_k_and_operands(
-    monkeypatch, k, input_ptr, weight_ptr
-) -> None:
-    assert not _should_use_bf16_linear(
-        monkeypatch,
-        "810e",
-        bf16_env=True,
-        bias=False,
-        n=1,
-        k=k,
-        input_ptr=input_ptr,
-        weight_ptr=weight_ptr,
     )
