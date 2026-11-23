@@ -350,14 +350,18 @@ def _expert_dtype_override(vllm_config, expert_dtype: str):
     ),
 )
 def _deepseek_v4_moe_init(self, vllm_config, *args, **kwargs):
+    original = getattr(_deepseek_v4_moe_init, PATCH_MARKER)[_MOE_INIT_TARGET]
+    if (
+        not current_platform.is_ppu()
+        or vllm_config.kernel_config.moe_backend != "deep_gemm_mega_moe"
+    ):
+        return original(self, vllm_config, *args, **kwargs)
+
     from vllm_sail.utils.deep_gemm_mega import (
         mma_type_for_expert_dtype,
         resolve_expert_dtype,
     )
 
-    original = getattr(_deepseek_v4_moe_init, PATCH_MARKER)[_MOE_INIT_TARGET]
-    if not current_platform.is_ppu():
-        return original(self, vllm_config, *args, **kwargs)
     if mma_type_for_expert_dtype(resolve_expert_dtype(vllm_config)) != "int8xint8":
         return original(self, vllm_config, *args, **kwargs)
     with _expert_dtype_override(vllm_config, "fp4"):

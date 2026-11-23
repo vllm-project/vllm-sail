@@ -763,15 +763,13 @@ def megamoe_platform_gate(modules):
 
 
 @pytest.mark.parametrize("model_type", ["deepseek_v41", "kimi_k31", "other_moe"])
-@pytest.mark.parametrize("mode", _MEGAMOE_MODE_APIS)
+@pytest.mark.parametrize("mode", ["fp4xfp4", "fp8xfp4", "bf16xfp4"])
 @pytest.mark.parametrize("intermediate", [None, 128])
 def test_megamoe_platform_gate_accepts_models_and_eplb(
     megamoe_platform_gate, model_type, mode, intermediate
 ):
     gate, config, envs, calls = megamoe_platform_gate
     text_config = SimpleNamespace(model_type=model_type, hidden_size=2048)
-    if mode == "int8xint8":
-        text_config.expert_dtype = "int8"
     if intermediate is not None:
         text_config.moe_intermediate_size = intermediate
     config.model_config.hf_text_config = text_config
@@ -794,11 +792,22 @@ def test_megamoe_platform_gate_pins_int8_mode_for_int8_experts(megamoe_platform_
     gate, config, envs, calls = megamoe_platform_gate
     # The configured MXFP4 mode must not leak into an INT8 checkpoint.
     envs.VLLM_SAIL_MEGA_MOE_MMA_TYPE = "fp8xfp4"
+    config.parallel_config.enable_eplb = False
     config.model_config.hf_text_config = SimpleNamespace(
         model_type="deepseek_v41", hidden_size=5120, expert_dtype="int8"
     )
     gate(None, config)
     assert calls == [(("cuda", 0), 5120, None, "int8xint8")]
+
+
+def test_megamoe_platform_gate_rejects_int8_with_eplb(megamoe_platform_gate):
+    gate, config, _, calls = megamoe_platform_gate
+    config.model_config.hf_text_config = SimpleNamespace(
+        model_type="deepseek_v41", hidden_size=5120, expert_dtype="int8"
+    )
+    with pytest.raises(ValueError, match="INT8 MegaMoE does not yet support EPLB"):
+        gate(None, config)
+    assert calls == []
 
 
 def test_megamoe_mma_type_resolution(modules, monkeypatch):
