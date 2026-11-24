@@ -24,6 +24,10 @@ def test_nightly_reuses_the_builder_and_publishes_its_wheel_pair():
     assert jobs["build"] == {
         "needs": "prepare",
         "uses": "./.github/workflows/_ppu-build.yaml",
+        "secrets": {
+            "ci_registry_username": "${{ secrets.RELEASE_USERNAME }}",
+            "ci_registry_token": "${{ secrets.RELEASE_TOKEN }}",
+        },
         "with": {"pr_head_sha": "${{ needs.prepare.outputs.sha }}"},
     }
     publish = jobs["publish"]
