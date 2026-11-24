@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import importlib.util
 import re
+from types import SimpleNamespace
 
 import pytest
 
@@ -634,6 +635,116 @@ def test_flashmla_decode_matches_golden(query_len, seq_lens):
         query_chunk=QUERY_CHUNK,
     )
     ref.assert_close(lse, golden_lse, "fp32", atol=1e-2, rtol=1e-2)
+
+
+@pytest.mark.parametrize("num_heads", [8, 16, 32, 48, 64, 96, 128])
+@pytest.mark.parametrize("query_len", [1, 4])
+@pytest.mark.parametrize("strided_query", [False, True])
+@pytest.mark.parametrize("has_topk_length", [False, True])
+def test_sparse_fp8_decode_keeps_native_heads(
+    monkeypatch, num_heads, query_len, strided_query, has_topk_length
+):
+    """Native-head decode matches padded decode and an independent fp32 oracle."""
+    from vllm.v1.attention.backends.mla import flashmla_sparse as backend
+
+    from vllm_sail.patch.enhancement.attention.flashmla_sparse_backend import (
+        _upstream_fp8_flash_mla_kernel,
+    )
+
+    # DS-V3.2 cache records: 512 E4M3 bytes, four fp32 scales, 64 BF16
+    # RoPE values. Unit scales make the software dequantization exact.
+    generator = torch.Generator().manual_seed(1701)
+    blocks, batch, topk = 16, 2, 128
+    keys = torch.randn(blocks, BLOCK_SIZE, MLA_HEAD_DIM, generator=generator).to(
+        torch.bfloat16
+    )
+    nope = keys[..., :KV_LORA_RANK].to(torch.float8_e4m3fn)
+    rope = keys[..., KV_LORA_RANK:].contiguous()
+    scales = torch.ones(blocks, BLOCK_SIZE, 4, dtype=torch.float32)
+    packed = torch.cat(
+        [nope.view(torch.uint8), scales.view(torch.uint8), rope.view(torch.uint8)],
+        dim=-1,
+    )
+    # Also exercise a page stride larger than the live KV rows.
+    storage = torch.zeros(blocks, BLOCK_SIZE + 1, packed.shape[-1], dtype=torch.uint8)
+    storage[:, :BLOCK_SIZE] = packed
+    cache = storage.to(DEVICE)[:, :BLOCK_SIZE]
+    dequantized = torch.cat([nope.float(), rope.float()], dim=-1).reshape(
+        -1, MLA_HEAD_DIM
+    )
+    query = torch.randn(
+        batch,
+        query_len,
+        num_heads + int(strided_query),
+        MLA_HEAD_DIM,
+        generator=generator,
+    ).to(device=DEVICE, dtype=torch.bfloat16)[:, :, :num_heads]
+    indices_cpu = (
+        torch.stack(
+            [
+                torch.randperm(blocks * BLOCK_SIZE, generator=generator)[:topk]
+                for _ in range(batch * query_len)
+            ]
+        )
+        .reshape(batch, query_len, topk)
+        .to(torch.int32)
+    )
+    indices_cpu[..., -16:] = -1
+    indices = indices_cpu.to(DEVICE)
+    impl = backend.FlashMLASparseImpl.__new__(backend.FlashMLASparseImpl)
+    impl.softmax_scale = SOFTMAX_SCALE
+    lengths_cpu = None
+    lengths = None
+    if has_topk_length:
+        # Decode uses one prefix length per batch item, shared by all of
+        # that item's speculative query tokens (unlike sparse prefill).
+        lengths_cpu = 32 + 32 * torch.arange(batch, dtype=torch.int32)
+        lengths = lengths_cpu.to(DEVICE)
+
+    def metadata():
+        scheduler, _ = mla_ops.get_mla_metadata()
+        return SimpleNamespace(
+            scheduler_metadata=scheduler,
+            dummy_block_table=torch.zeros(batch, 1, dtype=torch.int32, device=DEVICE),
+            cache_lens=torch.full(
+                (batch,), blocks * BLOCK_SIZE, dtype=torch.int32, device=DEVICE
+            ),
+        )
+
+    baseline, baseline_lse = _upstream_fp8_flash_mla_kernel(
+        impl, query, cache, indices, metadata(), topk_length=lengths
+    )
+    provider = backend.flash_mla_with_kvcache
+    observed = []
+
+    def checked_provider(*args, **kwargs):
+        observed.append(kwargs["q"])
+        return provider(*args, **kwargs)
+
+    monkeypatch.setattr(backend, "flash_mla_with_kvcache", checked_provider)
+    output, lse = impl._fp8_flash_mla_kernel(
+        query, cache, indices, metadata(), topk_length=lengths
+    )
+    assert len(observed) == 1 and observed[0] is query
+    assert output.shape == (batch, query_len, num_heads, KV_LORA_RANK)
+    assert lse.shape == (batch, num_heads, query_len)
+    torch.testing.assert_close(output, baseline, rtol=2e-2, atol=2e-2)
+    torch.testing.assert_close(lse, baseline_lse, rtol=2e-2, atol=2e-2)
+
+    selected = dequantized[indices_cpu.clamp_min(0).long()]
+    scores = torch.einsum("bshd,bskd->bshk", query.float().cpu(), selected)
+    scores *= SOFTMAX_SCALE
+    invalid = indices_cpu < 0
+    if lengths_cpu is not None:
+        invalid |= torch.arange(topk) >= lengths_cpu[:, None, None]
+    scores.masked_fill_(invalid.unsqueeze(2), float("-inf"))
+    golden = torch.einsum(
+        "bshk,bskd->bshd", scores.softmax(-1), selected[..., :KV_LORA_RANK]
+    )
+    golden_lse = scores.logsumexp(-1).transpose(1, 2)
+    torch.testing.assert_close(output.float().cpu(), golden, rtol=2e-2, atol=2e-2)
+    torch.testing.assert_close(lse.cpu(), golden_lse, rtol=2e-2, atol=2e-2)
+    _assert_relative_rms(output, golden, 5e-2, "sparse FP8 native heads")
 
 
 def test_flashmla_decode_only_reads_the_declared_sequence_length():
