@@ -85,7 +85,8 @@ jobs:
       !github.event.pull_request.draft &&
       contains(github.event.pull_request.labels.*.name, 'ci-preview'))) }}
     runs-on: 8-ppu-m890p
-    timeout-minutes: 10
+    # A cold pull of the full runtime may exceed the Preview budget.
+    timeout-minutes: ${{ github.event_name == 'pull_request' && 10 || 25 }}
     env:
       GIT_CONFIG_NOSYSTEM: "1"
     outputs:
