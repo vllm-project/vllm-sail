@@ -1,86 +1,35 @@
-name: PPU debug
-run-name: "PPU debug: ${{ inputs.target }} on build ${{ inputs.build_run_id }}"
+name: Verify candidate PPU PR CI
+run-name: "Candidate CI (main) at d8597063a64a410f21b2ada7e9f00586304b55f9"
 
 on:
   workflow_dispatch:
-    inputs:
-      build_run_id:
-        description: Run ID whose ppu-wheels-<run_id> artifact holds the wheels under test
-        required: true
-        type: string
-      wheel_source_sha:
-        description: Exact SAIL commit recorded in the selected wheel manifest
-        required: true
-        type: string
-      target:
-        description: Stages to rerun against the existing build
-        required: true
-        type: choice
-        options: [both, pin-ut, model-tests, accuracy-tests, kernel-perf]
-        default: both
-      models:
-        description: Comma-separated smoke model catalog keys
-        required: false
-        default: qwen3.8-27b-m890p
-        type: string
-      accuracy_models:
-        description: Comma-separated accuracy model catalog keys
-        required: false
-        default: deepseek-v4-mxfp4
-        type: string
 
-permissions:
-  contents: read
-  actions: read
+permissions: {}
 cache-mode: none
 
 jobs:
-  pin-unit-tests:
-    name: PPU pin UT
-    if: inputs.target == 'both' || inputs.target == 'pin-ut'
+  cpu:
+    if: >-
+      github.repository == 'vllm-project/vllm-sail' &&
+      github.ref == 'refs/heads/codex/ci-image-validation-main-20261124' &&
+      github.actor == 'Yunzshi310'
     permissions:
       contents: read
-      actions: read
-    uses: ./.github/workflows/_ppu-pin-ut.yaml
+    uses: ./.github/workflows/ut.yaml
     with:
-      pr_mode: false
-      build_run_id: ${{ inputs.build_run_id }}
-      wheel_source_sha: ${{ inputs.wheel_source_sha }}
+      pr_head_sha: 'd8597063a64a410f21b2ada7e9f00586304b55f9'
 
-  model-tests:
-    name: PPU model tests
-    if: inputs.target == 'both' || inputs.target == 'model-tests'
+  ppu:
+    if: >-
+      github.repository == 'vllm-project/vllm-sail' &&
+      github.ref == 'refs/heads/codex/ci-image-validation-main-20261124' &&
+      github.actor == 'Yunzshi310'
     permissions:
       contents: read
       actions: read
-    uses: ./.github/workflows/_ppu-model-tests.yaml
+    uses: ./.github/workflows/ppu-build-and-test.yaml
+    secrets:
+      ci_registry_username: ${{ secrets.RELEASE_USERNAME }}
+      ci_registry_token: ${{ secrets.RELEASE_TOKEN }}
     with:
-      pr_mode: false
-      build_run_id: ${{ inputs.build_run_id }}
-      wheel_source_sha: ${{ inputs.wheel_source_sha }}
-      models: ${{ inputs.models }}
-
-  accuracy-tests:
-    name: PPU accuracy tests
-    if: inputs.target == 'accuracy-tests'
-    permissions:
-      contents: read
-      actions: read
-    uses: ./.github/workflows/_ppu-accuracy-tests.yaml
-    with:
-      pr_mode: false
-      build_run_id: ${{ inputs.build_run_id }}
-      wheel_source_sha: ${{ inputs.wheel_source_sha }}
-      models: ${{ inputs.accuracy_models }}
-
-  kernel-perf:
-    name: PPU kernel perf
-    if: inputs.target == 'both' || inputs.target == 'kernel-perf'
-    permissions:
-      contents: read
-      actions: read
-    uses: ./.github/workflows/_ppu-kernel-perf.yaml
-    with:
-      pr_mode: false
-      build_run_id: ${{ inputs.build_run_id }}
-      wheel_source_sha: ${{ inputs.wheel_source_sha }}
+      pr_head_sha: 'd8597063a64a410f21b2ada7e9f00586304b55f9'
