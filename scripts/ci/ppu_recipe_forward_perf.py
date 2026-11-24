@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
 import os
@@ -24,7 +25,7 @@ def write_json(path, data):
     path.write_text(json.dumps(data, indent=2, sort_keys=True, allow_nan=False) + "\n")
 
 
-def commands(resolved, groups, revision, results_dir):
+def commands(resolved, groups, checkpoint, results_dir):
     from ppu_recipe import _parse_flag_entries, _render_entries
 
     ignored = {"--enable-auto-tool-choice", "--tool-call-parser", "--reasoning-parser"}
@@ -53,11 +54,7 @@ def commands(resolved, groups, revision, results_dir):
             "bench",
             "forward",
             "--model",
-            resolved["resolved_model"],
-            "--revision",
-            revision,
-            "--tokenizer-revision",
-            revision,
+            str(checkpoint),
             *flags,
             *(f"{key}={value}" for key, value in limits.items()),
             "--seed",
@@ -179,28 +176,50 @@ def run(args):
     ]
     if not current_platform.is_ppu() or devices != ["ZW-M890P"] * count or count != 8:
         raise ValueError("Forward performance requires eight M890 PPUs")
-    checkpoint = Path(
-        snapshot_download(resolved["resolved_model"], local_files_only=True)
+    revision = None
+    if args.local_checkpoint is not None:
+        if not args.capture_baseline or not args.local_checkpoint.is_absolute():
+            raise ValueError("Local checkpoint paths require explicit baseline capture")
+        checkpoint = args.local_checkpoint
+    else:
+        checkpoint = Path(
+            snapshot_download(resolved["resolved_model"], local_files_only=True)
+        )
+        revision = checkpoint.name
+        if not re.fullmatch(r"[0-9a-f]{40}", revision):
+            raise ValueError("Expected the offline cache's checkpoint revision")
+    # The mounted export and the CI cache can use different directory layouts.
+    checkpoint_files = (
+        "config.json",
+        "tokenizer.json",
+        "tokenizer_config.json",
+        "model.safetensors.index.json",
     )
-    revision = checkpoint.name
-    if not re.fullmatch(r"[0-9a-f]{40}", revision):
-        raise ValueError("Expected the offline cache's checkpoint revision")
+    checkpoint_hashes = {
+        name: hashlib.sha256((checkpoint / name).read_bytes()).hexdigest()
+        for name in checkpoint_files
+    }
     provenance = json.loads((output.parent / "provenance.json").read_text())
     stack = json.loads(args.image_stack.read_text())
-    cmd = commands(resolved, groups, revision, output)
+    cmd = commands(resolved, groups, checkpoint, output)
     current = {
         "schema_version": 1,
         "config": {
             "recipe_config_digest": resolved["config_digest"],
-            "checkpoint_revision": revision,
+            "checkpoint_files_sha256": checkpoint_hashes,
             "devices": devices,
             "sdk_sha256": stack["sdk_sha256"],
             "torch_sha256": stack["torch_sha256"],
             "groups": groups,
-            "benchmark_args": {name: argv[7:-2] for name, argv in cmd.items()},
+            "benchmark_args": {
+                name: [*argv[7:10], resolved["hf_model_id"], *argv[11:-2]]
+                for name, argv in cmd.items()
+            },
         },
         "provenance": {
             "commits": provenance["commits"],
+            "checkpoint_source": "local_export" if revision is None else "hf_snapshot",
+            "checkpoint_revision": revision,
             "runtime_image_digest": provenance.get("runtime_image_digest"),
             "runtime_image_id": provenance.get("runtime_image_id"),
         },
@@ -323,6 +342,7 @@ def main():
     for name in ("recipe", "policy", "results-dir", "image-stack"):
         run_parser.add_argument(f"--{name}", type=Path, required=True)
     run_parser.add_argument("--capture-baseline", action="store_true")
+    run_parser.add_argument("--local-checkpoint", type=Path)
     sub.add_parser("publish")
     args = parser.parse_args()
     return run(args) if args.action == "run" else publish()

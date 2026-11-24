@@ -209,6 +209,9 @@ matching PPU runtime. Set `TIER=forward_perf` and
 `PPU_FORWARD_CAPTURE_BASELINE=true` with the verified wheels, model cache and
 recipe paths. Keep the raw results under the run directory and commit the
 generated baseline JSON under `tests/e2e/perf/baselines/890p/`.
+`PPU_FORWARD_LOCAL_CHECKPOINT` can point to the mounted checkpoint export for
+this capture. The baseline records content hashes so Nightly can verify the
+matching model and tokenizer files from its offline cache.
 
 ## Reporting issues
 
