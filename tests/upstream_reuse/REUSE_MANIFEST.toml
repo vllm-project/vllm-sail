@@ -195,6 +195,69 @@ category = "sample"
 reason = "Sampler applies top-k/top-p/penalties on current_platform.device_type; runs verbatim on CPU and on PPU (cuda-disguised), no narrowing required."
 min_tests = 1
 
+[[entry]]
+id = "openai_tool_calls_serialization"
+path = "tests/entrypoints/openai/test_tool_calls_serialization.py"
+mode = "direct"
+chips = ["cpu", "810e", "890p"]
+category = "protocol"
+reason = "OpenAI tool calls preserve list and generator inputs through request serialization."
+min_tests = 6
+
+[[entry]]
+id = "watchdog_config"
+path = "tests/config/test_watchdog_config.py"
+mode = "direct"
+chips = ["cpu", "810e", "890p"]
+category = "config"
+reason = "Watchdog defaults and interval validation run without an engine or device."
+min_tests = 8
+
+[[entry]]
+id = "observability_config"
+path = "tests/config/test_observability.py"
+mode = "direct"
+chips = ["cpu", "810e", "890p"]
+category = "config"
+reason = "Observability histogram bucket validation exercises configuration without an engine."
+min_tests = 13
+
+[[entry]]
+id = "v1_request"
+path = "tests/v1/test_request.py"
+mode = "direct"
+chips = ["cpu", "810e", "890p"]
+category = "core"
+reason = "Request token buffers and serialization use local inputs without starting an engine."
+min_tests = 24
+
+[[entry]]
+id = "repetition_detection"
+path = "tests/v1/core/test_repetition_detection.py"
+mode = "direct"
+chips = ["cpu", "810e", "890p"]
+category = "core"
+reason = "Exercises repetition detection and stop decisions on synthetic request tokens."
+min_tests = 19
+
+[[entry]]
+id = "encoder_cache_manager"
+path = "tests/v1/core/test_encoder_cache_manager.py"
+mode = "direct"
+chips = ["cpu", "810e", "890p"]
+category = "core"
+reason = "Encoder cache allocation, references and eviction use synthetic multimodal inputs."
+min_tests = 22
+
+[[entry]]
+id = "structured_output_request"
+path = "tests/v1/structured_output/test_request.py"
+mode = "direct"
+chips = ["cpu", "810e", "890p"]
+category = "core"
+reason = "Tests readiness and failure of grammar futures without model initialization."
+min_tests = 2
+
 # ---------------------------------------------------------------------------
 # L2 少量适配 -- skeleton reusable, but the file mixes CPU logic with
 # device / distributed / network nodes. test_reuse_adapted.py narrows the run
