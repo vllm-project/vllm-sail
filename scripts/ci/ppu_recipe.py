@@ -29,7 +29,9 @@ DEFAULT_MATRIX_DOC = REPO_ROOT / "tests" / "ppu" / "README.md"
 SERVING_SCHEMA = "ppu-serving/v1"
 DATASET_SCHEMA = "ppu-dataset/v1"
 POLICY_SCHEMA = "ppu-test-policy/v1"
-POLICY_TIERS = frozenset({"fast_sanity", "model_sanity", "nightly", "release"})
+POLICY_TIERS = frozenset(
+    {"fast_sanity", "model_sanity", "forward_perf", "nightly", "release"}
+)
 _UNSET: Any = object()
 
 ALLOWED_ENV_PREFIXES = (
@@ -1082,6 +1084,10 @@ def resolve_recipe(
                 eff_layers = tier_cfg.get("layer_override", "auto")
             if eff_preset is None:
                 eff_preset = tier_cfg.get("preset")
+        elif tier == "forward_perf":
+            eff_cache = "disabled"
+            eff_dummy = True
+            eff_layers = None
         elif tier == "model_sanity":
             stages = tier_cfg.get("stages", [])
             if eff_cache is None and stages:
@@ -1712,6 +1718,36 @@ def _validate_stage_cache_rules(
                 )
 
 
+def _validate_forward_groups(groups: Any, *, context: str) -> None:
+    fields = {"max_model_len", "max_num_batched_tokens", "max_num_seqs", "cases"}
+    _check_keys(
+        groups,
+        allowed={"prefill", "decode"},
+        required={"prefill", "decode"},
+        context=context,
+    )
+    names = set()
+    for group, raw in groups.items():
+        label = f"{context}.groups.{group}"
+        config = _check_keys(raw, allowed=fields, required=fields, context=label)
+        for key in fields - {"cases"}:
+            if type(config[key]) is not int or config[key] < 1:
+                raise ValidationError(f"{label}.{key} must be a positive integer")
+        cases = _check_str_list(config["cases"], context=f"{label}.cases")
+        if not cases:
+            raise ValidationError(f"{label}.cases must not be empty")
+        for case in cases:
+            name, sep, shape = case.partition("=")
+            if (
+                not re.fullmatch(r"[a-z0-9_]{1,64}", name)
+                or not sep
+                or not shape
+                or name in names
+            ):
+                raise ValidationError(f"{label}: expected unique NAME=SHAPE cases")
+            names.add(name)
+
+
 def validate_policy_structure(
     policy: dict[str, Any],
     *,
@@ -1787,6 +1823,17 @@ def validate_policy_structure(
                 f"{context}.replaces_legacy_cases requires tiers.model_sanity"
             )
     if tiers:
+        if "forward_perf" in tiers:
+            forward_context = f"{context}.tiers.forward_perf"
+            forward = _check_keys(
+                tiers["forward_perf"],
+                allowed={"groups"},
+                required={"groups"},
+                context=forward_context,
+            )
+            if recipe_path is None:
+                raise ValidationError(f"{forward_context} requires a recipe")
+            _validate_forward_groups(forward["groups"], context=forward_context)
         if "fast_sanity" in tiers:
             fs = _check_keys(
                 tiers["fast_sanity"],

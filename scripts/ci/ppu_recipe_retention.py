@@ -19,6 +19,15 @@ OPTIONAL_FILES = (
     "results/vllm_serve_fast_full.log",
     "results/vllm_serve_model_sanity.log",
 )
+FORWARD_FILES = (
+    "image-stack.json",
+    "results/commands.json",
+    "results/measurement.json",
+    "results/prefill.json",
+    "results/prefill.log",
+    "results/decode.json",
+    "results/decode.log",
+)
 
 
 def _check_dir_mode(directory: Path, *allowed_modes: int) -> None:
@@ -36,7 +45,7 @@ def retain(environ) -> None:
         "attempt": environ["GITHUB_RUN_ATTEMPT"],
     }
     if (
-        index["tier"] not in {"fast_sanity", "model_sanity"}
+        index["tier"] not in {"fast_sanity", "model_sanity", "forward_perf"}
         or not re.fullmatch(r"[a-z0-9][a-z0-9.-]*", index["model_key"])
         or not re.fullmatch(r"[0-9a-f]{40}", index["checkout_sha"])
         or not all(re.fullmatch(r"[0-9]+", index[key]) for key in ("run_id", "attempt"))
@@ -86,7 +95,13 @@ def retain(environ) -> None:
         published = staging / index["model_key"]
         published.mkdir(mode=0o700)
         files = {}
-        for relative_path in ("launcher.log", *RESULT_FILES, *OPTIONAL_FILES):
+        forward_files = FORWARD_FILES if index["tier"] == "forward_perf" else ()
+        for relative_path in (
+            "launcher.log",
+            *RESULT_FILES,
+            *OPTIONAL_FILES,
+            *forward_files,
+        ):
             source = source_dir / relative_path
             name = source.name
             try:

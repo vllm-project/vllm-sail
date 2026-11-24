@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: Apache-2.0
-# Container entrypoint for recipe fast_sanity / model_sanity verification.
+# Container entrypoint for recipe verification and forward performance.
 set -Eeuo pipefail
 
 CI_SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
@@ -81,10 +81,12 @@ from pathlib import Path
 ) = sys.argv[1:]
 if not re.fullmatch(r"[0-9a-f]{40}", checkout):
     raise SystemExit("Recipe provenance requires exact checkout commit SHA")
-if tier not in {"fast_sanity", "model_sanity"} or require_pr not in {"true", "false"}:
+if tier not in {"fast_sanity", "model_sanity", "forward_perf"} or require_pr not in {"true", "false"}:
     raise SystemExit("Invalid recipe tier or PR artifact mode")
 if skip_wheel_install not in {"true", "false"}:
     raise SystemExit("Invalid skip wheel install mode")
+if tier == "forward_perf" and (require_pr == "true" or skip_wheel_install == "true"):
+    raise SystemExit("Forward performance requires exact SAIL and vLLM wheels")
 if image_digest and not re.fullmatch(r"@sha256:[0-9a-f]{64}", image_digest):
     raise SystemExit("Invalid runtime image digest")
 if image_id and not re.fullmatch(r"sha256:[0-9a-f]{64}", image_id):
@@ -173,6 +175,8 @@ try:
     if manifest is not None:
         provenance["commits"] = {name: manifest["commits"][name] for name in ("vllm", "vllm-sail")}
         provenance["wheels"] = manifest["wheels"]
+if tier == "forward_perf":
+    provenance["runner_sources"].append(source_record("scripts/ci/ppu_recipe_forward_perf.py"))
     if image_digest:
         provenance["runtime_image_digest"] = image_digest
     if image_id:
@@ -193,9 +197,10 @@ if [[ "${SKIP_WHEEL_INSTALL}" == "false" ]]; then
 fi
 
 record_phase runtime_dependencies
+image_stack="${RESULTS_DIR}/image-stack.json"
 export PIP_CONSTRAINT="/tmp/ppu-recipe-image-constraints.txt"
 python "${CI_SCRIPT_DIR}/ppu_image_stack.py" capture \
-    --sdk /usr/local/PPU_SDK --output "/tmp/ppu-recipe-image-stack.json" \
+    --sdk /usr/local/PPU_SDK --output "${image_stack}" \
     --constraints "${PIP_CONSTRAINT}"
 if [[ "${TIER}" == "model_sanity" ]]; then
     numpy_version="$(python -c 'from importlib.metadata import version; print(version("numpy"))')"
@@ -221,7 +226,7 @@ elif [[ "${TIER}" == "model_sanity" ]]; then
 fi
 
 python "${CI_SCRIPT_DIR}/ppu_image_stack.py" verify \
-    --sdk /usr/local/PPU_SDK --output "/tmp/ppu-recipe-image-stack.json"
+    --sdk /usr/local/PPU_SDK --output "${image_stack}"
 
 cd /tmp
 unset PYTHONPATH
@@ -309,6 +314,18 @@ PY
 
 record_phase recipe_validation
 python "${ROOT_DIR}/scripts/ci/ppu_recipe.py" validate --all --require-vllm-parser
+
+if [[ "${TIER}" == "forward_perf" ]]; then
+    record_phase forward_measurement
+    capture_args=()
+    if [[ "${PPU_FORWARD_CAPTURE_BASELINE:-false}" == "true" ]]; then
+        capture_args+=(--capture-baseline)
+    fi
+    exec python "${ROOT_DIR}/scripts/ci/ppu_recipe_forward_perf.py" run \
+        --recipe "${ROOT_DIR}/${RECIPE_PATH}" --policy "${ROOT_DIR}/${POLICY_PATH}" \
+        --results-dir "${RESULTS_DIR}/results" --image-stack "${image_stack}" \
+        "${capture_args[@]}"
+fi
 
 runner_args=(
     --recipe "${ROOT_DIR}/${RECIPE_PATH}"
