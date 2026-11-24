@@ -2087,7 +2087,16 @@ def donor_artifact(
 
 
 @pytest.mark.parametrize(
-    "nightly_result", ["success", "expired", "failed", "api_error", "wrong_attempt"]
+    "nightly_result",
+    [
+        "success",
+        "expired",
+        "failed",
+        "api_error",
+        "wrong_attempt",
+        "upstream_only",
+        "upstream_pin_mismatch",
+    ],
 )
 def test_shared_selector_prioritizes_nightly_then_cold_history(
     nightly_result, github_output, capsys
@@ -2152,6 +2161,19 @@ def test_shared_selector_prioritizes_nightly_then_cold_history(
         per_page=20,
     )
     base = [tree_entry("csrc/kernel.cu")]
+    candidate_files = [*base, tree_entry(".github/workflows/_ppu-build.yaml")]
+    if nightly_result.startswith("upstream_"):
+        from scripts.ci.ppu_wheel_manifest import UPSTREAM_BUILD_INPUTS
+
+        pin = ".github/vllm-main-verified.commit"
+        base.extend(tree_entry(path) for path in (pin, *UPSTREAM_BUILD_INPUTS))
+        candidate_files = [
+            tree_entry("csrc/kernel.cu", oid=CHANGED),
+            tree_entry(
+                pin, oid=CHANGED if nightly_result.endswith("mismatch") else BLOB
+            ),
+            *(tree_entry(path) for path in UPSTREAM_BUILD_INPUTS),
+        ]
     add_tree(
         gh, newer_source, tree_payload([tree_entry("csrc/kernel.cu", oid=CHANGED)])
     )
@@ -2162,7 +2184,7 @@ def test_shared_selector_prioritizes_nightly_then_cold_history(
     add_tree(
         gh,
         candidate,
-        tree_payload([*base, tree_entry(".github/workflows/_ppu-build.yaml")]),
+        tree_payload(candidate_files),
     )
     for ident in (553, 554):
         donor_artifact(gh, ident, "ppu / build / PPU wheel build", reused=ident == 554)
@@ -2182,10 +2204,17 @@ def test_shared_selector_prioritizes_nightly_then_cold_history(
 
     select_donors(control, candidate)
 
-    expected = [(555, SHA), (553, OLD)] if nightly_result == "success" else [(553, OLD)]
+    if nightly_result == "success":
+        expected = {1: (555, SHA), 2: (553, OLD)}
+    elif nightly_result == "upstream_only":
+        expected = {3: (555, SHA)}
+    elif nightly_result == "upstream_pin_mismatch":
+        expected = {}
+    else:
+        expected = {1: (553, OLD)}
     assert dict(line.split("=") for line in github_output.read_text().splitlines()) == {
         f"{key}_{slot}": str(value)
-        for slot, (ident, source) in enumerate(expected, 1)
+        for slot, (ident, source) in expected.items()
         for key, value in {
             "run": ident,
             "artifact": 2000 + ident,

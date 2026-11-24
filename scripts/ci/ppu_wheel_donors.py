@@ -13,6 +13,7 @@ from scripts.ci.ppu_wheel_manifest import (
     FINGERPRINT_COMPAT,
     FINGERPRINT_COMPAT_PATHS,
     NATIVE_INPUTS,
+    UPSTREAM_BUILD_INPUTS,
 )
 
 NIGHTLY_WHEELS = "nightly-wheels.yaml"
@@ -139,7 +140,17 @@ def on_default_branch(controller, source):
     )
 
 
-def nightly_donor(controller, candidate):
+def upstream_inputs_match(controller, source, candidate):
+    paths = (".github/vllm-main-verified.commit", *UPSTREAM_BUILD_INPUTS)
+    source_tree = controller.tree_entries(source)
+    candidate_tree = controller.tree_entries(candidate)
+    return all(
+        path in source_tree and source_tree[path] == candidate_tree.get(path)
+        for path in paths
+    )
+
+
+def nightly_donors(controller, candidate):
     runs = controller.pages(
         f"/actions/workflows/{NIGHTLY_WHEELS}/runs",
         "workflow_runs",
@@ -149,6 +160,7 @@ def nightly_donor(controller, candidate):
         event="schedule",
         status="completed",
     )
+    upstream_donor = None
     for run in runs:
         if (
             not eligible_run(controller, run)
@@ -157,15 +169,23 @@ def nightly_donor(controller, candidate):
         ):
             continue
         source = run["head_sha"]
-        if best_effort(
+        native_match = best_effort(
             partial(controller.trees_match, source, candidate, native_input)
+        )
+        if native_match or (
+            upstream_donor is None
+            and best_effort(
+                partial(upstream_inputs_match, controller, source, candidate)
+            )
         ):
             donor = best_effort(
                 partial(built_artifact, controller, run, source, historical=False)
             )
             if donor:
-                return donor
-    return None
+                if native_match:
+                    return donor, None
+                upstream_donor = donor
+    return None, upstream_donor
 
 
 def historical_donors(controller, candidate):
@@ -193,7 +213,10 @@ def historical_donors(controller, candidate):
 def select_donors(controller, candidate):
     if not valid_sha(candidate):
         raise ValueError("Invalid candidate commit")
-    nightly = best_effort(lambda: nightly_donor(controller, candidate))
+    nightly, upstream = best_effort(lambda: nightly_donors(controller, candidate)) or (
+        None,
+        None,
+    )
     with open(controller.env["GITHUB_OUTPUT"], "a", buffering=1) as output:
 
         def write_donor(slot, donor):
@@ -208,7 +231,10 @@ def select_donors(controller, candidate):
         historical = best_effort(lambda: historical_donors(controller, candidate)) or []
         for slot, donor in enumerate(historical, 2 if nightly else 1):
             write_donor(slot, donor)
-        if not nightly and not historical:
+        if upstream:
+            # Reserve the last slot for a Nightly whose SAIL inputs differ.
+            write_donor(3, upstream)
+        if not nightly and not historical and not upstream:
             print("Native wheel donor candidates: none")
 
 

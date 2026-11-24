@@ -1063,6 +1063,9 @@ def test_runtime_lanes_upgrade_transformers_before_verifying_image_stack(
         ("third", 3),
         ("all", None),
         ("legacy", 1),
+        ("vllm_only", None),
+        ("vllm_fingerprint", None),
+        ("vllm_wheel_hash", None),
     ],
 )
 def test_native_repack_selects_first_verified_donor(
@@ -1076,6 +1079,12 @@ def test_native_repack_selects_first_verified_donor(
         source, pytorch_sail_arch=arch, vllm_sail_hg_flags="-O3"
     )
     pin, sail_commit = "1" * 40, "2" * 40
+    upstream_only = first_failure in {
+        "vllm_only",
+        "vllm_fingerprint",
+        "vllm_wheel_hash",
+    }
+    image = f"sdk@sha256:{'a' * 64}" if upstream_only else ""
     donor_root = tmp_path / "native-reuse"
     for slot in (1, 2, 3):
         donor = donor_root / str(slot)
@@ -1102,6 +1111,15 @@ def test_native_repack_selects_first_verified_donor(
             data["commits"]["vllm-sail"] = "0" * 40
         elif failure == "fingerprint":
             data["native_reuse"]["fingerprint"] = "0" * 64
+        if upstream_only and slot == 3:
+            data["vllm_build_fingerprint"] = manifest.vllm_build_fingerprint(
+                source, commit=pin, image=image
+            )
+            if first_failure == "vllm_fingerprint":
+                data["vllm_build_fingerprint"] = "0" * 64
+            elif first_failure == "vllm_wheel_hash":
+                wheel = donor / data["wheels"]["vllm"]["file"]
+                wheel.write_bytes(wheel.read_bytes() + b"changed")
         (donor / manifest.MANIFEST).write_text(
             "{" if failure == "manifest" else json.dumps(data)
         )
@@ -1176,7 +1194,9 @@ git() {
             "VLLM_SAIL_NATIVE_REUSE_ROOT": (
                 "" if first_failure == "legacy" else str(donor_root)
             ),
-            "VLLM_SAIL_BUILD_IMAGE": "",
+            "VLLM_SAIL_BUILD_IMAGE": image,
+            "VLLM_REPOSITORY": "https://github.com/vllm-project/vllm.git",
+            "PREPARED_ENV": "0",
             "CMAKE_BUILD_TYPE": "Release",
             "CMAKE_HGCC_DIR": "",
             "VLLM_SAIL_HG_FLAGS": "-O3",
@@ -1200,7 +1220,14 @@ git() {
     if first_failure in {"missing_sidecar", "invalid_sidecar"}:
         expected_order.remove(1)
     assert attempted == [str(slot) for slot in expected_order]
-    if selected is None:
+    if first_failure == "vllm_only":
+        assert "entered cold build" not in result.stdout
+        assert "reuse_mode=vllm-only\n" in build_manifest.read_text()
+        (wheel,) = wheels.iterdir()
+        donor_wheel = next((donor_root / "3").rglob("vllm-*.whl"))
+        assert wheel.read_bytes() == donor_wheel.read_bytes()
+        assert not list(work.iterdir())
+    elif selected is None:
         assert "entered cold build" in result.stdout
         assert "reuse_source=" not in build_manifest.read_text()
         assert not list(wheels.iterdir())
