@@ -1,5 +1,5 @@
 name: Nightly wheels
-run-name: Benchmark upstream wheel reuse (${{ inputs.branch }})
+run-name: Benchmark upstream wheel reuse against run 45320243205
 
 on:
   workflow_dispatch:
@@ -21,49 +21,15 @@ concurrency:
   queue: max
 
 jobs:
-  prepare:
-    if: github.repository == 'vllm-project/vllm-sail' && github.ref_name == 'ci/benchmark-upstream-vllm-wheel'
-    runs-on: ubuntu-24.04
-    timeout-minutes: 5
-    outputs:
-      sha: ${{ steps.source.outputs.sha }}
-      branch: ${{ steps.source.outputs.branch }}
-    steps:
-      - name: Pin the source branch to a commit
-        id: source
-        env:
-          SOURCE_BRANCH: ${{ inputs.branch || 'main' }}
-          SOURCE_EVENT: ${{ github.event_name }}
-          TRIGGER_SHA: ${{ github.sha }}
-        run: |
-          set -euo pipefail
-          git check-ref-format "refs/heads/$SOURCE_BRANCH"
-          if [[ "$SOURCE_EVENT" == schedule ]]; then
-            sha="$TRIGGER_SHA"
-          else
-            remote="$(git ls-remote --exit-code --refs \
-              "https://github.com/${GITHUB_REPOSITORY}.git" "refs/heads/$SOURCE_BRANCH")"
-            read -r sha ref <<< "$remote"
-            test "$ref" = "refs/heads/$SOURCE_BRANCH"
-          fi
-          [[ "$sha" =~ ^[0-9a-f]{40}$ ]]
-          printf 'sha=%s\nbranch=%s\n' "$sha" "$SOURCE_BRANCH" >> "$GITHUB_OUTPUT"
-
-  build:
-    needs: prepare
-    uses: ./.github/workflows/_ppu-build.yaml
-    with:
-      pr_head_sha: ${{ needs.prepare.outputs.sha }}
-
   warm:
     name: PPU wheel build with upstream reuse
-    needs: build
+    if: github.repository == 'vllm-project/vllm-sail' && github.ref_name == 'ci/benchmark-upstream-vllm-wheel'
     runs-on: ubuntu-24.04
     timeout-minutes: 180
     container:
-      image: ${{ needs.build.outputs.image }}
+      image: download.t-head.cn/docker_release/pytorch@sha256:a33a67832f7ec442c481421e94255518dd67e464406f8e610c15d2b594b21f80
     env:
-      VLLM_SAIL_BUILD_IMAGE: ${{ needs.build.outputs.image }}
+      VLLM_SAIL_BUILD_IMAGE: download.t-head.cn/docker_release/pytorch@sha256:a33a67832f7ec442c481421e94255518dd67e464406f8e610c15d2b594b21f80
       PYTORCH_SAIL_ARCH: ppu_15;ppu_10
       ARTIFACT_DIR: ${{ github.workspace }}/artifacts
     steps:
@@ -75,6 +41,13 @@ jobs:
               git config --${scope} --unset-all "${key}" 2>/dev/null || true
             done < <(git config --${scope} --get-regexp '^url\..*\.insteadof$' | awk '$2 ~ /github\.com/ {print $1}')
           done
+      - name: Require disabled cache access
+        uses: actions/github-script@v7
+        with:
+          script: |
+            if (process.env.ACTIONS_CACHE_MODE !== 'none') {
+              core.setFailed('PPU CI requires cache-mode: none');
+            }
       - uses: actions/checkout@v4
         with:
           ref: ${{ github.sha }}
@@ -83,15 +56,18 @@ jobs:
       - name: Download the cold build artifact
         uses: actions/download-artifact@v4
         with:
-          name: ppu-wheels-${{ github.run_id }}
+          artifact-ids: '14889457834'
+          run-id: '45320243205'
+          github-token: ${{ github.token }}
+          merge-multiple: true
           path: ${{ runner.temp }}/benchmark-donors/3
       - name: Build or repackage wheels
         shell: bash
         env:
-          DONOR_SHA: ${{ needs.build.outputs.commit }}
+          DONOR_SHA: bedba1222e6b5a65a38e88cf4d0fb9f1383e8ffa
           VLLM_SAIL_NATIVE_REUSE_ROOT: ${{ runner.temp }}/benchmark-donors
         run: |
-          test "$ACTIONS_CACHE_MODE" = none
+          set -x
           test "$(git -c safe.directory="$PWD" rev-parse HEAD)" = "$GITHUB_SHA"
           printf '%s\n' "$DONOR_SHA" > "$VLLM_SAIL_NATIVE_REUSE_ROOT/3.source"
           bash scripts/ci/build_ppu_wheels.sh
