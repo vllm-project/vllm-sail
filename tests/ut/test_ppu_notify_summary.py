@@ -152,12 +152,17 @@ class NotifySummaryTest(unittest.TestCase):
             Path(__file__).resolve().parents[2]
             / ".github/workflows/ppu-accuracy-nightly.yaml"
         )
-        job = yaml.safe_load(workflow.read_text())["jobs"]["notify-summary"]
+        jobs = yaml.safe_load(workflow.read_text())["jobs"]
+        self.assertEqual(
+            "${{ steps.select.outputs.full_run }}",
+            jobs["select"]["outputs"]["full_run"],
+        )
+        job = jobs["notify-summary"]
         condition = " ".join(job["if"].split())
         self.assertTrue(condition.startswith("always() && !cancelled() &&"))
         self.assertIn(
             "(github.event_name == 'workflow_dispatch' && needs.select.result == 'success' && "
-            "(inputs.models == '' || inputs.models == 'recipe:all'))",
+            "needs.select.outputs.full_run == 'true')",
             condition,
         )
         self.assertIn(
