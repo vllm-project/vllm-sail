@@ -501,9 +501,12 @@ jobs:
   notify-summary:
     name: Notify Nightly summary
     needs: [select, build, resolve-image, accuracy, recipe-model-sanity]
+    # Notify only for the canonical full-run inputs, even if selection trims whitespace.
     if: >-
       always() && !cancelled() &&
-      (github.event_name != 'schedule' || vars.PPU_NIGHTLY_SCHEDULE_DISABLED != 'true')
+      ((github.event_name == 'schedule' && vars.PPU_NIGHTLY_SCHEDULE_DISABLED != 'true') ||
+       (github.event_name == 'workflow_dispatch' && needs.select.result == 'success' &&
+        (inputs.models == '' || inputs.models == 'recipe:all')))
     runs-on: ubuntu-latest
     timeout-minutes: 5
     continue-on-error: true
