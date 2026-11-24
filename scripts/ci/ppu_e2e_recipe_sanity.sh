@@ -175,8 +175,10 @@ try:
     if manifest is not None:
         provenance["commits"] = {name: manifest["commits"][name] for name in ("vllm", "vllm-sail")}
         provenance["wheels"] = manifest["wheels"]
-if tier == "forward_perf":
-    provenance["runner_sources"].append(source_record("scripts/ci/ppu_recipe_forward_perf.py"))
+    if tier == "forward_perf":
+        provenance["runner_sources"].append(
+            source_record("scripts/ci/ppu_recipe_forward_perf.py")
+        )
     if image_digest:
         provenance["runtime_image_digest"] = image_digest
     if image_id:
