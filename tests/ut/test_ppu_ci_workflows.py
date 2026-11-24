@@ -424,6 +424,9 @@ def test_pr_pipeline_structure():
     }
     runtime = jobs["runtime-image"]
     assert runtime["runs-on"] == "8-ppu-m890p"
+    assert runtime["timeout-minutes"] == (
+        "${{ github.event_name == 'pull_request' && 10 || 25 }}"
+    )
     assert "!inputs.skip_ppu" in runtime["if"]
     assert runtime["outputs"] == {
         "upstream_reuse": "${{ steps.reuse.outputs.supported }}",
