@@ -220,9 +220,10 @@ enabling the default-branch cron fan-out.
 
 In the **PPU accuracy nightly** Action, set `models` to
 `forward:deepseek-v4.1-flash` and build wheels from the selected ref. This runs
-the forward performance tier of the DeepSeek-V4.1-Flash recipe on eight M890
-devices. The Actions summary shows the measured latency, baseline and change
-for every shape. The scheduled lane is controlled by
+the DeepSeek-V4.1-Flash TP8 prefill cases on eight M890 devices. Future decode
+coverage belongs to DP+EP recipes using the `deepep_low_latency` backend.
+The Actions summary shows the measured latency, baseline and change for every
+shape. The scheduled lane is controlled by
 `SCHEDULED_FORWARD_PERF_ENABLED` in `ppu-accuracy-nightly.yaml`.
 
 The recipe container entrypoint can capture a replacement baseline on a

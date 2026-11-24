@@ -1228,6 +1228,10 @@ def resolve_recipe(
 
     dp_raw = _flag_value(ordered, "--data-parallel-size")
     tp_raw = _flag_value(ordered, "--tensor-parallel-size")
+    if tier == "forward_perf" and (
+        tp_raw is None or int(tp_raw) < 2 or dp_raw not in (None, "1")
+    ):
+        raise ValidationError("The forward prefill policy requires a TP recipe")
     if dp_raw is not None:
         ppu_count = int(dp_raw) * (int(tp_raw) if tp_raw is not None else 1)
     elif tp_raw is not None:
@@ -1723,8 +1727,8 @@ def _validate_forward_groups(groups: Any, *, context: str) -> None:
     fields = {"max_model_len", "max_num_batched_tokens", "max_num_seqs", "cases"}
     _check_keys(
         groups,
-        allowed={"prefill", "decode"},
-        required={"prefill", "decode"},
+        allowed={"prefill"},
+        required={"prefill"},
         context=context,
     )
     names = set()

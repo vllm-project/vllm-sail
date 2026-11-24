@@ -25,8 +25,6 @@ FORWARD_FILES = (
     "results/measurement.json",
     "results/prefill.json",
     "results/prefill.log",
-    "results/decode.json",
-    "results/decode.log",
 )
 
 

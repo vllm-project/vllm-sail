@@ -23,7 +23,7 @@ def modules(monkeypatch):
     return ppu_recipe, ppu_recipe_forward_perf
 
 
-def test_recipe_resolves_two_forward_commands(tmp_path, modules):
+def test_recipe_resolves_only_the_tp_prefill_command(tmp_path, modules):
     recipe, runner = modules
     policy = recipe._load_yaml(POLICY)
     resolved = recipe.resolve_recipe(
@@ -32,7 +32,7 @@ def test_recipe_resolves_two_forward_commands(tmp_path, modules):
     commands = runner.commands(
         resolved, policy["tiers"]["forward_perf"]["groups"], tmp_path, tmp_path
     )
-    assert list(commands) == ["prefill", "decode"]
+    assert list(commands) == ["prefill"]
     for cmd in commands.values():
         assert "--nproc-per-node=8" in cmd
         assert cmd[cmd.index("--load-format") + 1] == "dummy"
@@ -43,8 +43,6 @@ def test_recipe_resolves_two_forward_commands(tmp_path, modules):
     assert "--max-model-len=102528" in commands["prefill"]
     assert "--kv-cache-memory-bytes=17179869184" in commands["prefill"]
     assert "prefill_100k=102400" in commands["prefill"]
-    assert "--max-num-seqs=256" in commands["decode"]
-    assert "decode_256=256*1@4097" in commands["decode"]
 
 
 def test_result_validation_and_comparison(tmp_path, modules):

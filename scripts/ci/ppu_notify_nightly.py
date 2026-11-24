@@ -88,7 +88,7 @@ def forward_evidence(root, run_id, attempt):
         / "summary.json"
     )
     status = report["status"]
-    if status == "pass" and len(report["cases"]) != 6:
+    if status == "pass" and not report["cases"]:
         raise ValueError("Missing forward performance evidence")
     return status, "forward performance", None, None
 
