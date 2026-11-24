@@ -1,0 +1,7 @@
+{
+  "max_seq_length": 512,
+  "do_lower_case": false,
+  "model_args": {
+    "add_pooling_layer": false
+  }
+}

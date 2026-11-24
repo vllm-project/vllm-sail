@@ -785,7 +785,11 @@ class UpstreamRunner:
                     f"upstream test file not found at pinned commit: {entry.path}",
                 ),
             )
-        reachable, probe = hub_reachable()
+        reachable, probe = (
+            (False, "using bundled model configs")
+            if entry.config_fixtures and entry.hub_repos == ()
+            else hub_reachable()
+        )
         if not reachable:
             gap = offline_hub_gap(entry, probe)
             if gap is not None:
