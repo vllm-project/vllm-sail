@@ -419,10 +419,10 @@ def test_image_build_captures_the_pinned_image_stack_before_building():
     assert verify < text.index("status=succeeded")
 
 
-def test_ci_uses_separate_pinned_build_and_runtime_stacks():
+def test_ci_uses_workflow_configured_build_and_runtime_image():
     import yaml
 
-    build_image = (
+    ops_build_image = (
         "download.t-head.cn/docker_release/pytorch@sha256:"
         "a33a67832f7ec442c481421e94255518dd67e464406f8e610c15d2b594b21f80"
     )
@@ -431,12 +431,27 @@ def test_ci_uses_separate_pinned_build_and_runtime_stacks():
         "workflow_dispatch"
     ]["inputs"]
     assert not {"sdk_url", "torch_url"} & inputs.keys()
-    assert inputs["build_image"]["default"] == build_image
+    assert inputs["build_image"]["default"] == ops_build_image
     assert inputs["ops_image"]["required"] is True
     assert "default" not in inputs["ops_image"]
     build = workflow["jobs"]["build"]
-    assert build_image in build["container"]["image"]
+    image = "download.t-head.cn/docker_test/vllm:v0.33.0-20261123-c550c70"
+    expected_build_image = "${{ inputs.build_image || '" + image + "' }}"
+    assert build["container"]["image"] == expected_build_image
     assert build["env"]["VLLM_SAIL_BUILD_IMAGE"] == build["container"]["image"]
+    for name in (
+        "_ppu-accuracy-tests.yaml",
+        "_ppu-kernel-perf.yaml",
+        "_ppu-model-tests.yaml",
+        "_ppu-pin-ut.yaml",
+        "_ppu-recipe-fast-sanity.yaml",
+        "_ppu-recipe-model-sanity.yaml",
+        "_ppu-upstream-reuse.yaml",
+        "ppu-accuracy-nightly.yaml",
+        "ppu-build-and-test.yaml",
+    ):
+        runtime_workflow = yaml.safe_load((WORKFLOW.parent / name).read_text())
+        assert runtime_workflow["env"]["PPU_CI_RUNTIME_IMAGE"] == image
     pipeline = yaml.safe_load((WORKFLOW.parent / "ppu-build-and-test.yaml").read_text())
     assert "runtime_image" not in pipeline[True]["workflow_call"]["inputs"]
     for job in ("pin-unit-tests", "model-tests", "recipe-sanity"):

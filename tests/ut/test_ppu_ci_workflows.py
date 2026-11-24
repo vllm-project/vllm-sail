@@ -412,7 +412,7 @@ def test_pr_pipeline_structure():
     resolve = next(
         step
         for step in runtime["steps"]
-        if step.get("name") == "Resolve the runner-configured CUDA-compatible runtime"
+        if step.get("name") == "Resolve the workflow-configured CUDA-compatible runtime"
     )
     assert "ppu_runtime_image.sh" in resolve["run"]
     assert "PPU_CI_RUNTIME_IMAGE" not in resolve.get("env", {})
@@ -2093,7 +2093,7 @@ def test_accuracy_nightly_hardening_target_trust_digest_pin_and_cron_concurrency
     resolve_step = next(
         s
         for s in runtime_steps
-        if s.get("name") == "Resolve the runner-configured CUDA-compatible runtime"
+        if s.get("name") == "Resolve the workflow-configured CUDA-compatible runtime"
     )
     assert resolve_step["env"] == {
         "TRUSTED_DIR": "${{ steps.workspace.outputs.trusted }}"

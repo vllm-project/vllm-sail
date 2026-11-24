@@ -94,6 +94,9 @@ concurrency:
     format('accuracy-nightly-{0}', github.ref) }}
   cancel-in-progress: false
 
+env:
+  PPU_CI_RUNTIME_IMAGE: download.t-head.cn/docker_test/vllm:v0.33.0-20261123-c550c70
+
 jobs:
   build:
     name: Build nightly wheels

@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: Apache-2.0
-# Resolve the runner-configured CUDA-compatible PPU runtime to an immutable ID.
+# Resolve the workflow-configured CUDA-compatible PPU runtime to an immutable ID.
 set -Eeuo pipefail
 
-: "${PPU_CI_RUNTIME_IMAGE:?Runner must configure PPU_CI_RUNTIME_IMAGE}"
+: "${PPU_CI_RUNTIME_IMAGE:?Set PPU_CI_RUNTIME_IMAGE to the CI runtime image}"
 
 image_tag="${PPU_CI_RUNTIME_IMAGE_TAG:-}"
 image_digest="${PPU_CI_RUNTIME_IMAGE_DIGEST:-}"
@@ -129,7 +129,7 @@ resolve_repo_digest() {
 
 default_repo=$(strip_image_repo "${PPU_CI_RUNTIME_IMAGE}")
 validate_repo_name "${default_repo}" || {
-    echo "Runner PPU_CI_RUNTIME_IMAGE repository is invalid" >&2
+    echo "PPU_CI_RUNTIME_IMAGE repository is invalid" >&2
     exit 2
 }
 
@@ -141,11 +141,11 @@ if [[ -z "${image_tag}" && -z "${image_digest}" ]]; then
         chmod 0700 "${private_dir}"
         pull_log="${private_dir}/pull.log"
         if ! docker pull "${PPU_CI_RUNTIME_IMAGE}" >"${pull_log}" 2>&1; then
-            echo "Failed to pull the runner-configured PPU runtime image" >&2
+            echo "Failed to pull the workflow-configured PPU runtime image" >&2
             exit 2
         fi
         image_id=$(docker image inspect "${PPU_CI_RUNTIME_IMAGE}" --format '{{.Id}}' 2>>"${pull_log}") || {
-            echo "Failed to inspect the runner-configured PPU runtime image" >&2
+            echo "Failed to inspect the workflow-configured PPU runtime image" >&2
             exit 2
         }
     fi
