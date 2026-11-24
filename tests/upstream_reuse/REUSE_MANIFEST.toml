@@ -128,6 +128,24 @@ reason = "CacheConfig/SchedulerConfig hash-factor and utils logic; pure CPU conf
 min_tests = 1
 
 [[entry]]
+id = "hf_overrides_model_type"
+path = "tests/transformers_utils/test_hf_overrides_model_type.py"
+mode = "direct"
+chips = ["cpu", "810e", "890p"]
+category = "config"
+reason = "Checks custom config-class resolution and registration using a temporary config.json."
+min_tests = 1
+
+[[entry]]
+id = "renderer_executor_replace"
+path = "tests/renderers/test_executor_replace.py"
+mode = "direct"
+chips = ["cpu", "810e", "890p"]
+category = "renderer"
+reason = "Checks that replacing the renderer executor preserves async tokenization and decode using a dummy tokenizer."
+min_tests = 2
+
+[[entry]]
 id = "multimodal_config"
 path = "tests/config/test_multimodal_config.py"
 mode = "direct"
@@ -270,6 +288,67 @@ min_tests = 2
 # (markers / -k / deselect / env) and records known xfails. Upstream source is
 # NEVER edited; all adaptation lives in the harness + adapted test module.
 # ---------------------------------------------------------------------------
+
+[[entry]]
+id = "model_arch_config_local"
+path = "tests/config/test_model_arch_config.py"
+mode = "adapted"
+chips = ["cpu", "810e", "890p"]
+category = "config"
+reason = "Checks architecture conversion, heterogeneous layer sizing, and quantization config normalization. Base and draft model integration cases require Hub metadata."
+deselect = [
+    "tests/config/test_model_arch_config.py::test_base_model_arch_config",
+    "tests/config/test_model_arch_config.py::test_draft_model_arch_config",
+]
+min_tests = 37
+
+[[entry]]
+id = "speculative_draft_hf_overrides"
+path = "tests/config/test_speculative_draft_hf_overrides.py"
+mode = "adapted"
+chips = ["cpu", "810e", "890p"]
+category = "config"
+reason = "Checks draft config overrides and DSpark and MTP width with mocked configs. The local model registration cases run separately on the PPU targets."
+deselect = [
+    "tests/config/test_speculative_draft_hf_overrides.py::test_mtp_draft_architecture_follows_target_model_impl",
+]
+min_tests = 20
+
+[[entry]]
+id = "speculative_draft_model_impl"
+path = "tests/config/test_speculative_draft_hf_overrides.py"
+mode = "adapted"
+chips = ["810e", "890p"]
+category = "config"
+reason = "Checks MTP draft architecture selection using local configs. Model registry subprocesses initialize SAIL platform hooks that query device capability."
+keywords = "test_mtp_draft_architecture_follows_target_model_impl"
+min_tests = 3
+
+[[entry]]
+id = "speculative_draft_rope_limits"
+path = "tests/config/test_speculative_draft_max_position_embeddings.py"
+mode = "adapted"
+chips = ["cpu", "810e", "890p"]
+category = "config"
+reason = "Checks the draft position limit for each RoPE type with in-memory configs. The target and draft integration cases require Hub metadata."
+deselect = [
+    "tests/config/test_speculative_draft_max_position_embeddings.py::test_eagle_draft_inherits_target_max_model_len",
+    "tests/config/test_speculative_draft_max_position_embeddings.py::test_dflash_draft_inherits_target_max_model_len",
+    "tests/config/test_speculative_draft_max_position_embeddings.py::test_independent_draft_model_keeps_its_own_limit",
+]
+min_tests = 10
+
+[[entry]]
+id = "kv_cache_config_builder"
+path = "tests/v1/core/test_kv_cache_config_builder.py"
+mode = "adapted"
+chips = ["cpu", "810e", "890p"]
+category = "core"
+reason = "Checks KV-cache placement hooks, grouping, and per-block sizing with synthetic specs. The override probe resolves the default Hub model config."
+deselect = [
+    "tests/v1/core/test_kv_cache_config_builder.py::TestBytesPerBlockProbe::test_probe_suppresses_override",
+]
+min_tests = 14
 
 [[entry]]
 id = "pooling_params"
