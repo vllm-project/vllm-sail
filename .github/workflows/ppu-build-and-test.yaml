@@ -69,6 +69,9 @@ concurrency:
     ((github.event.action != 'labeled' && github.event.action != 'unlabeled') ||
     github.event.label.name == 'ci-preview') }}
 
+env:
+  PPU_CI_RUNTIME_IMAGE: download.t-head.cn/docker_test/vllm:v0.33.0-20261123-c550c70
+
 jobs:
   runtime-image:
     name: Resolve PPU runtime image
@@ -121,7 +124,7 @@ jobs:
           path: ${{ steps.workspace.outputs.trusted_rel }}
           persist-credentials: false
 
-      - name: Resolve the runner-configured CUDA-compatible runtime
+      - name: Resolve the workflow-configured CUDA-compatible runtime
         id: image
         env:
           TRUSTED_DIR: ${{ steps.workspace.outputs.trusted }}

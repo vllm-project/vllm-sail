@@ -23,6 +23,9 @@ permissions:
   actions: read
 cache-mode: none
 
+env:
+  PPU_CI_RUNTIME_IMAGE: download.t-head.cn/docker_test/vllm:v0.33.0-20261123-c550c70
+
 jobs:
   upstream-reuse:
     name: Upstream reuse (M890 single card)
@@ -109,7 +112,7 @@ jobs:
           repository: ${{ github.repository }}
           github-token: ${{ github.token }}
 
-      - name: Run strict M890 reuse in the runner-configured runtime
+      - name: Run strict M890 reuse in the CI runtime
         env:
           HF_HOME: /nas_aisw/datasets/hf_cache
           PPU_CI_REUSE_CHECKPOINT_ROOT: /nas_aisw/datasets/checkpoints/LLM

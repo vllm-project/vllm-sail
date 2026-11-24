@@ -152,7 +152,7 @@ were produced, even when a failed recipe did not write a result summary.
 ### Upstream test reuse
 
 Upstream reuse runs on a single M890 card in the authorized PPU pipeline, not
-automatically on PRs or a nightly schedule. It uses the runner-configured Docker
+automatically on PRs or a nightly schedule. It uses the workflow-configured Docker
 runtime and the validated CI wheels with the SAIL plugin enabled, preserves the
 image's torch/torchvision stack and installs only the dedicated
 `requirements/upstream-reuse.txt` tooling. `requirements/dev.txt` stays unchanged.

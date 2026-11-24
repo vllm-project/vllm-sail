@@ -84,6 +84,7 @@ permissions:
 cache-mode: none
 
 env:
+  PPU_CI_RUNTIME_IMAGE: download.t-head.cn/docker_test/vllm:v0.33.0-20261123-c550c70
   # Named branch overrides retain their own runtime version. For a tag or
   # SHA override, --ref continues to specify the workflow and runtime version.
   NIGHTLY_VERSION: >-
