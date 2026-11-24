@@ -1,35 +1,76 @@
 name: Verify candidate PPU PR CI
-run-name: "Candidate CI (v034) at 993f781752be1f3a8348a867c12e4cd4b49c7816"
+run-name: "Release #406 ${{ inputs.existing_build_run_id == '' && 'targeted' || 'full' }} at fa7390277851ba1bde50d471308877475260a6d1"
 
 on:
   workflow_dispatch:
+    inputs:
+      existing_build_run_id:
+        description: Successful targeted run supplying the same-head wheels (blank for targeted)
+        type: string
+        default: ""
 
 permissions: {}
 cache-mode: none
 
+concurrency:
+  group: ppu-image-validation-v034
+  cancel-in-progress: false
+
 jobs:
+  targeted-build:
+    if: >-
+      github.repository == 'vllm-project/vllm-sail' &&
+      github.ref == 'refs/heads/codex/ci-image-validation-v034-20261124' &&
+      github.actor == 'Yunzshi310' &&
+      inputs.existing_build_run_id == ''
+    permissions:
+      contents: read
+      actions: read
+    uses: ./.github/workflows/_ppu-build.yaml
+    secrets:
+      ci_registry_username: ${{ secrets.RELEASE_USERNAME }}
+      ci_registry_token: ${{ secrets.RELEASE_TOKEN }}
+    with:
+      pr_head_sha: 'fa7390277851ba1bde50d471308877475260a6d1'
+
+  targeted-recipes:
+    needs: targeted-build
+    if: needs.targeted-build.result == 'success'
+    permissions:
+      contents: read
+      actions: read
+    uses: ./.github/workflows/_ppu-recipe-fast-sanity.yaml
+    with:
+      pr_mode: true
+      pr_head_sha: 'fa7390277851ba1bde50d471308877475260a6d1'
+      build_run_id: ${{ github.run_id }}
+      ready_epoch: ${{ needs.targeted-build.outputs.ready_epoch }}
+      models: glm-5.3,glm-5.3-flash,step-5-preview
+
   cpu:
     if: >-
       github.repository == 'vllm-project/vllm-sail' &&
       github.ref == 'refs/heads/codex/ci-image-validation-v034-20261124' &&
-      github.actor == 'Yunzshi310'
+      github.actor == 'Yunzshi310' &&
+      inputs.existing_build_run_id != ''
     permissions:
       contents: read
     uses: ./.github/workflows/ut.yaml
     with:
-      pr_head_sha: '993f781752be1f3a8348a867c12e4cd4b49c7816'
+      pr_head_sha: 'fa7390277851ba1bde50d471308877475260a6d1'
 
   ppu:
     if: >-
       github.repository == 'vllm-project/vllm-sail' &&
       github.ref == 'refs/heads/codex/ci-image-validation-v034-20261124' &&
-      github.actor == 'Yunzshi310'
+      github.actor == 'Yunzshi310' &&
+      inputs.existing_build_run_id != ''
     permissions:
       contents: read
       actions: read
     uses: ./.github/workflows/ppu-build-and-test.yaml
-    secrets:
-      ci_registry_username: ${{ secrets.RELEASE_USERNAME }}
-      ci_registry_token: ${{ secrets.RELEASE_TOKEN }}
     with:
-      pr_head_sha: '993f781752be1f3a8348a867c12e4cd4b49c7816'
+      pr_head_sha: 'fa7390277851ba1bde50d471308877475260a6d1'
+      existing_build_run_id: ${{ inputs.existing_build_run_id }}
+      wheel_source_sha: 'fa7390277851ba1bde50d471308877475260a6d1'
+      runtime_version: v0.34.0
