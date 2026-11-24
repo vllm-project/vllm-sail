@@ -20,6 +20,9 @@ jobs:
     name: Build PPU wheels
     if: vars.PPU_RECIPE_PUBLIC_ENABLED == 'true'
     uses: ./.github/workflows/_ppu-build.yaml
+    secrets:
+      ci_registry_username: ${{ secrets.RELEASE_USERNAME }}
+      ci_registry_token: ${{ secrets.RELEASE_TOKEN }}
     with:
       pr_head_sha: ${{ github.sha }}
 

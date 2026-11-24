@@ -17,7 +17,7 @@ def test_runtime_wrapper_uses_preloaded_image_and_explicit_ppu_devices():
     assert 'bash "${script_dir}/ppu_runtime_image.sh" 9>&-' in text
     assert "${source_dir}/scripts/ci/ppu_runtime_image.sh" not in text
     resolver = (ROOT / "scripts/ci/ppu_runtime_image.sh").read_text()
-    assert "Set PPU_CI_RUNTIME_IMAGE to the CI runtime image" in resolver
+    assert "Runner must configure PPU_CI_RUNTIME_IMAGE" in resolver
     assert 'docker image inspect "${PPU_CI_RUNTIME_IMAGE}"' in resolver
     assert 'docker pull "${PPU_CI_RUNTIME_IMAGE}" >"${pull_log}" 2>&1' in resolver
     assert "docker image ls" not in resolver

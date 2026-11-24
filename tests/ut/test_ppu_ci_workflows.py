@@ -193,7 +193,10 @@ def test_executor_separates_read_only_pr_execution_and_always_reporting():
     assert ppu["needs"] == "validate"
     assert ppu["uses"] == "./.github/workflows/ppu-build-and-test.yaml"
     assert ppu["permissions"] == {"contents": "read", "actions": "read"}
-    assert "secrets" not in ppu
+    assert ppu["secrets"] == {
+        "ci_registry_username": "${{ secrets.RELEASE_USERNAME }}",
+        "ci_registry_token": "${{ secrets.RELEASE_TOKEN }}",
+    }
     assert ppu["with"] == {
         "pr_head_sha": "${{ inputs.head_sha }}",
         "skip_ppu": "${{ needs.validate.outputs.skip_ppu == 'true' }}",
@@ -249,8 +252,27 @@ def test_untrusted_workflows_have_no_write_permissions_or_inherited_secrets(name
     config = workflow(name)
     assert config["cache-mode"] == "none"
     assert config["permissions"] == {"contents": "read", "actions": "read"}
-    for job in config["jobs"].values():
-        assert "secrets" not in job
+    for job_name, job in config["jobs"].items():
+        if job_name == "build" and name in {
+            "ppu-build-and-test.yaml",
+            "perf-regression.yaml",
+        }:
+            # Only the hosted container initializer receives the two named secrets.
+            assert job["uses"] == "./.github/workflows/_ppu-build.yaml"
+            secret_names = (
+                ("ci_registry_username", "ci_registry_token")
+                if name == "ppu-build-and-test.yaml"
+                else ("RELEASE_USERNAME", "RELEASE_TOKEN")
+            )
+            assert job["secrets"] == dict(
+                zip(
+                    ("ci_registry_username", "ci_registry_token"),
+                    ("${{ secrets." + secret + " }}" for secret in secret_names),
+                    strict=True,
+                )
+            )
+        else:
+            assert "secrets" not in job
         assert all(value != "write" for value in job.get("permissions", {}).values())
         for step in checkouts(job) if "steps" in job else []:
             assert step["with"]["persist-credentials"] is False
@@ -412,7 +434,7 @@ def test_pr_pipeline_structure():
     resolve = next(
         step
         for step in runtime["steps"]
-        if step.get("name") == "Resolve the workflow-configured CUDA-compatible runtime"
+        if step.get("name") == "Resolve the CUDA-compatible PPU runtime"
     )
     assert "ppu_runtime_image.sh" in resolve["run"]
     assert "PPU_CI_RUNTIME_IMAGE" not in resolve.get("env", {})
@@ -2093,7 +2115,7 @@ def test_accuracy_nightly_hardening_target_trust_digest_pin_and_cron_concurrency
     resolve_step = next(
         s
         for s in runtime_steps
-        if s.get("name") == "Resolve the workflow-configured CUDA-compatible runtime"
+        if s.get("name") == "Resolve the CUDA-compatible PPU runtime"
     )
     assert resolve_step["env"] == {
         "TRUSTED_DIR": "${{ steps.workspace.outputs.trusted }}"

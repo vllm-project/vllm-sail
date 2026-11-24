@@ -90,6 +90,9 @@ jobs:
       contents: read
       actions: read
     uses: ./.github/workflows/_ppu-build.yaml
+    secrets:
+      ci_registry_username: ${{ secrets.RELEASE_USERNAME }}
+      ci_registry_token: ${{ secrets.RELEASE_TOKEN }}
     with:
       pr_head_sha: ${{ inputs.head_sha }}
 

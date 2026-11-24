@@ -33,9 +33,6 @@ concurrency:
   group: e2e-ppu-${{ github.ref }}-${{ inputs.pr_mode && github.run_id || inputs.build_run_id }}
   cancel-in-progress: false
 
-env:
-  PPU_CI_RUNTIME_IMAGE: download.t-head.cn/docker_test/vllm:v0.33.0-20261123-c550c70
-
 jobs:
   prepare:
     name: Resolve model matrix
@@ -131,6 +128,14 @@ jobs:
           run-id: ${{ inputs.build_run_id }}
           repository: ${{ github.repository }}
           github-token: ${{ github.token }}
+
+      - name: Set the CI runtime image
+        if: github.event_name != 'pull_request'
+        shell: bash
+        env:
+          CI_RUNTIME_IMAGE: download.t-head.cn/docker_test/vllm:v0.33.0-20261123-c550c70
+        run: |
+          printf 'PPU_CI_RUNTIME_IMAGE=%s\n' "$CI_RUNTIME_IMAGE" >> "$GITHUB_ENV"
 
       - name: Run PPU E2E smoke in the preloaded CUDA-compatible runtime
         env:
