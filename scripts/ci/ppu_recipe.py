@@ -1729,8 +1729,13 @@ def _validate_forward_groups(groups: Any, *, context: str) -> None:
     names = set()
     for group, raw in groups.items():
         label = f"{context}.groups.{group}"
-        config = _check_keys(raw, allowed=fields, required=fields, context=label)
-        for key in fields - {"cases"}:
+        config = _check_keys(
+            raw,
+            allowed=fields | {"kv_cache_memory_bytes"},
+            required=fields,
+            context=label,
+        )
+        for key in config.keys() - {"cases"}:
             if type(config[key]) is not int or config[key] < 1:
                 raise ValidationError(f"{label}.{key} must be a positive integer")
         cases = _check_str_list(config["cases"], context=f"{label}.cases")

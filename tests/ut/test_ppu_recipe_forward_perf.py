@@ -41,6 +41,7 @@ def test_recipe_resolves_two_forward_commands(tmp_path, modules):
         assert "--engram-config" in cmd
         assert cmd[cmd.index("--model") + 1] == str(tmp_path)
     assert "--max-model-len=102528" in commands["prefill"]
+    assert "--kv-cache-memory-bytes=17179869184" in commands["prefill"]
     assert "prefill_100k=102400" in commands["prefill"]
     assert "--max-num-seqs=256" in commands["decode"]
     assert "decode_256=256*1@4097" in commands["decode"]
