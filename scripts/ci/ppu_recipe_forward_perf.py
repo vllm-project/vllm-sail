@@ -20,9 +20,6 @@ sys.path.append(str(ROOT / "tests/e2e/perf"))
 ITERS = 20
 SAMPLES = 5
 CASE_NAME = re.compile(r"[a-z0-9_]{1,64}")
-# On the M890 runtime, asynchronous V2 profiling can fail to load the Engram
-# lookback kernel. Graph replay is still measured by events inside the graph.
-BENCHMARK_ENV = {"CUDA_LAUNCH_BLOCKING": "1"}
 
 
 def write_json(path, data):
@@ -214,7 +211,6 @@ def run(args):
             "sdk_sha256": stack["sdk_sha256"],
             "torch_sha256": stack["torch_sha256"],
             "groups": groups,
-            "benchmark_env": BENCHMARK_ENV,
             "benchmark_args": {
                 name: [*argv[7:10], resolved["hf_model_id"], *argv[11:-2]]
                 for name, argv in cmd.items()
@@ -239,9 +235,8 @@ def run(args):
             write_json(output / "summary.json", assess(current, baseline))
             return 1
 
-    benchmark_env = {**resolved["server_env"], **BENCHMARK_ENV}
-    write_json(output / "commands.json", {"argv": cmd, "env": benchmark_env})
-    env = {**os.environ, **benchmark_env}
+    write_json(output / "commands.json", {"argv": cmd, "env": resolved["server_env"]})
+    env = {**os.environ, **resolved["server_env"]}
     for name, argv in cmd.items():
         expected = {}
         for raw in groups[name]["cases"]:

@@ -224,8 +224,6 @@ the forward performance tier of the DeepSeek-V4.1-Flash recipe on eight M890
 devices. The Actions summary shows the measured latency, baseline and change
 for every shape. The scheduled lane is controlled by
 `SCHEDULED_FORWARD_PERF_ENABLED` in `ppu-accuracy-nightly.yaml`.
-The runner uses synchronous CUDA launches for M890 V2 initialization and
-compares the device-event times captured inside the forward graphs.
 
 The recipe container entrypoint can capture a replacement baseline on a
 matching PPU runtime. Set `TIER=forward_perf` and
