@@ -66,14 +66,13 @@ jobs:
       VLLM_SAIL_BUILD_IMAGE: ${{ needs.build.outputs.image }}
       PYTORCH_SAIL_ARCH: ppu_15;ppu_10
       ARTIFACT_DIR: ${{ github.workspace }}/artifacts
-      VLLM_SAIL_NATIVE_REUSE_ROOT: ${{ runner.temp }}/benchmark-donors
     steps:
       - name: Disable internal GitHub mirror rewrite
         shell: bash
         run: |
           for scope in system global; do
             while IFS= read -r key; do
-              git config --${scope} --unset-all "${key}"
+              git config --${scope} --unset-all "${key}" 2>/dev/null || true
             done < <(git config --${scope} --get-regexp '^url\..*\.insteadof$' | awk '$2 ~ /github\.com/ {print $1}')
           done
       - uses: actions/checkout@v4
@@ -90,6 +89,7 @@ jobs:
         shell: bash
         env:
           DONOR_SHA: ${{ needs.build.outputs.commit }}
+          VLLM_SAIL_NATIVE_REUSE_ROOT: ${{ runner.temp }}/benchmark-donors
         run: |
           test "$ACTIONS_CACHE_MODE" = none
           test "$(git -c safe.directory="$PWD" rev-parse HEAD)" = "$GITHUB_SHA"
@@ -97,6 +97,8 @@ jobs:
           bash scripts/ci/build_ppu_wheels.sh
       - name: Verify the Rust wheel was reused and SAIL was rebuilt
         shell: bash
+        env:
+          VLLM_SAIL_NATIVE_REUSE_ROOT: ${{ runner.temp }}/benchmark-donors
         run: |
           grep -Fxq 'reuse_mode=vllm-only' "$ARTIFACT_DIR/build-manifest.txt"
           test ! -e "$ARTIFACT_DIR/logs/vllm-rust-build.log"
