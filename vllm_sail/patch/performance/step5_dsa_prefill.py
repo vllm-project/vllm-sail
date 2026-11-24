@@ -13,6 +13,7 @@ from vllm.platforms import current_platform
 
 from vllm_sail import envs
 from vllm_sail.models.step5.ops import dsa_native as modern
+from vllm_sail.models.step5.ops import score_pipeline
 from vllm_sail.patch.utils import patch
 
 _ADAPTER = "vllm.models.step5.nvidia.flashinfer_sparse"
@@ -60,7 +61,8 @@ def _profile_forward(original, pd_type, selected_backend="default"):
             return original(*args, **kwargs)
         nvtx.range_push(label)
         try:
-            return original(*args, **kwargs)
+            with nvtx.step5_op_phase(pd_type):
+                return original(*args, **kwargs)
         finally:
             nvtx.range_pop()
 
@@ -135,7 +137,7 @@ def _install_native_decode(adapter_module):
     # Also update consumer aliases already imported; later imports get the new
     # wrapper anyway.
     aliases = [(name, attr) for name, loaded in list(sys.modules.items())
-               if (name == target or name.startswith("vllm.models.step5.nvidia.")) and loaded is not None
+               if name.startswith("vllm.models.step5.") and loaded is not None
                for attr, value in list(vars(loaded).items()) if value is original]
     for name, attr in aliases:
         patch(name, attr, reason="Explicit native tries the new precompiled BF16 decode; unsupported inputs fall back before launch.",
@@ -159,7 +161,9 @@ def install():
     original_forward = attention_module.Step5DSAAttentionImpl._forward_prefill
     original_decode = attention_module.Step5DSAAttentionImpl._forward_decode
     traced_prefill = {
-        name: _profile_forward(original_forward, "prefill", name)
+        name: _profile_forward(
+            score_pipeline.wrap_packed_forward(original_forward, current_platform),
+            "prefill", name)
         for name in ("flashinfer", "native")
     }
 
@@ -297,13 +301,18 @@ def install():
 
     for module, name, replacement in (
         (_ADAPTER, "Step5FlashInferSparse.prepare_prefill_attention", prepare),
-        (_ATTENTION, "Step5DSAAttentionImpl.plan_prefill_step", plan),
+        (_ATTENTION, "Step5DSAAttentionImpl.plan_prefill_step",
+         score_pipeline.wrap_packed_plan(plan, current_platform)),
         (_ATTENTION, "Step5DSAAttentionImpl._forward_prefill", forward),
     ):
         forward_entry = name.endswith("._forward_prefill")
-        patch(module, name, reason=_REASON + (" " + _PROFILE_REASON if forward_entry else ""),
+        packed_entry = module == _ATTENTION
+        patch(module, name,
+              reason=_REASON + (" " + _PROFILE_REASON if forward_entry else "")
+              + (" " + score_pipeline.PACKED_REASON if packed_entry else ""),
               affected_versions=_AFFECTED,
-              remove_when=_REMOVE_WHEN + (" " + _PROFILE_REMOVE if forward_entry else ""))(replacement)
+              remove_when=_REMOVE_WHEN + (" " + _PROFILE_REMOVE if forward_entry else "")
+              + (" " + score_pipeline.PACKED_REMOVE_WHEN if packed_entry else ""))(replacement)
     _install_native_decode(adapter_module)
     patch(_ATTENTION, "Step5DSAAttentionImpl._forward_decode",
           reason=_PROFILE_REASON, affected_versions=_AFFECTED,
