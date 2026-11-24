@@ -199,7 +199,10 @@ if [[ "${SKIP_WHEEL_INSTALL}" == "false" ]]; then
 fi
 
 record_phase runtime_dependencies
-image_stack="${RESULTS_DIR}/image-stack.json"
+image_stack="/tmp/ppu-recipe-image-stack.json"
+if [[ "${TIER}" == "forward_perf" ]]; then
+    image_stack="${RESULTS_DIR}/image-stack.json"
+fi
 export PIP_CONSTRAINT="/tmp/ppu-recipe-image-constraints.txt"
 python "${CI_SCRIPT_DIR}/ppu_image_stack.py" capture \
     --sdk /usr/local/PPU_SDK --output "${image_stack}" \

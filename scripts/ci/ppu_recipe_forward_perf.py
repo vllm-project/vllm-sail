@@ -13,12 +13,15 @@ import stat
 import subprocess
 import sys
 from dataclasses import asdict
+from decimal import Decimal
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.append(str(ROOT / "tests/e2e/perf"))
 ITERS = 20
 SAMPLES = 5
+REGRESSION_LIMIT = Decimal("1.05")
+MAX_CV = 0.15
 CASE_NAME = re.compile(r"[a-z0-9_]{1,64}")
 
 
@@ -114,8 +117,6 @@ def read_measurements(path, expected, rank_count):
 
 
 def assess(current, baseline):
-    from _baseline_store import LOWER_BETTER, compare
-
     if baseline["schema_version"] != 1 or baseline["config"] != current["config"]:
         return {
             "status": "fail",
@@ -128,27 +129,35 @@ def assess(current, baseline):
     rows = []
     for name, metric in current_metrics.items():
         reference = baseline_metrics[name]
-        median, cv = reference["median_us"], reference["cv"]
-        if not positive(median) or type(cv) not in (int, float) or not 0 <= cv <= 0.15:
+        baseline_us, cv = reference["median_us"], reference["cv"]
+        median_us = metric["median_us"]
+        if (
+            not positive(baseline_us)
+            or type(cv) not in (int, float)
+            or not 0 <= cv <= MAX_CV
+        ):
             raise ValueError("Invalid forward baseline metric")
-        status, _, delta = compare(
-            metric["median_us"], median, LOWER_BETTER, cv=max(cv, metric["cv"])
-        )
+        if Decimal(str(median_us)) > Decimal(str(baseline_us)) * REGRESSION_LIMIT:
+            status = "FAIL"
+        elif metric["cv"] > MAX_CV:
+            status = "UNSTABLE"
+        else:
+            status = "PASS"
         rows.append(
             {
                 "case": name,
                 "status": status,
-                "median_us": metric["median_us"],
-                "baseline_us": median,
-                "delta": delta,
+                "median_us": median_us,
+                "baseline_us": baseline_us,
+                "delta": (median_us - baseline_us) / baseline_us,
             }
         )
     failed = {row["status"] for row in rows}
     reason = (
-        "forward_measurement_unstable"
-        if "UNSTABLE" in failed
-        else "forward_regression"
+        "forward_regression"
         if "FAIL" in failed
+        else "forward_measurement_unstable"
+        if "UNSTABLE" in failed
         else "not_applicable"
     )
     return {
@@ -255,7 +264,7 @@ def run(args):
     if baseline is not None:
         summary = assess(current, baseline)
     else:
-        if any(metric["cv"] > 0.15 for metric in current["metrics"].values()):
+        if any(metric["cv"] > MAX_CV for metric in current["metrics"].values()):
             raise ValueError("Cannot capture unstable forward measurements")
         write_json(output / f"{args.policy.stem}-forward.json", current)
         summary = {"status": "pass", "failure_reason": "not_applicable", "cases": []}
@@ -287,7 +296,7 @@ def publish():
         for row in report["cases"]:
             if (
                 CASE_NAME.fullmatch(row["case"])
-                and row["status"] in {"PASS", "WARN", "FAIL", "UNSTABLE"}
+                and row["status"] in {"PASS", "FAIL", "UNSTABLE"}
                 and positive(row["median_us"])
                 and positive(row["baseline_us"])
                 and type(row["delta"]) in (int, float)
@@ -321,7 +330,10 @@ def publish():
         {"status": status, "failure_reason": reason, "cases": rows},
     )
     with Path(os.environ["GITHUB_STEP_SUMMARY"]).open("a") as stream:
-        stream.write(f"### Forward performance\n\nResult: **{status}** ({reason})\n\n")
+        stream.write(
+            f"### Forward performance\n\nResult: **{status}** ({reason})\n\n"
+            "A case fails when its median latency is more than 5% above baseline.\n\n"
+        )
         if rows:
             stream.write(
                 "| Case | Current (µs) | Baseline (µs) | Change | Result |\n"

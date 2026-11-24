@@ -288,7 +288,7 @@ jobs:
 
           if (
               os.environ["SCHEDULED_RECIPE_ENABLED"] == "true"
-              and os.environ["SCHEDULED_FORWARD_PERF_ENABLED"] == "true"
+              and os.environ.get("SCHEDULED_FORWARD_PERF_ENABLED") == "true"
           ):
               with output.open("a", encoding="utf-8") as handle:
                   handle.write("run_forward=true\n")
