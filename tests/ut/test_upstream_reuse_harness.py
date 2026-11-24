@@ -467,6 +467,72 @@ def test_strict_collection_minimum_is_retained():
     assert error is not None and "expected at least 3" in error
 
 
+@pytest.mark.parametrize(
+    ("extra", "message"),
+    [
+        ('nodeids = ["tests/test_other.py::test_case"]', "invalid or duplicate"),
+        ('nodeids = []', "invalid or duplicate"),
+        (
+            'nodeids = ["tests/test_example.py::test_case", '
+            '"tests/test_example.py::test_case"]',
+            "invalid or duplicate",
+        ),
+        (
+            'nodeids = ["tests/test_example.py::test_case"]\nkeywords = "case"',
+            "without other selectors",
+        ),
+    ],
+)
+def test_manifest_rejects_invalid_exact_selection(tmp_path, extra, message):
+    manifest = tmp_path / "manifest.toml"
+    manifest.write_text(
+        '[meta]\nschema = 1\n[[entry]]\nid = "example"\n'
+        'path = "tests/test_example.py"\nmode = "adapted"\nchips = ["cpu"]\n'
+        + extra
+        + "\n"
+    )
+    with pytest.raises(AssertionError, match=message):
+        harness.load_manifest(manifest)
+
+
+@pytest.mark.parametrize(
+    ("selector", "expected_error"),
+    [
+        ("TestSelection::test_parameter[only]", None),
+        ("TestSelection::test_parameter", "did not match passing tests"),
+        ("TestSelection::test_parameter[missing]", "status 4"),
+    ],
+)
+def test_exact_selection_requires_the_requested_cases(
+    upstream, monkeypatch, selector, expected_error
+):
+    path = "tests/test_exact.py"
+    (upstream / path).write_text(
+        "import pytest\n\n"
+        "class TestSelection:\n"
+        "    @pytest.mark.parametrize('value', [pytest.param(1, id='only')])\n"
+        "    def test_parameter(self, value):\n"
+        "        assert value == 1\n\n"
+        "def test_also_selected():\n"
+        "    assert True\n\n"
+        "def test_not_selected():\n"
+        "    assert False\n"
+    )
+    monkeypatch.setenv("HF_HUB_OFFLINE", "1")
+    entry = make_entry(
+        path,
+        mode="adapted",
+        min_tests=2,
+        nodeids=(f"{path}::{selector}", f"{path}::test_also_selected"),
+    )
+    result = UpstreamRunner(upstream).run(entry)
+    error = harness.strict_result_error(entry, result)
+    if expected_error is None:
+        assert error is None and result.passed == 2
+    else:
+        assert error is not None and expected_error in error
+
+
 @pytest.mark.parametrize("declare_no_hub_repos", [True, False])
 def test_deselected_hub_cases_do_not_block_offline_reuse(
     upstream: Path, monkeypatch: pytest.MonkeyPatch, declare_no_hub_repos: bool
@@ -605,7 +671,7 @@ def test_junit_preserves_skip_evidence(tmp_path):
         '<testcase classname="tests.example" name="test_fail"><failure/></testcase>'
         "</testsuite></testsuites>"
     )
-    collected, failures, errors, skipped, names, cases = harness._parse_junit(report)
+    collected, failures, errors, skipped, names, cases, _ = harness._parse_junit(report)
     assert (collected, failures, errors, skipped) == (3, 1, 0, 1)
     assert names == ["tests.example::test_fail"]
     assert cases == [
@@ -709,7 +775,7 @@ def test_reviewed_apc_skip_retains_source_location_and_count_limit(tmp_path):
         "/runtime/tests/v1/sample/test_logprobs.py:360: Skipped"
         "</skipped></testcase></testsuite></testsuites>"
     )
-    collected, failures, errors, skipped, names, cases = harness._parse_junit(report)
+    collected, failures, errors, skipped, names, cases, _ = harness._parse_junit(report)
     result = RunResult(
         0,
         collected,

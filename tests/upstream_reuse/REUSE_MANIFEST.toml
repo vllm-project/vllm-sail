@@ -11,9 +11,9 @@
 #
 # vllm-sail disguises its PPU platform as CUDA (PPUPlatform._enum =
 # PlatformEnum.CUDA, current_platform.is_cuda() is True), so upstream tests
-# written against the CUDA platform -- but that do not touch concrete kernel
-# numerics -- run unchanged inside the vllm-sail runtime. That is exactly the
-# population whitelisted here.
+# written against the CUDA platform can run inside the SAIL runtime. Device
+# entries select verified nodes that exercise the SAIL backend with synthetic
+# tensors on the declared boards.
 #
 # Field reference (see tests/upstream_reuse/_reuse_harness.py:ReuseEntry):
 #   id          unique short key (used as the pytest parameter id)
@@ -23,7 +23,8 @@
 #                            applied by test_reuse_adapted.py
 #   chips       applicable targets, subset of {"cpu", "810e", "890p"}.
 #               CI runs the "890p" entries on M890; "cpu" entries can also run on
-#               a device-less host. Entries without "cpu" are marked `ppu`.
+#               a device-less host. "810e" can be selected for manual strict runs.
+#               Entries without "cpu" are marked `ppu`.
 #   category    free-form grouping (params / config / core / sample / ...)
 #   reason      why this entry is direct|adapted (audited on every bump)
 #   min_tests   minimum number of upstream test cases that must be collected;
@@ -31,6 +32,8 @@
 #   hub_repos   optional list of Hub repo IDs required by the selected tests;
 #               only declared repos are checked before offline execution
 #   # --- optional adaptation knobs (mode = "adapted" only) ---
+#   nodeids     exact pytest node IDs, including parameter IDs. Every node must
+#               pass. Replaces markers, keywords and deselect.
 #   markers     pytest -m expression narrowing the run
 #   keywords    pytest -k expression narrowing the run
 #   deselect    exact upstream node ids to --deselect
@@ -299,3 +302,73 @@ reason = "Tokenizer registry consistency needs HuggingFace AutoConfig; pinned to
 env = { HF_HUB_OFFLINE = "1", TRANSFORMERS_OFFLINE = "1" }
 skip_reason = "requires a warm offline HF tokenizer cache (HF_HOME) on the runner; enable once the CI cache volume is provisioned"
 min_tests = 1
+
+[[entry]]
+id = "repetition_penalties_kernel"
+path = "tests/kernels/test_apply_repetition_penalties.py"
+mode = "adapted"
+chips = ["810e", "890p"]
+category = "kernel"
+reason = "Compares the registered repetition penalty kernel against Torch for empty and small nonempty batches."
+nodeids = [
+    "tests/kernels/test_apply_repetition_penalties.py::test_apply_repetition_penalties_zero_seqs",
+    "tests/kernels/test_apply_repetition_penalties.py::test_apply_repetition_penalties[0-dtype0-1.05-17-2]",
+]
+min_tests = 2
+
+[[entry]]
+id = "rms_norm_kernel"
+path = "tests/kernels/core/test_layernorm.py"
+mode = "adapted"
+chips = ["810e", "890p"]
+category = "kernel"
+reason = "Checks weighted and weightless RMSNorm, residuals, and strided input on small BF16 tensors."
+nodeids = [
+    "tests/kernels/core/test_layernorm.py::test_rms_norm[False-cuda:0-0-dtype1-False-768-7]",
+    "tests/kernels/core/test_layernorm.py::test_rms_norm[False-cuda:0-0-dtype1-True-768-7]",
+    "tests/kernels/core/test_layernorm.py::test_rms_norm[True-cuda:0-0-dtype1-False-768-7]",
+    "tests/kernels/core/test_layernorm.py::test_rms_norm[True-cuda:0-0-dtype1-True-768-7]",
+    "tests/kernels/core/test_layernorm.py::test_rms_norm_weightless[cuda:0-0-dtype1-False-768-7]",
+    "tests/kernels/core/test_layernorm.py::test_rms_norm_weightless[cuda:0-0-dtype1-True-768-7]",
+]
+min_tests = 6
+
+[[entry]]
+id = "int8_quant_kernel"
+path = "tests/kernels/quantization/test_int8_quant.py"
+mode = "adapted"
+chips = ["810e", "890p"]
+category = "kernel"
+reason = "Checks quantized values and scales for small symmetric dynamic and static INT8 inputs."
+nodeids = [
+    "tests/kernels/quantization/test_int8_quant.py::test_dynamic_scaled_int8_quant[0-dtype0-17-7]",
+    "tests/kernels/quantization/test_int8_quant.py::test_static_scaled_int8_quant[2.1-0-dtype0-17-7]",
+]
+min_tests = 2
+
+[[entry]]
+id = "kv_cache_asymmetric_tiny_head"
+path = "tests/kernels/attention/test_cache.py"
+mode = "adapted"
+chips = ["810e", "890p"]
+category = "kernel"
+reason = "Checks BF16 cache writes with unequal key and value widths and a head smaller than a warp."
+nodeids = [
+    "tests/kernels/attention/test_cache.py::test_reshape_and_cache_flash_asymmetric_tiny_head",
+]
+min_tests = 1
+
+[[entry]]
+id = "rotary_embedding_opcheck"
+path = "tests/kernels/core/test_rotary_embedding.py"
+mode = "adapted"
+chips = ["810e"]
+category = "kernel"
+reason = "Checks optional keys and head-stride variants with single-rank initialization on 810E."
+nodeids = [
+    "tests/kernels/core/test_rotary_embedding.py::test_rotary_embedding_opcheck[dtype1-True-True-11-32-32-True-11-cuda]",
+    "tests/kernels/core/test_rotary_embedding.py::test_rotary_embedding_opcheck[dtype1-True-False-11-32-32-True-11-cuda]",
+    "tests/kernels/core/test_rotary_embedding.py::test_rotary_embedding_opcheck[dtype1-False-True-11-32-32-True-11-cuda]",
+    "tests/kernels/core/test_rotary_embedding.py::test_rotary_embedding_opcheck[dtype1-False-False-11-32-32-True-11-cuda]",
+]
+min_tests = 4

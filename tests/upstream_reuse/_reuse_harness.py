@@ -87,6 +87,7 @@ class ReuseEntry(NamedTuple):
     skip_reason: str
     allowed_skips: tuple[dict[str, Any], ...] = ()
     hub_repos: tuple[str, ...] | None = None
+    nodeids: tuple[str, ...] = ()
 
     @property
     def cpu_runnable(self) -> bool:
@@ -113,6 +114,7 @@ class RunResult(NamedTuple):
     skipped_by_manifest: bool = False
     environment_gap: str = ""
     skipped_cases: tuple[tuple[str, str, str], ...] = ()
+    passed_names: tuple[str, ...] = ()
 
 
 #: Verbatim marker pytest prints when a ``conftest.py`` it needs raises on
@@ -212,8 +214,32 @@ def load_manifest(path: Path = MANIFEST_PATH) -> list[ReuseEntry]:
         path = Path(raw["path"])
         if path.is_absolute() or ".." in path.parts or path.parts[0] != "tests":
             raise AssertionError(f"{entry_id}: invalid upstream test path")
-        if int(raw.get("min_tests", 1)) < 1:
+        nodeids = raw.get("nodeids", [])
+        if "nodeids" in raw:
+            prefix = f"{path.as_posix()}::"
+            if (
+                not isinstance(nodeids, list)
+                or not nodeids
+                or any(
+                    not isinstance(node, str)
+                    or not node.startswith(prefix)
+                    or not node.removeprefix(prefix).strip()
+                    for node in nodeids
+                )
+                or len(set(nodeids)) != len(nodeids)
+            ):
+                raise AssertionError(f"{entry_id}: invalid or duplicate nodeids")
+            if mode != "adapted" or any(
+                raw.get(key) for key in ("markers", "keywords", "deselect")
+            ):
+                raise AssertionError(
+                    f"{entry_id}: nodeids require adapted mode without other selectors"
+                )
+        min_tests = int(raw.get("min_tests", len(nodeids) or 1))
+        if min_tests < 1:
             raise AssertionError(f"{entry_id}: min_tests must be positive")
+        if nodeids and min_tests != len(nodeids):
+            raise AssertionError(f"{entry_id}: min_tests must match the nodeids count")
         hub_repos = raw.get("hub_repos")
         if hub_repos is not None and (
             not isinstance(hub_repos, list)
@@ -243,7 +269,7 @@ def load_manifest(path: Path = MANIFEST_PATH) -> list[ReuseEntry]:
                 chips=chips,
                 category=raw.get("category", ""),
                 reason=raw.get("reason", ""),
-                min_tests=int(raw.get("min_tests", 1)),
+                min_tests=min_tests,
                 markers=raw.get("markers", ""),
                 keywords=raw.get("keywords", ""),
                 deselect=_as_str_tuple(raw.get("deselect")),
@@ -252,6 +278,7 @@ def load_manifest(path: Path = MANIFEST_PATH) -> list[ReuseEntry]:
                 skip_reason=raw.get("skip_reason", ""),
                 allowed_skips=tuple(allowed_skips),
                 hub_repos=tuple(hub_repos) if hub_repos is not None else None,
+                nodeids=tuple(nodeids),
             )
         )
     return entries
@@ -434,12 +461,13 @@ def offline_hub_gap(entry: ReuseEntry, probe: str) -> str | None:
 # ---------------------------------------------------------------------------
 def _parse_junit(
     path: Path,
-) -> tuple[int, int, int, int, list[str], list[tuple[str, str, str]]]:
+) -> tuple[int, int, int, int, list[str], list[tuple[str, str, str]], list[str]]:
     collected = failures = errors = skipped = 0
     failed_names: list[str] = []
     skipped_cases: list[tuple[str, str, str]] = []
+    passed_names: list[str] = []
     if not path.is_file():
-        return collected, failures, errors, skipped, failed_names, skipped_cases
+        return 0, 0, 0, 0, [], [], []
     root = ET.parse(path).getroot()  # noqa: S314 - trusted local CI artifact
     suites = [root] if root.tag == "testsuite" else list(root.iter("testsuite"))
     for suite in suites:
@@ -473,7 +501,28 @@ def _parse_junit(
                         skipped_case.get("type", ""),
                     )
                 )
-    return collected, failures, errors, skipped, failed_names, skipped_cases
+            else:
+                passed_names.append(node)
+    return (
+        collected,
+        failures,
+        errors,
+        skipped,
+        failed_names,
+        skipped_cases,
+        passed_names,
+    )
+
+
+def _junit_node_name(nodeid: str) -> str:
+    """Render a pytest node ID using the classname and name in JUnit."""
+    path, _, item = nodeid.partition("::")
+    selector, bracket, params = item.partition("[")
+    classes, _, name = selector.rpartition("::")
+    classname = path.removesuffix(".py").replace("/", ".")
+    if classes:
+        classname += "." + classes.replace("::", ".")
+    return f"{classname}::{name}{bracket}{params}"
 
 
 def strict_result_error(entry: ReuseEntry, result: RunResult) -> str | None:
@@ -492,6 +541,14 @@ def strict_result_error(entry: ReuseEntry, result: RunResult) -> str | None:
         return "pytest reported failure without matching test evidence"
     if result.collected < entry.min_tests:
         return f"collected {result.collected}, expected at least {entry.min_tests}"
+    if entry.nodeids:
+        expected = {_junit_node_name(node) for node in entry.nodeids}
+        if (
+            result.collected != len(expected)
+            or result.passed != len(expected)
+            or set(result.passed_names) != expected
+        ):
+            return f"selected nodeids did not match passing tests: {result.tail}"
     if result.passed < 1:
         return "no upstream test passed; structural checks do not establish coverage"
     unexpected = [
@@ -533,7 +590,9 @@ import sysconfig
 from pathlib import Path
 
 runtime = {"vllm": str(Path(importlib.import_module("vllm").__file__).resolve())}
-if os.environ.get("VLLM_UPSTREAM_REUSE_TARGET") == "890p":
+target = os.environ.get("VLLM_UPSTREAM_REUSE_TARGET")
+capabilities = {"810e": (8, 0), "890p": (8, 9)}
+if target in capabilities:
     runtime["vllm_sail"] = str(Path(importlib.import_module("vllm_sail").__file__).resolve())
     site = Path(sysconfig.get_paths()["purelib"]).resolve()
     for name, path in runtime.items():
@@ -543,8 +602,8 @@ if os.environ.get("VLLM_UPSTREAM_REUSE_TARGET") == "890p":
     from vllm.platforms import current_platform
     if not current_platform.is_ppu() or not torch.cuda.is_available():
         raise RuntimeError("upstream reuse requires a real PPU runtime")
-    if torch.cuda.get_device_capability() != (8, 9):
-        raise RuntimeError("M890 qualification requires PPU 1.5; 810E is not enabled")
+    if torch.cuda.get_device_capability() != capabilities[target]:
+        raise RuntimeError(f"upstream reuse target {target} requires {capabilities[target]}")
 print("upstream reuse runtime: " + json.dumps(runtime), flush=True)
 import pytest
 raise SystemExit(pytest.main(sys.argv[1:]))
@@ -591,7 +650,7 @@ class UpstreamRunner:
         command = [sys.executable]
         command += ["-c", RUNTIME_BOOTSTRAP] if self.strict else ["-m", "pytest"]
         command += [
-            entry.path,
+            *(entry.nodeids or (entry.path,)),
             "-q",
             "-rN",
             "--no-header",
@@ -644,6 +703,8 @@ class UpstreamRunner:
             ],
             "reason": result.tail if result.skipped_by_manifest else error,
         }
+        if entry.nodeids:
+            self.records[entry.id]["nodeids"] = list(entry.nodeids)
         if self.strict and error:
             raise AssertionError(f"{entry.id}: {error}")
         return result
@@ -683,7 +744,11 @@ class UpstreamRunner:
                 self.records.get(entry.id, {}).get("status") == "passed"
                 for entry in active
             ),
-            "deferred_targets": {"810e": "skipped: no CI runner available"},
+            "deferred_targets": (
+                {}
+                if self.execution_target == "810e"
+                else {"810e": "skipped: no CI runner available"}
+            ),
             "entries": rows,
         }
         if self.report_dir is not None:
@@ -741,9 +806,15 @@ class UpstreamRunner:
                 returncode = -1
                 output = f"upstream reuse run timed out after {RUN_TIMEOUT_SECONDS}s\n"
                 output += (exc.stdout or "") if isinstance(exc.stdout, str) else ""
-            collected, failures, errors, skipped, failed_names, skipped_cases = (
-                _parse_junit(junit_path)
-            )
+            (
+                collected,
+                failures,
+                errors,
+                skipped,
+                failed_names,
+                skipped_cases,
+                passed_names,
+            ) = _parse_junit(junit_path)
             if self.report_dir is not None:
                 self.report_dir.mkdir(parents=True, exist_ok=True)
                 (self.report_dir / f"{entry.id}.log").write_text(
@@ -773,5 +844,6 @@ class UpstreamRunner:
                 failed_names=tuple(failed_names),
                 tail=tail,
                 skipped_cases=tuple(skipped_cases),
+                passed_names=tuple(passed_names),
             ),
         )
