@@ -76,10 +76,12 @@ def test_result_validation_and_comparison(tmp_path, modules):
         runner.read_measurements(path, expected, 4)
     baseline = {"schema_version": 1, "config": {"devices": 8}, "metrics": metrics}
     assert runner.assess(baseline, baseline)["status"] == "pass"
-    assert (
-        runner.assess({**baseline, "config": {}}, baseline)["failure_reason"]
-        == "forward_config_mismatch"
-    )
+    assert runner.assess({**baseline, "config": {}}, baseline) == {
+        "status": "fail",
+        "failure_reason": "forward_config_mismatch",
+        "cases": [],
+        "config_mismatch": ["devices"],
+    }
 
 
 @pytest.mark.parametrize(
@@ -180,6 +182,58 @@ def test_one_regressed_case_is_reported_to_nightly(tmp_path, monkeypatch, module
     ]
     monkeypatch.setenv("NOTIFY_FORWARD_SELECTED", "")
     assert collect(tmp_path)["results"] == rows[:1]
+
+
+@pytest.mark.parametrize("has_result", [False, True])
+def test_isolated_publisher_reports_failure_without_private_details(
+    tmp_path, has_result
+):
+    private = tmp_path / "private"
+    (private / "results").mkdir(parents=True)
+    (private / "recipe-phase.txt").write_text("model_cache_check\n")
+    (private / "runtime.log").write_text("private-runtime-error\n")
+    if has_result:
+        (private / "results/summary.json").write_text(
+            json.dumps(
+                {
+                    "status": "fail",
+                    "failure_reason": "forward_config_mismatch",
+                    "cases": [],
+                    "config_mismatch": ["torch_sha256", "private-detail"],
+                }
+            )
+        )
+
+    public = tmp_path / "public"
+    public.mkdir()
+    summary = tmp_path / "step-summary.md"
+    result = subprocess.run(
+        [sys.executable, "-IB", str(CI_DIR / "ppu_recipe_forward_perf.py"), "publish"],
+        env={
+            **os.environ,
+            "PRIVATE_DIR": str(private),
+            "PUBLIC_DIR": str(public),
+            "GITHUB_STEP_SUMMARY": str(summary),
+            "RECIPE_OUTCOME": "failure",
+            "RETENTION_OUTCOME": "success",
+        },
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    expected = {
+        "status": "fail",
+        "failure_reason": "model_cache_check_failed",
+        "cases": [],
+    }
+    if has_result:
+        expected["failure_reason"] = "forward_config_mismatch"
+        expected["config_mismatch"] = ["torch_sha256"]
+    assert json.loads((public / "summary.json").read_text()) == expected
+    assert expected["failure_reason"] in summary.read_text()
+    for output in (result.stdout, result.stderr, summary.read_text()):
+        assert "private-runtime-error" not in output
+        assert "private-detail" not in output
 
 
 @pytest.mark.parametrize(

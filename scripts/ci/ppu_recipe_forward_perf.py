@@ -1,8 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """Run and report recipe-backed offline forward performance measurements."""
 
-from __future__ import annotations
-
 import argparse
 import hashlib
 import json
@@ -12,7 +10,6 @@ import re
 import stat
 import subprocess
 import sys
-from dataclasses import asdict
 from decimal import Decimal
 from pathlib import Path
 
@@ -23,6 +20,15 @@ SAMPLES = 5
 REGRESSION_LIMIT = Decimal("1.05")
 MAX_CV = 0.15
 CASE_NAME = re.compile(r"[a-z0-9_]{1,64}")
+BASELINE_CONFIG_FIELDS = (
+    "benchmark_args",
+    "checkpoint_files_sha256",
+    "devices",
+    "groups",
+    "recipe_config_digest",
+    "sdk_sha256",
+    "torch_sha256",
+)
 
 
 def write_json(path, data):
@@ -122,6 +128,11 @@ def assess(current, baseline):
             "status": "fail",
             "failure_reason": "forward_config_mismatch",
             "cases": [],
+            "config_mismatch": [
+                field
+                for field in BASELINE_CONFIG_FIELDS
+                if baseline["config"].get(field) != current["config"].get(field)
+            ],
         }
     current_metrics, baseline_metrics = current["metrics"], baseline["metrics"]
     if current_metrics.keys() != baseline_metrics.keys():
@@ -168,6 +179,8 @@ def assess(current, baseline):
 
 
 def run(args):
+    from dataclasses import asdict
+
     import torch
     from huggingface_hub import snapshot_download
     from ppu_recipe import _load_yaml, redact_and_verify_public_payload, resolve_recipe
@@ -241,6 +254,8 @@ def run(args):
         )
         baseline = json.loads(path.read_text())
         if baseline["schema_version"] != 1 or baseline["config"] != current["config"]:
+            redact_and_verify_public_payload(current)
+            write_json(output / "measurement.json", current)
             write_json(output / "summary.json", assess(current, baseline))
             return 1
 
@@ -273,11 +288,17 @@ def run(args):
 
 
 def publish():
-    private = Path(os.environ["PRIVATE_DIR"]) / "results"
+    # The runner host can have an older system Python than the runtime image.
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from ppu_recipe_diagnostics import failure_reason
+
+    artifacts = Path(os.environ["PRIVATE_DIR"])
+    private = artifacts / "results"
     public = Path(os.environ["PUBLIC_DIR"])
     status = "fail"
-    reason = "forward_measurement_failed"
+    reason = failure_reason(artifacts, "forward_perf")
     rows = []
+    config_mismatch = []
     try:
         path = private / "summary.json"
         if not stat.S_ISDIR(private.lstat().st_mode):
@@ -293,6 +314,12 @@ def publish():
             "forward_measurement_unstable",
         }:
             reason = report["failure_reason"]
+        if reason == "forward_config_mismatch":
+            config_mismatch = [
+                field
+                for field in BASELINE_CONFIG_FIELDS
+                if field in report.get("config_mismatch", [])
+            ]
         for row in report["cases"]:
             if (
                 CASE_NAME.fullmatch(row["case"])
@@ -325,15 +352,19 @@ def publish():
     if os.environ["RETENTION_OUTCOME"] == "failure":
         status = "fail"
         reason = "private_retention_failed"
-    write_json(
-        public / "summary.json",
-        {"status": status, "failure_reason": reason, "cases": rows},
-    )
-    with Path(os.environ["GITHUB_STEP_SUMMARY"]).open("a") as stream:
+    summary = {"status": status, "failure_reason": reason, "cases": rows}
+    if config_mismatch:
+        summary["config_mismatch"] = config_mismatch
+    write_json(public / "summary.json", summary)
+    with Path(os.environ["GITHUB_STEP_SUMMARY"]).open("a", encoding="utf-8") as stream:
         stream.write(
             f"### Forward performance\n\nResult: **{status}** ({reason})\n\n"
             "A case fails when its median latency is more than 5% above baseline.\n\n"
         )
+        if config_mismatch:
+            stream.write(
+                f"Baseline configuration differs in {', '.join(config_mismatch)}.\n\n"
+            )
         if rows:
             stream.write(
                 "| Case | Current (µs) | Baseline (µs) | Change | Result |\n"
@@ -349,7 +380,7 @@ def publish():
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    sub = parser.add_subparsers(dest="action", required=True)
+    sub = parser.add_subparsers(dest="action")
     run_parser = sub.add_parser("run")
     for name in ("recipe", "policy", "results-dir", "image-stack"):
         run_parser.add_argument(f"--{name}", type=Path, required=True)
@@ -357,6 +388,8 @@ def main():
     run_parser.add_argument("--local-checkpoint", type=Path)
     sub.add_parser("publish")
     args = parser.parse_args()
+    if args.action is None:
+        parser.error("the following arguments are required: action")
     return run(args) if args.action == "run" else publish()
 
 

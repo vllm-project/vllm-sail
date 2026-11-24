@@ -494,7 +494,9 @@ jobs:
           TRUSTED_CI_DIR: ${{ steps.runtime.outputs.trusted }}
           PRIVATE_DIR: ${{ steps.runtime.outputs.artifacts }}
           PUBLIC_DIR: ${{ steps.runtime.outputs.public }}
-        run: python3 -I "${TRUSTED_CI_DIR}/scripts/ci/ppu_recipe_forward_perf.py" publish
+        run: |
+          python3 --version
+          python3 -I "${TRUSTED_CI_DIR}/scripts/ci/ppu_recipe_forward_perf.py" publish
 
       - name: Upload public forward performance summary
         if: always() && steps.publish-forward.outcome == 'success'
