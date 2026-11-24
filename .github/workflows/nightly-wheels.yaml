@@ -1,5 +1,5 @@
 name: Nightly wheels
-run-name: Benchmark upstream wheel reuse against run 45320243205
+run-name: Benchmark SAIL Ninja at four and eight jobs
 
 on:
   workflow_dispatch:
@@ -21,9 +21,9 @@ concurrency:
   queue: max
 
 jobs:
-  warm:
-    name: PPU wheel build with upstream reuse
-    if: github.repository == 'vllm-project/vllm-sail' && github.ref_name == 'ci/benchmark-upstream-vllm-wheel'
+  benchmark:
+    name: SAIL Ninja parallelism benchmark
+    if: github.repository == 'vllm-project/vllm-sail' && github.ref_name == 'ci/benchmark-sail-ninja-jobs'
     runs-on: ubuntu-24.04
     timeout-minutes: 180
     container:
@@ -32,6 +32,7 @@ jobs:
       VLLM_SAIL_BUILD_IMAGE: download.t-head.cn/docker_release/pytorch@sha256:a33a67832f7ec442c481421e94255518dd67e464406f8e610c15d2b594b21f80
       PYTORCH_SAIL_ARCH: ppu_15;ppu_10
       ARTIFACT_DIR: ${{ github.workspace }}/artifacts
+      BENCHMARK_SHA: a0d67262dcdbe1b27e8bd83e507c1094e8e243e4
     steps:
       - name: Disable internal GitHub mirror rewrite
         shell: bash
@@ -50,8 +51,8 @@ jobs:
             }
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.sha }}
-          fetch-depth: 2
+          ref: ${{ env.BENCHMARK_SHA }}
+          fetch-depth: 0
           persist-credentials: false
       - name: Download the cold build artifact
         uses: actions/download-artifact@v4
@@ -61,53 +62,78 @@ jobs:
           github-token: ${{ github.token }}
           merge-multiple: true
           path: ${{ runner.temp }}/benchmark-donors/3
-      - name: Build or repackage wheels
+      - name: Build SAIL with four Ninja jobs
         shell: bash
         env:
+          BUILD_JOBS: '4'
           DONOR_SHA: bedba1222e6b5a65a38e88cf4d0fb9f1383e8ffa
           VLLM_SAIL_NATIVE_REUSE_ROOT: ${{ runner.temp }}/benchmark-donors
         run: |
-          set -x
-          test "$(git -c safe.directory="$PWD" rev-parse HEAD)" = "$GITHUB_SHA"
+          test "$(git -c safe.directory="$PWD" rev-parse HEAD)" = "$BENCHMARK_SHA"
+          mkdir -p "$ARTIFACT_DIR/ninja-benchmark"
+          {
+            printf 'logical_cpus=%s\n' "$(nproc)"
+            for stat in cpu.max cpuset.cpus.effective memory.max memory.peak memory.events; do
+              if [[ -r "/sys/fs/cgroup/$stat" ]]; then
+                printf '%s\n' "$stat"
+                cat "/sys/fs/cgroup/$stat"
+              fi
+            done
+            head -1 /proc/meminfo
+          } | tee "$ARTIFACT_DIR/ninja-benchmark/runner-before.txt"
           printf '%s\n' "$DONOR_SHA" > "$VLLM_SAIL_NATIVE_REUSE_ROOT/3.source"
           bash scripts/ci/build_ppu_wheels.sh
-      - name: Verify the Rust wheel was reused and SAIL was rebuilt
-        shell: bash
-        env:
-          VLLM_SAIL_NATIVE_REUSE_ROOT: ${{ runner.temp }}/benchmark-donors
-        run: |
           grep -Fxq 'reuse_mode=vllm-only' "$ARTIFACT_DIR/build-manifest.txt"
-          test ! -e "$ARTIFACT_DIR/logs/vllm-rust-build.log"
-          grep -Fq -- ' --parallel ' "$ARTIFACT_DIR/logs/vllm-sail-build.log"
-          python - <<'PY'
-          import json
-          import os
-          from pathlib import Path
-
-          donor_root = Path(os.environ["VLLM_SAIL_NATIVE_REUSE_ROOT"])
-          donor = json.loads((donor_root / "3/wheel-manifest.json").read_text())
-          result_root = Path(os.environ["ARTIFACT_DIR"])
-          result = json.loads((result_root / "wheels/wheel-manifest.json").read_text())
-          assert donor["wheels"]["vllm"] == result["wheels"]["vllm"]
-          assert donor["vllm_build_fingerprint"] == result["vllm_build_fingerprint"]
-          assert donor["commits"]["vllm"] == result["commits"]["vllm"]
-          assert result["commits"]["vllm-sail"] == os.environ["GITHUB_SHA"]
-          assert donor["native_reuse"]["fingerprint"] != result["native_reuse"]["fingerprint"]
-          print("The upstream wheel SHA256 is identical. The SAIL wheel was rebuilt for this commit.")
-          PY
-      - name: Upload reuse benchmark wheels
+          grep -Fq -- ' --parallel 4' "$ARTIFACT_DIR/logs/vllm-sail-build.log"
+          log="$(find "$PWD/build" -name .ninja_log -type f -print -quit)"
+          test -s "$log"
+          cp "$log" "$ARTIFACT_DIR/ninja-benchmark/j4.tsv"
+          dirname "$log" > "$ARTIFACT_DIR/ninja-benchmark/ninja-directory.txt"
+          for stat in memory.peak memory.events; do
+            if [[ -r "/sys/fs/cgroup/$stat" ]]; then
+              cp "/sys/fs/cgroup/$stat" "$ARTIFACT_DIR/ninja-benchmark/j4-$stat.txt"
+            fi
+          done
+      - name: Retain four-job timings before changing parallelism
         uses: actions/upload-artifact@v4
         with:
-          name: ppu-wheels-upstream-only-${{ github.run_id }}
-          path: artifacts/wheels/
+          name: sail-ninja-j4-${{ github.run_id }}
+          path: artifacts/ninja-benchmark/
           if-no-files-found: error
-          retention-days: 3
-      - name: Upload reuse build diagnostics
+          retention-days: 7
+      - name: Rebuild the same Ninja graph with eight jobs
+        shell: bash
+        run: |
+          source /usr/local/PPU_SDK/envsetup.sh
+          export PPU_SDK=/usr/local/PPU_SDK HGCC=/usr/local/PPU_SDK/bin/hgcc
+          export PYTORCH_SAIL_ARCH VERBOSE=1
+          unset TORCH_CUDA_ARCH_LIST VLLM_SAIL_HG_ARCH
+          metrics="$ARTIFACT_DIR/ninja-benchmark"
+          build_dir="$(cat "$metrics/ninja-directory.txt")"
+          ninja -C "$build_dir" -t clean | tee "$metrics/j8-clean.txt"
+          rm "$build_dir/.ninja_log"
+          started="$(date +%s%3N)"
+          set +e
+          cmake --build "$build_dir" --parallel 8 2>&1 | tee "$metrics/j8-build.log"
+          status="${PIPESTATUS[0]}"
+          set -e
+          ended="$(date +%s%3N)"
+          printf 'elapsed_ms=%s\nexit_code=%s\n' "$((ended - started))" "$status" | tee "$metrics/j8-result.txt"
+          if [[ -f "$build_dir/.ninja_log" ]]; then
+            cp "$build_dir/.ninja_log" "$metrics/j8.tsv"
+          fi
+          for stat in memory.peak memory.events; do
+            if [[ -r "/sys/fs/cgroup/$stat" ]]; then
+              cp "/sys/fs/cgroup/$stat" "$metrics/j8-$stat.txt"
+            fi
+          done
+          exit "$status"
+      - name: Upload Ninja timing and build logs
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: ppu-build-diagnostics-upstream-only-${{ github.run_id }}
+          name: sail-ninja-parallelism-${{ github.run_id }}
           path: |
-            artifacts/logs/**
-            artifacts/build-manifest.txt
-          retention-days: 3
+            artifacts/ninja-benchmark/**
+            artifacts/logs/vllm-sail-build.log
+          retention-days: 7
