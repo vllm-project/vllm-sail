@@ -1,9 +1,7 @@
 name: Nightly wheels
-run-name: Nightly wheels (${{ inputs.branch || 'main' }})
+run-name: Benchmark upstream wheel reuse (${{ inputs.branch }})
 
 on:
-  schedule:
-    - cron: '0 13 * * *' # 21:00 Asia/Shanghai
   workflow_dispatch:
     inputs:
       branch:
@@ -24,8 +22,7 @@ concurrency:
 
 jobs:
   prepare:
-    # Keep the workflow definition trusted while allowing a different source branch.
-    if: github.repository == 'vllm-project/vllm-sail' && github.ref == 'refs/heads/main'
+    if: github.repository == 'vllm-project/vllm-sail' && github.ref_name == 'ci/benchmark-upstream-vllm-wheel'
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     outputs:
@@ -58,41 +55,81 @@ jobs:
     with:
       pr_head_sha: ${{ needs.prepare.outputs.sha }}
 
-  publish:
+  warm:
+    name: PPU wheel build with upstream reuse
     needs: build
-    uses: t-head/ci-infra/.github/workflows/push-tmp-wheel.yml@main
-    with:
-      artifact_name: ppu-wheels-${{ github.run_id }}
-      repo: ${{ needs.build.outputs.repo }}
-      commit: ${{ needs.build.outputs.commit }}
-      branch: ${{ needs.build.outputs.branch }}
-      tag: ${{ needs.build.outputs.tag }}
-      template_repository: t-head/ci-infra
-      template_ref: main
-    secrets:
-      release_username: ${{ secrets.RELEASE_USERNAME }}
-      release_token: ${{ secrets.RELEASE_TOKEN }}
-      template_token: ${{ secrets.TEMPLATE_TOKEN }}
-
-  downloads:
-    name: Wheel download directory
-    needs: [prepare, build, publish]
     runs-on: ubuntu-24.04
-    timeout-minutes: 5
+    timeout-minutes: 180
+    container:
+      image: ${{ needs.build.outputs.image }}
+    env:
+      VLLM_SAIL_BUILD_IMAGE: ${{ needs.build.outputs.image }}
+      PYTORCH_SAIL_ARCH: ppu_15;ppu_10
+      ARTIFACT_DIR: ${{ github.workspace }}/artifacts
+      VLLM_SAIL_NATIVE_REUSE_ROOT: ${{ runner.temp }}/benchmark-donors
     steps:
-      - name: Show wheel downloads and source identity
-        env:
-          UPLOAD_URL: ${{ needs.publish.outputs.upload_url }}
-          SOURCE_BRANCH: ${{ needs.build.outputs.branch }}
-          SOURCE_SHA: ${{ needs.build.outputs.commit }}
-          BUILD_IMAGE: ${{ needs.build.outputs.image }}
+      - name: Disable internal GitHub mirror rewrite
+        shell: bash
         run: |
-          test -n "$UPLOAD_URL"
-          {
-            printf '## Wheel downloads\n\n'
-            printf 'Wheel directory: %s\n\n' "$UPLOAD_URL"
-            printf 'Source branch: `%s`\n\nSource commit: `%s`\n\n' "$SOURCE_BRANCH" "$SOURCE_SHA"
-            printf 'Build image: `%s`\n\n' "$BUILD_IMAGE"
-            printf 'Both wheels and wheel-manifest.json are also in Actions artifact `ppu-wheels-%s` (14 days).\n\n' "$GITHUB_RUN_ID"
-            printf 'Compilation checks only; device and model tests are separate.\n'
-          } >> "$GITHUB_STEP_SUMMARY"
+          for scope in system global; do
+            while IFS= read -r key; do
+              git config --${scope} --unset-all "${key}"
+            done < <(git config --${scope} --get-regexp '^url\..*\.insteadof$' | awk '$2 ~ /github\.com/ {print $1}')
+          done
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 2
+          persist-credentials: false
+      - name: Download the cold build artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ppu-wheels-${{ github.run_id }}
+          path: ${{ runner.temp }}/benchmark-donors/3
+      - name: Build or repackage wheels
+        shell: bash
+        env:
+          DONOR_SHA: ${{ needs.build.outputs.commit }}
+        run: |
+          test "$ACTIONS_CACHE_MODE" = none
+          test "$(git -c safe.directory="$PWD" rev-parse HEAD)" = "$GITHUB_SHA"
+          printf '%s\n' "$DONOR_SHA" > "$VLLM_SAIL_NATIVE_REUSE_ROOT/3.source"
+          bash scripts/ci/build_ppu_wheels.sh
+      - name: Verify the Rust wheel was reused and SAIL was rebuilt
+        shell: bash
+        run: |
+          grep -Fxq 'reuse_mode=vllm-only' "$ARTIFACT_DIR/build-manifest.txt"
+          test ! -e "$ARTIFACT_DIR/logs/vllm-rust-build.log"
+          grep -Fq -- ' --parallel ' "$ARTIFACT_DIR/logs/vllm-sail-build.log"
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          donor_root = Path(os.environ["VLLM_SAIL_NATIVE_REUSE_ROOT"])
+          donor = json.loads((donor_root / "3/wheel-manifest.json").read_text())
+          result_root = Path(os.environ["ARTIFACT_DIR"])
+          result = json.loads((result_root / "wheels/wheel-manifest.json").read_text())
+          assert donor["wheels"]["vllm"] == result["wheels"]["vllm"]
+          assert donor["vllm_build_fingerprint"] == result["vllm_build_fingerprint"]
+          assert donor["commits"]["vllm"] == result["commits"]["vllm"]
+          assert result["commits"]["vllm-sail"] == os.environ["GITHUB_SHA"]
+          assert donor["native_reuse"]["fingerprint"] != result["native_reuse"]["fingerprint"]
+          print("The upstream wheel SHA256 is identical. The SAIL wheel was rebuilt for this commit.")
+          PY
+      - name: Upload reuse benchmark wheels
+        uses: actions/upload-artifact@v4
+        with:
+          name: ppu-wheels-upstream-only-${{ github.run_id }}
+          path: artifacts/wheels/
+          if-no-files-found: error
+          retention-days: 3
+      - name: Upload reuse build diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ppu-build-diagnostics-upstream-only-${{ github.run_id }}
+          path: |
+            artifacts/logs/**
+            artifacts/build-manifest.txt
+          retention-days: 3

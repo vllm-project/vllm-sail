@@ -1,5 +1,6 @@
 // HGGC host entry for the BF16 top-k prefill sampler.
 // Registered under _ppu_C by ppu_bindings.cpp.
+// Benchmark fixture for invalidating the SAIL native fingerprint.
 
 #include "torch_utils.h"
 #include "sampler_bf16.h"
