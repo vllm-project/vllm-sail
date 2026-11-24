@@ -85,8 +85,9 @@ jobs:
           bash scripts/ci/build_ppu_wheels.sh
           grep -Fxq 'reuse_mode=vllm-only' "$ARTIFACT_DIR/build-manifest.txt"
           grep -Fq -- ' --parallel 4' "$ARTIFACT_DIR/logs/vllm-sail-build.log"
-          log="$(find "$PWD/build" -name .ninja_log -type f -print -quit)"
+          log="$(find "$PWD/build" -path '*/cmake/.ninja_log' -type f -print -quit)"
           test -s "$log"
+          grep -Eq '\.hg\.o[[:space:]]' "$log"
           cp "$log" "$ARTIFACT_DIR/ninja-benchmark/j4.tsv"
           dirname "$log" > "$ARTIFACT_DIR/ninja-benchmark/ninja-directory.txt"
           for stat in memory.peak memory.events; do
