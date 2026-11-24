@@ -460,6 +460,13 @@ def test_ci_uses_workflow_configured_build_and_runtime_image():
         assert f"&& secrets.{secret} || ''" in credentials
     assert "ci_registry_" not in str(build["env"])
     assert "ci_registry_" not in str(build["steps"])
+    build_step = next(
+        step for step in build["steps"] if step["name"] == "Build or repackage wheels"
+    )
+    assert build_step["env"]["RUSTUP_DIST_SERVER"] == "https://static.rust-lang.org"
+    assert (
+        build_step["env"]["RUSTUP_UPDATE_ROOT"] == "https://static.rust-lang.org/rustup"
+    )
     trusted_callers = {
         "ppu-pr-ci.yaml": "ppu",
         "ppu-accuracy-nightly.yaml": "build",
