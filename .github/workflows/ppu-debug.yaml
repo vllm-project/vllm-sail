@@ -1,5 +1,5 @@
 name: Verify candidate PPU PR CI
-run-name: "Candidate CI (main) at efcd42562dbbecf0a0d2ede517e3d28ce3164555"
+run-name: "Candidate CI (main) at 85636bdbebd14012b71d754c8202ebece4aef070"
 
 on:
   workflow_dispatch:
@@ -17,7 +17,7 @@ jobs:
       contents: read
     uses: ./.github/workflows/ut.yaml
     with:
-      pr_head_sha: 'efcd42562dbbecf0a0d2ede517e3d28ce3164555'
+      pr_head_sha: '85636bdbebd14012b71d754c8202ebece4aef070'
 
   ppu:
     if: >-
@@ -32,4 +32,4 @@ jobs:
       ci_registry_username: ${{ secrets.RELEASE_USERNAME }}
       ci_registry_token: ${{ secrets.RELEASE_TOKEN }}
     with:
-      pr_head_sha: 'efcd42562dbbecf0a0d2ede517e3d28ce3164555'
+      pr_head_sha: '85636bdbebd14012b71d754c8202ebece4aef070'
