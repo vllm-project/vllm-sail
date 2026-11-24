@@ -1,4 +1,4 @@
-name: Hosted registry pull validation
+name: PPU runtime registry access validation
 
 on:
   workflow_dispatch:
@@ -9,44 +9,24 @@ env:
   PROBE_IMAGE: download.t-head.cn/docker_test/vllm:v0.33.0-20261123-c550c70
 
 jobs:
-  pull:
+  manifest:
     if: >-
       github.repository == 'vllm-project/vllm-sail' &&
       github.ref == 'refs/heads/codex/hosted-registry-check-20261124' &&
       github.actor == 'Yunzshi310'
-    runs-on: ubuntu-24.04
-    timeout-minutes: 18
+    runs-on: 8-ppu-m890p
+    timeout-minutes: 3
     steps:
-      - name: Compare anonymous manifest and authenticated image pull
+      - name: Check the existing runner registry access
         shell: bash
-        env:
-          REGISTRY_USER: ${{ secrets.RELEASE_USERNAME }}
-          REGISTRY_TOKEN: ${{ secrets.RELEASE_TOKEN }}
         run: |
-          set -euo pipefail
-          DOCKER_CONFIG="$(mktemp -d "${RUNNER_TEMP}/registry-check.XXXXXX")"
-          export DOCKER_CONFIG
-          trap 'rm -rf -- "$DOCKER_CONFIG"' EXIT
-          if docker manifest inspect "$PROBE_IMAGE" > /dev/null 2>&1; then
-            echo "Anonymous manifest accessible"
-          else
-            echo "Anonymous manifest unavailable"
-            if ! printf '%s' "$REGISTRY_TOKEN" | docker login download.t-head.cn \
-              --username "$REGISTRY_USER" --password-stdin > /dev/null 2>&1; then
-              echo "::error::Registry authentication failed"
-              exit 1
-            fi
-            echo "Registry authentication succeeded"
+          if docker image inspect "$PROBE_IMAGE" >/dev/null 2>&1; then
+            echo "Requested runtime image is already cached"
+            exit 0
           fi
-          unset REGISTRY_USER REGISTRY_TOKEN
-          if ! docker pull --platform linux/amd64 "$PROBE_IMAGE" > "$DOCKER_CONFIG/pull.log" 2>&1; then
-            if grep -Eqi 'denied|unauthorized|forbidden' "$DOCKER_CONFIG/pull.log"; then
-              echo "::error::Image pull denied"
-            elif grep -Eqi 'no space left' "$DOCKER_CONFIG/pull.log"; then
-              echo "::error::Hosted runner storage exhausted during pull"
-            else
-              echo "::error::Image pull failed"
-            fi
+          if timeout 40s docker manifest inspect "$PROBE_IMAGE" >/dev/null 2>&1; then
+            echo "Runner Docker context can read the runtime manifest"
+          else
+            echo "::error::Runner Docker context could not read the runtime manifest"
             exit 1
           fi
-          docker image inspect --format 'Pull succeeded for {{.Os}}/{{.Architecture}}' "$PROBE_IMAGE"
