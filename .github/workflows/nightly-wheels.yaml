@@ -83,13 +83,18 @@ jobs:
           } | tee "$ARTIFACT_DIR/ninja-benchmark/runner-before.txt"
           printf '%s\n' "$DONOR_SHA" > "$VLLM_SAIL_NATIVE_REUSE_ROOT/3.source"
           bash scripts/ci/build_ppu_wheels.sh
+          set -x
           grep -Fxq 'reuse_mode=vllm-only' "$ARTIFACT_DIR/build-manifest.txt"
-          grep -Fq -- ' --parallel 4' "$ARTIFACT_DIR/logs/vllm-sail-build.log"
-          log="$(find "$PWD/build" -path '*/cmake/.ninja_log' -type f -print -quit)"
-          test -s "$log"
-          grep -Eq '\.hg\.o[[:space:]]' "$log"
-          cp "$log" "$ARTIFACT_DIR/ninja-benchmark/j4.tsv"
-          dirname "$log" > "$ARTIFACT_DIR/ninja-benchmark/ninja-directory.txt"
+          build_dir="$(awk '/^vllm-sail: .* --build .* --parallel 4$/ {print $4; exit}' "$ARTIFACT_DIR/logs/vllm-sail-build.log")"
+          test -n "$build_dir"
+          test -f "$build_dir/build.ninja"
+          printf '%s\n' "$build_dir" > "$ARTIFACT_DIR/ninja-benchmark/ninja-directory.txt"
+          find "$build_dir" -name .ninja_log -type f -print | tee "$ARTIFACT_DIR/ninja-benchmark/j4-log-paths.txt"
+          log="$(find "$build_dir" -name .ninja_log -type f -exec grep -al grouped_topk_kernels {} + | sed -n '1p' || true)"
+          if [[ -n "$log" ]]; then
+            cp "$log" "$ARTIFACT_DIR/ninja-benchmark/j4.tsv"
+            printf '%s\n' "$log" > "$ARTIFACT_DIR/ninja-benchmark/ninja-log-path.txt"
+          fi
           for stat in memory.peak memory.events; do
             if [[ -r "/sys/fs/cgroup/$stat" ]]; then
               cp "/sys/fs/cgroup/$stat" "$ARTIFACT_DIR/ninja-benchmark/j4-$stat.txt"
@@ -112,7 +117,9 @@ jobs:
           metrics="$ARTIFACT_DIR/ninja-benchmark"
           build_dir="$(cat "$metrics/ninja-directory.txt")"
           ninja -C "$build_dir" -t clean | tee "$metrics/j8-clean.txt"
-          rm "$build_dir/.ninja_log"
+          if [[ -s "$metrics/ninja-log-path.txt" ]]; then
+            rm "$(cat "$metrics/ninja-log-path.txt")"
+          fi
           started="$(date +%s%3N)"
           set +e
           cmake --build "$build_dir" --parallel 8 2>&1 | tee "$metrics/j8-build.log"
@@ -120,8 +127,10 @@ jobs:
           set -e
           ended="$(date +%s%3N)"
           printf 'elapsed_ms=%s\nexit_code=%s\n' "$((ended - started))" "$status" | tee "$metrics/j8-result.txt"
-          if [[ -f "$build_dir/.ninja_log" ]]; then
-            cp "$build_dir/.ninja_log" "$metrics/j8.tsv"
+          find "$build_dir" -name .ninja_log -type f -print | tee "$metrics/j8-log-paths.txt"
+          log="$(find "$build_dir" -name .ninja_log -type f -exec grep -al grouped_topk_kernels {} + | sed -n '1p' || true)"
+          if [[ -n "$log" ]]; then
+            cp "$log" "$metrics/j8.tsv"
           fi
           for stat in memory.peak memory.events; do
             if [[ -r "/sys/fs/cgroup/$stat" ]]; then
