@@ -60,6 +60,7 @@ else:  # pragma: no cover - exercised only on 3.9/3.10
 HERE = Path(__file__).resolve().parent
 REPO_ROOT = HERE.parents[1]
 MANIFEST_PATH = HERE / "REUSE_MANIFEST.toml"
+MODEL_CONFIG_FIXTURES_PATH = HERE / "fixtures" / "model_configs.json"
 
 MANIFEST_SCHEMA = 1
 VALID_MODES = ("direct", "adapted")
@@ -85,6 +86,7 @@ class ReuseEntry(NamedTuple):
     env: dict[str, str]
     xfail: tuple[str, ...]
     skip_reason: str
+    model_config_fixtures: bool = False
     allowed_skips: tuple[dict[str, Any], ...] = ()
     hub_repos: tuple[str, ...] | None = None
 
@@ -224,6 +226,14 @@ def load_manifest(path: Path = MANIFEST_PATH) -> list[ReuseEntry]:
             )
         ):
             raise AssertionError(f"{entry_id}: hub_repos must be a list of repo IDs")
+        model_config_fixtures = raw.get("model_config_fixtures", False)
+        if type(model_config_fixtures) is not bool or (
+            model_config_fixtures and not hub_repos
+        ):
+            raise AssertionError(
+                f"{entry_id}: model_config_fixtures must be a boolean "
+                "and requires hub_repos when enabled"
+            )
         allowed_skips = raw.get("allowed_skips", [])
         for rule in allowed_skips:
             if set(rule) != {"nodeid", "reason", "max_count"}:
@@ -250,6 +260,7 @@ def load_manifest(path: Path = MANIFEST_PATH) -> list[ReuseEntry]:
                 env={str(key): str(val) for key, val in env_raw.items()},
                 xfail=_as_str_tuple(raw.get("xfail")),
                 skip_reason=raw.get("skip_reason", ""),
+                model_config_fixtures=model_config_fixtures,
                 allowed_skips=tuple(allowed_skips),
                 hub_repos=tuple(hub_repos) if hub_repos is not None else None,
             )
@@ -415,17 +426,20 @@ def cached_repo_ids(cache: Path | None = None) -> frozenset[str]:
     return frozenset(found)
 
 
-def offline_hub_gap(entry: ReuseEntry, probe: str) -> str | None:
+def offline_hub_gap(
+    entry: ReuseEntry, probe: str, cache: Path | None = None
+) -> str | None:
     """Report only missing Hub dependencies declared for the selected tests."""
     if not entry.hub_repos:
         return None
-    have = cached_repo_ids()
+    cache = hub_cache_dir() if cache is None else cache
+    have = cached_repo_ids(cache)
     missing = tuple(repo for repo in entry.hub_repos if repo not in have)
     if not missing:
         return None
     return (
         f"upstream resolves {', '.join(missing)} from the Hugging Face hub and "
-        f"{probe}; these repositories are not in the local cache ({hub_cache_dir()})."
+        f"{probe}; these repositories are not in the local cache ({cache})."
     )
 
 
@@ -566,6 +580,7 @@ class UpstreamRunner:
         self.report_dir = report_dir
         self.records: dict[str, dict[str, Any]] = {}
         self._view: tempfile.TemporaryDirectory | None = None
+        self._model_config_cache: tempfile.TemporaryDirectory | None = None
 
     def target(self, entry: ReuseEntry) -> Path:
         return self.root / entry.path
@@ -586,6 +601,29 @@ class UpstreamRunner:
         if self._view is not None:
             self._view.cleanup()
             self._view = None
+        if self._model_config_cache is not None:
+            self._model_config_cache.cleanup()
+            self._model_config_cache = None
+
+    def model_config_cache(self) -> Path:
+        """Expose the checked-in configuration snapshots through the Hub layout."""
+        if self._model_config_cache is None:
+            models = json.loads(MODEL_CONFIG_FIXTURES_PATH.read_text(encoding="utf-8"))
+            self._model_config_cache = tempfile.TemporaryDirectory(
+                prefix="vllm_reuse_model_configs_"
+            )
+            cache = Path(self._model_config_cache.name)
+            for repo, model in models.items():
+                root = cache / ("models--" + repo.replace("/", "--"))
+                refs = root / "refs"
+                refs.mkdir(parents=True)
+                (refs / "main").write_text(model["revision"], encoding="utf-8")
+                snapshot = root / "snapshots" / model["revision"]
+                for filename, data in model["files"].items():
+                    path = snapshot / filename
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_text(json.dumps(data), encoding="utf-8")
+        return Path(self._model_config_cache.name)
 
     def build_command(self, entry: ReuseEntry, junit_path: Path) -> list[str]:
         command = [sys.executable]
@@ -712,14 +750,24 @@ class UpstreamRunner:
                     f"upstream test file not found at pinned commit: {entry.path}",
                 ),
             )
-        reachable, probe = hub_reachable()
+        cache = self.model_config_cache() if entry.model_config_fixtures else None
+        reachable, probe = (
+            hub_reachable() if cache is None else (False, "using bundled model configs")
+        )
         if not reachable:
-            gap = offline_hub_gap(entry, probe)
+            gap = offline_hub_gap(entry, probe, cache)
             if gap is not None:
                 return self.complete(
                     entry, RunResult(0, 0, 0, 0, 0, 0, (), gap, environment_gap=gap)
                 )
         env = self.build_env(entry)
+        if cache is not None:
+            env.update(
+                HF_HUB_CACHE=str(cache),
+                HUGGINGFACE_HUB_CACHE=str(cache),
+                TRANSFORMERS_CACHE=str(cache),
+                VLLM_USE_MODELSCOPE="0",
+            )
         if not reachable:
             env.update(dict.fromkeys(HUB_OFFLINE_VARS, "1"))
         with tempfile.TemporaryDirectory(prefix="vllm_sail_reuse_") as workdir:

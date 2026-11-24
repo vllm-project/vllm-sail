@@ -30,6 +30,8 @@
 #               guards against a silently-empty run after an upstream refactor
 #   hub_repos   optional list of Hub repo IDs required by the selected tests;
 #               only declared repos are checked before offline execution
+#   model_config_fixtures  use the bundled Hub JSON snapshots in an isolated
+#                          offline cache for entries that only need configs
 #   # --- optional adaptation knobs (mode = "adapted" only) ---
 #   markers     pytest -m expression narrowing the run
 #   keywords    pytest -k expression narrowing the run
@@ -217,6 +219,18 @@ hub_repos = []
 min_tests = 39
 
 [[entry]]
+id = "pooling_embed_dimensions"
+path = "tests/test_pooling_params.py"
+mode = "adapted"
+chips = ["810e", "890p"]
+category = "params"
+reason = "Checks embedding dimensions for two real model configurations using cached JSON metadata."
+keywords = "test_embed_dimensions[model_info0] or test_embed_dimensions[model_info1]"
+hub_repos = ["vllm-project/multilingual-e5-small", "Snowflake/snowflake-arctic-embed-m-v1.5"]
+model_config_fixtures = true
+min_tests = 2
+
+[[entry]]
 id = "prefix_caching"
 path = "tests/v1/core/test_prefix_caching.py"
 mode = "adapted"
@@ -224,6 +238,18 @@ chips = ["cpu", "810e", "890p"]
 category = "core"
 reason = "Prefix-cache eviction/hit logic is CPU-runnable, but the module imports KV-transfer connectors, and its two hisparse admission tests go through tests/v1/core/utils.py::create_scheduler(model='facebook/opt-125m'), which resolves the checkpoint on the Hugging Face hub; an offline runner blocks there instead of failing, so deselect connector and hisparse nodes to keep the CPU core green."
 keywords = "not connector and not kv_transfer and not hisparse"
+min_tests = 1
+
+[[entry]]
+id = "opt_scheduler_add_requests"
+path = "tests/v1/core/test_scheduler.py"
+mode = "adapted"
+chips = ["810e", "890p"]
+category = "core"
+reason = "Checks scheduler request admission with cached OPT configuration and synthetic requests."
+keywords = "test_add_requests"
+hub_repos = ["facebook/opt-125m"]
+model_config_fixtures = true
 min_tests = 1
 
 [[entry]]

@@ -389,6 +389,49 @@ def test_the_guard_lets_a_cached_checkpoint_run(
     assert offline_hub_gap(entry, "offline") is None
 
 
+def test_model_config_fixtures_use_an_isolated_offline_cache(
+    upstream: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    shared = tmp_path / "shared-hub"
+    monkeypatch.setenv("HF_HUB_CACHE", str(shared))
+    monkeypatch.setenv("HF_HUB_OFFLINE", "0")
+    monkeypatch.setenv("TRANSFORMERS_OFFLINE", "0")
+
+    def refuse_probe():
+        pytest.fail("config fixtures should bypass the network probe")
+
+    monkeypatch.setattr(harness, "hub_reachable", refuse_probe)
+    path = "tests/test_model_config_fixture.py"
+    (upstream / path).write_text(
+        "import json\n"
+        "import os\n"
+        "from pathlib import Path\n\n"
+        "def test_resolve_config():\n"
+        "    assert os.environ['HF_HUB_OFFLINE'] == '1'\n"
+        "    assert os.environ['TRANSFORMERS_OFFLINE'] == '1'\n"
+        "    hub = Path(os.environ['HF_HUB_CACHE'])\n"
+        "    root = hub / 'models--facebook--opt-125m'\n"
+        "    revision = (root / 'refs/main').read_text()\n"
+        "    assert len(revision) == 40\n"
+        "    config = root / 'snapshots' / revision / 'config.json'\n"
+        "    assert json.loads(config.read_text())['model_type'] == 'opt'\n",
+        encoding="utf-8",
+    )
+    entry = make_entry(
+        path, hub_repos=("facebook/opt-125m",), model_config_fixtures=True
+    )
+    runner = UpstreamRunner(upstream)
+    cache = runner.model_config_cache()
+    try:
+        result = runner.run(entry)
+        assert result.returncode == 0, result.tail
+        assert result.passed == 1
+        assert not shared.exists()
+    finally:
+        runner.close()
+    assert not cache.exists()
+
+
 def test_the_guard_does_not_excuse_a_missing_upstream_file(
     upstream: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

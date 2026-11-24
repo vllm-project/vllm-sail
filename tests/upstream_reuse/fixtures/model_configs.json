@@ -1,0 +1,257 @@
+{
+  "facebook/opt-125m": {
+    "revision": "27dcfa74d334bc871f3234de431e71c6eeba5dd6",
+    "files": {
+      "config.json": {
+        "_name_or_path": "facebook/opt-125m",
+        "activation_dropout": 0,
+        "activation_function": "relu",
+        "architectures": [
+          "OPTForCausalLM"
+        ],
+        "attention_dropout": 0,
+        "bos_token_id": 2,
+        "do_layer_norm_before": true,
+        "dropout": 0.1,
+        "eos_token_id": 2,
+        "ffn_dim": 3072,
+        "hidden_size": 768,
+        "init_std": 0.02,
+        "layerdrop": 0,
+        "max_position_embeddings": 2048,
+        "model_type": "opt",
+        "num_attention_heads": 12,
+        "num_hidden_layers": 12,
+        "pad_token_id": 1,
+        "prefix": "</s>",
+        "torch_dtype": "float16",
+        "transformers_version": "4.21.0.dev0",
+        "use_cache": true,
+        "vocab_size": 50272,
+        "word_embed_proj_dim": 768
+      },
+      "generation_config.json": {
+        "_from_model_config": true,
+        "bos_token_id": 2,
+        "eos_token_id": 2,
+        "pad_token_id": 1,
+        "transformers_version": "4.27.0.dev0"
+      }
+    }
+  },
+  "vllm-project/multilingual-e5-small": {
+    "revision": "39574ff82d5514b3a69265e39147aa9c491ab4b0",
+    "files": {
+      "config.json": {
+        "_name_or_path": "tmp/",
+        "architectures": [
+          "BertModel"
+        ],
+        "attention_probs_dropout_prob": 0.1,
+        "classifier_dropout": null,
+        "hidden_act": "gelu",
+        "hidden_dropout_prob": 0.1,
+        "hidden_size": 384,
+        "initializer_range": 0.02,
+        "intermediate_size": 1536,
+        "layer_norm_eps": 1e-12,
+        "max_position_embeddings": 512,
+        "model_type": "bert",
+        "num_attention_heads": 12,
+        "num_hidden_layers": 12,
+        "pad_token_id": 0,
+        "position_embedding_type": "absolute",
+        "tokenizer_class": "XLMRobertaTokenizer",
+        "torch_dtype": "float32",
+        "transformers_version": "4.29.0",
+        "type_vocab_size": 2,
+        "use_cache": true,
+        "vocab_size": 250037
+      },
+      "modules.json": [
+        {
+          "idx": 0,
+          "name": "0",
+          "path": "",
+          "type": "sentence_transformers.models.Transformer"
+        },
+        {
+          "idx": 1,
+          "name": "1",
+          "path": "1_Pooling",
+          "type": "sentence_transformers.models.Pooling"
+        },
+        {
+          "idx": 2,
+          "name": "2",
+          "path": "2_Normalize",
+          "type": "sentence_transformers.models.Normalize"
+        }
+      ],
+      "1_Pooling/config.json": {
+        "word_embedding_dimension": 384,
+        "pooling_mode_cls_token": false,
+        "pooling_mode_mean_tokens": true,
+        "pooling_mode_max_tokens": false,
+        "pooling_mode_mean_sqrt_len_tokens": false
+      },
+      "sentence_bert_config.json": {
+        "max_seq_length": 512,
+        "do_lower_case": false
+      },
+      "tokenizer_config.json": {
+        "bos_token": "<s>",
+        "clean_up_tokenization_spaces": true,
+        "cls_token": "<s>",
+        "eos_token": "</s>",
+        "mask_token": {
+          "__type": "AddedToken",
+          "content": "<mask>",
+          "lstrip": true,
+          "normalized": true,
+          "rstrip": false,
+          "single_word": false
+        },
+        "model_max_length": 512,
+        "pad_token": "<pad>",
+        "sep_token": "</s>",
+        "sp_model_kwargs": {},
+        "tokenizer_class": "XLMRobertaTokenizer",
+        "unk_token": "<unk>"
+      }
+    }
+  },
+  "Snowflake/snowflake-arctic-embed-m-v1.5": {
+    "revision": "e58a8f756156a1293d763f17e3aae643474e9b8a",
+    "files": {
+      "config.json": {
+        "_name_or_path": "/data/.model_and_tokenizer_cache/1681473d51a117ebdeba63d81f62d0a94c8ea7f486a704a639e9f991504cd269",
+        "architectures": [
+          "BertModel"
+        ],
+        "attention_probs_dropout_prob": 0.1,
+        "classifier_dropout": null,
+        "gradient_checkpointing": false,
+        "hidden_act": "gelu",
+        "hidden_dropout_prob": 0.1,
+        "hidden_size": 768,
+        "initializer_range": 0.02,
+        "intermediate_size": 3072,
+        "layer_norm_eps": 1e-12,
+        "max_position_embeddings": 512,
+        "model_type": "bert",
+        "num_attention_heads": 12,
+        "num_hidden_layers": 12,
+        "pad_token_id": 0,
+        "position_embedding_type": "absolute",
+        "torch_dtype": "float32",
+        "transformers_version": "4.39.3",
+        "type_vocab_size": 2,
+        "use_cache": true,
+        "matryoshka_dimensions": [
+          256
+        ],
+        "vocab_size": 30522
+      },
+      "modules.json": [
+        {
+          "idx": 0,
+          "name": "0",
+          "path": "",
+          "type": "sentence_transformers.models.Transformer"
+        },
+        {
+          "idx": 1,
+          "name": "1",
+          "path": "1_Pooling",
+          "type": "sentence_transformers.models.Pooling"
+        },
+        {
+          "idx": 2,
+          "name": "2",
+          "path": "2_Normalize",
+          "type": "sentence_transformers.models.Normalize"
+        }
+      ],
+      "1_Pooling/config.json": {
+        "word_embedding_dimension": 768,
+        "pooling_mode_cls_token": true,
+        "pooling_mode_mean_tokens": false,
+        "pooling_mode_max_tokens": false,
+        "pooling_mode_mean_sqrt_len_tokens": false,
+        "pooling_mode_weightedmean_tokens": false,
+        "pooling_mode_lasttoken": false,
+        "include_prompt": true
+      },
+      "sentence_bert_config.json": {
+        "max_seq_length": 512,
+        "do_lower_case": false,
+        "model_args": {
+          "add_pooling_layer": false
+        }
+      },
+      "tokenizer_config.json": {
+        "added_tokens_decoder": {
+          "0": {
+            "content": "[PAD]",
+            "lstrip": false,
+            "normalized": false,
+            "rstrip": false,
+            "single_word": false,
+            "special": true
+          },
+          "100": {
+            "content": "[UNK]",
+            "lstrip": false,
+            "normalized": false,
+            "rstrip": false,
+            "single_word": false,
+            "special": true
+          },
+          "101": {
+            "content": "[CLS]",
+            "lstrip": false,
+            "normalized": false,
+            "rstrip": false,
+            "single_word": false,
+            "special": true
+          },
+          "102": {
+            "content": "[SEP]",
+            "lstrip": false,
+            "normalized": false,
+            "rstrip": false,
+            "single_word": false,
+            "special": true
+          },
+          "103": {
+            "content": "[MASK]",
+            "lstrip": false,
+            "normalized": false,
+            "rstrip": false,
+            "single_word": false,
+            "special": true
+          }
+        },
+        "clean_up_tokenization_spaces": true,
+        "cls_token": "[CLS]",
+        "do_lower_case": true,
+        "mask_token": "[MASK]",
+        "max_length": 512,
+        "model_max_length": 512,
+        "pad_to_multiple_of": null,
+        "pad_token": "[PAD]",
+        "pad_token_type_id": 0,
+        "padding_side": "right",
+        "sep_token": "[SEP]",
+        "stride": 0,
+        "strip_accents": null,
+        "tokenize_chinese_chars": true,
+        "tokenizer_class": "BertTokenizer",
+        "truncation_side": "right",
+        "truncation_strategy": "longest_first",
+        "unk_token": "[UNK]"
+      }
+    }
+  }
+}
