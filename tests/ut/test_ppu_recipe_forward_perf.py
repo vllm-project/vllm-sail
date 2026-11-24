@@ -29,7 +29,7 @@ def test_recipe_resolves_two_forward_commands(tmp_path, modules):
         ROOT / policy["recipe"], policy_path=POLICY, tier="forward_perf"
     )
     commands = runner.commands(
-        resolved, policy["tiers"]["forward_perf"]["groups"], "a" * 40, tmp_path
+        resolved, policy["tiers"]["forward_perf"]["groups"], tmp_path, tmp_path
     )
     assert list(commands) == ["prefill", "decode"]
     for cmd in commands.values():
@@ -38,6 +38,7 @@ def test_recipe_resolves_two_forward_commands(tmp_path, modules):
         assert "--no-enable-prefix-caching" in cmd
         assert "--tool-call-parser" not in cmd
         assert "--engram-config" in cmd
+        assert cmd[cmd.index("--model") + 1] == str(tmp_path)
     assert "--max-model-len=102528" in commands["prefill"]
     assert "prefill_100k=102400" in commands["prefill"]
     assert "--max-num-seqs=256" in commands["decode"]

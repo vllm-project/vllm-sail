@@ -307,12 +307,16 @@ if provenance_path.is_file() and not provenance_path.is_symlink():
 PY
 
 record_phase model_cache_check
-python - "${MODEL_ID}" <<'PY'
+if [[ "${TIER}" == "forward_perf" && "${PPU_FORWARD_CAPTURE_BASELINE:-false}" == "true" && -n "${PPU_FORWARD_LOCAL_CHECKPOINT:-}" ]]; then
+    test -r "${PPU_FORWARD_LOCAL_CHECKPOINT}/config.json"
+else
+    python - "${MODEL_ID}" <<'PY'
 import sys
 from huggingface_hub import snapshot_download
 
 snapshot_download(repo_id=sys.argv[1], local_files_only=True)
 PY
+fi
 
 record_phase recipe_validation
 python "${ROOT_DIR}/scripts/ci/ppu_recipe.py" validate --all --require-vllm-parser
@@ -322,6 +326,9 @@ if [[ "${TIER}" == "forward_perf" ]]; then
     capture_args=()
     if [[ "${PPU_FORWARD_CAPTURE_BASELINE:-false}" == "true" ]]; then
         capture_args+=(--capture-baseline)
+        if [[ -n "${PPU_FORWARD_LOCAL_CHECKPOINT:-}" ]]; then
+            capture_args+=(--local-checkpoint "${PPU_FORWARD_LOCAL_CHECKPOINT}")
+        fi
     fi
     exec python "${ROOT_DIR}/scripts/ci/ppu_recipe_forward_perf.py" run \
         --recipe "${ROOT_DIR}/${RECIPE_PATH}" --policy "${ROOT_DIR}/${POLICY_PATH}" \
