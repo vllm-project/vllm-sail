@@ -175,6 +175,9 @@ jobs:
       - name: Build or repackage wheels
         shell: bash
         env:
+          # Hosted runners reach the upstream Rust distribution directly.
+          RUSTUP_DIST_SERVER: https://static.rust-lang.org
+          RUSTUP_UPDATE_ROOT: https://static.rust-lang.org/rustup
           VLLM_SAIL_NATIVE_REUSE_ROOT: ${{ runner.temp }}/ppu-native-donors
           SOURCE_1: ${{ steps.donor-1.outcome == 'success' && steps.donors.outputs.source_1 || '' }}
           SOURCE_2: ${{ steps.donor-2.outcome == 'success' && steps.donors.outputs.source_2 || '' }}
