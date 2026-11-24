@@ -16,6 +16,7 @@ POLICY = ROOT / "tests/ppu/policy/models/deepseek-v4.1-flash.yaml"
 @pytest.fixture
 def modules(monkeypatch):
     monkeypatch.syspath_prepend(str(CI_DIR))
+    monkeypatch.syspath_prepend(str(ROOT / "tests/e2e/perf"))
     import ppu_recipe
     import ppu_recipe_forward_perf
 
