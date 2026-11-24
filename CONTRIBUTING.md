@@ -216,6 +216,21 @@ default image repository unless the runner sets the respective
 release image on all eligible runners and merge the release workflow before
 enabling the default-branch cron fan-out.
 
+### On-demand forward performance
+
+In the **PPU accuracy nightly** Action, set `models` to
+`forward:deepseek-v4.1-flash` and build wheels from the selected ref. This runs
+the forward performance tier of the DeepSeek-V4.1-Flash recipe on eight M890
+devices. The Actions summary shows the measured latency, baseline and change
+for every shape. The scheduled lane is controlled by
+`SCHEDULED_FORWARD_PERF_ENABLED` in `ppu-accuracy-nightly.yaml`.
+
+The recipe container entrypoint can capture a replacement baseline on a
+matching PPU runtime. Set `TIER=forward_perf` and
+`PPU_FORWARD_CAPTURE_BASELINE=true` with the verified wheels, model cache and
+recipe paths. Keep the raw results under the run directory and commit the
+generated baseline JSON under `tests/e2e/perf/baselines/890p/`.
+
 ## Reporting issues
 
 Use the bug or feature request template in the repository's Issues tab. Bug

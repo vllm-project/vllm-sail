@@ -81,6 +81,18 @@ def failure(model, phase):
     return {"model": model, "status": "fail", "phase": phase}
 
 
+def forward_evidence(root, run_id, attempt):
+    report = json_file(
+        root
+        / f"ppu-recipe-forward_perf-deepseek-v4.1-flash-{run_id}-{attempt}"
+        / "summary.json"
+    )
+    status = report["status"]
+    if status == "pass" and len(report["cases"]) != 6:
+        raise ValueError("Missing forward performance evidence")
+    return status, "forward performance", None, None
+
+
 def collect(root):
     _, _, _, run_id = public_context()
     legacy = keys("NOTIFY_LEGACY_MATRIX", "model")
@@ -90,17 +102,24 @@ def collect(root):
         f"Recipe model sanity & micro-E2E / Model sanity & micro-E2E {key}": key
         for key in recipe
     }
-    jobs, elapsed = run_jobs(set(legacy_jobs) | set(recipe_jobs))
+    forward = os.environ.get("NOTIFY_FORWARD_SELECTED") == "true"
+    forward_job = "Recipe forward performance / Forward performance deepseek-v4.1-flash"
+    forward_key = "deepseek-v4.1-flash-forward"
+    selected_keys = legacy + recipe + ([forward_key] if forward else [])
+    expected_jobs = set(legacy_jobs) | set(recipe_jobs)
+    if forward:
+        expected_jobs.add(forward_job)
+    jobs, elapsed = run_jobs(expected_jobs)
     build = os.environ["NOTIFY_BUILD_RESULT"]
     skip_build = os.environ.get("NOTIFY_SKIP_BUILD") == "true"
     if os.environ["NOTIFY_SELECT_RESULT"] != "success":
         results = [failure("select", "selection")]
     elif build != "success" and not (skip_build and build == "skipped"):
-        results = [failure(key, "build") for key in legacy + recipe] or [
+        results = [failure(key, "build") for key in selected_keys] or [
             failure("build", "build")
         ]
     elif os.environ.get("NOTIFY_IMAGE_RESULT", "skipped") not in ("success", "skipped"):
-        results = [failure(key, "runtime_setup") for key in legacy + recipe] or [
+        results = [failure(key, "runtime_setup") for key in selected_keys] or [
             failure("resolve-image", "runtime_setup")
         ]
     else:
@@ -117,6 +136,14 @@ def collect(root):
                         partial(evidence, root, key, prefix, run_id),
                     )
                 )
+        if forward:
+            results.append(
+                model_result(
+                    forward_key,
+                    jobs.get(forward_job),
+                    partial(forward_evidence, root, run_id),
+                )
+            )
         if not results:
             results.append(failure("model-matrix", "selection"))
         if all(row["status"] == "pass" for row in results) and (
