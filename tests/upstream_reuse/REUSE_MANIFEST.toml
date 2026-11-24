@@ -375,3 +375,45 @@ nodeids = [
     "tests/kernels/core/test_rotary_embedding.py::test_rotary_embedding_opcheck[dtype1-False-False-11-32-32-True-11-cuda]",
 ]
 min_tests = 4
+
+[[entry]]
+id = "triton_topk_topp"
+path = "tests/v1/sample/test_topk_topp_sampler.py"
+mode = "adapted"
+chips = ["810e", "890p"]
+category = "sample"
+reason = "Checks Triton sampling with noncontiguous logits and fully masked rows."
+nodeids = [
+    "tests/v1/sample/test_topk_topp_sampler.py::TestTritonTopkTopp::test_noncontiguous_logits_match_contiguous[topk_only]",
+    "tests/v1/sample/test_topk_topp_sampler.py::TestTritonTopkTopp::test_noncontiguous_logits_match_contiguous[topp_only]",
+    "tests/v1/sample/test_topk_topp_sampler.py::TestTritonTopkTopp::test_noncontiguous_logits_match_contiguous[topk_and_topp]",
+    "tests/v1/sample/test_topk_topp_sampler.py::TestTritonTopkTopp::test_all_neginf_logits",
+]
+min_tests = 4
+
+[[entry]]
+id = "flash_attention_paged_varlen"
+path = "tests/kernels/attention/test_flash_attn.py"
+mode = "adapted"
+chips = ["810e", "890p"]
+category = "kernel"
+reason = "Checks the SAIL FA3 BF16 paged KV cache path with mixed query lengths and optional output."
+nodeids = [
+    "tests/kernels/attention/test_flash_attn.py::test_varlen_with_paged_kv[None-3-2048-None-dtype0-None-16-128-num_heads0-seq_lens0-True]",
+    "tests/kernels/attention/test_flash_attn.py::test_varlen_with_paged_kv[None-3-2048-None-dtype0-None-16-128-num_heads0-seq_lens0-False]",
+]
+min_tests = 2
+
+[[entry]]
+id = "fp8_quant_kernel"
+path = "tests/kernels/quantization/test_fp8_quant.py"
+mode = "adapted"
+chips = ["890p"]
+category = "kernel"
+reason = "Checks FP8 conversion with strided rows and all-zero input on M890."
+nodeids = [
+    "tests/kernels/quantization/test_fp8_quant.py::test_dynamic_per_tensor_fp8_quant_strided_input[0-dtype0-8]",
+    "tests/kernels/quantization/test_fp8_quant.py::test_dynamic_per_tensor_fp8_quant_strided_input[0-dtype0-16]",
+    "tests/kernels/quantization/test_fp8_quant.py::test_dynamic_per_tensor_fp8_quant_all_zero[dtype0]",
+]
+min_tests = 3
