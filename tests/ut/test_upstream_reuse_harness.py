@@ -471,7 +471,7 @@ def test_strict_collection_minimum_is_retained():
     ("extra", "message"),
     [
         ('nodeids = ["tests/test_other.py::test_case"]', "invalid or duplicate"),
-        ('nodeids = []', "invalid or duplicate"),
+        ("nodeids = []", "invalid or duplicate"),
         (
             'nodeids = ["tests/test_example.py::test_case", '
             '"tests/test_example.py::test_case"]',

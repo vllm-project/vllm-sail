@@ -88,7 +88,9 @@ def test_adapted_entries_justify_their_adaptation() -> None:
     """
     unjustified = []
     for entry in ADAPTED_ENTRIES:
-        narrows = bool(entry.nodeids or entry.markers or entry.keywords or entry.deselect)
+        narrows = bool(
+            entry.nodeids or entry.markers or entry.keywords or entry.deselect
+        )
         if not (
             narrows
             or entry.env
