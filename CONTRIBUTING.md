@@ -223,7 +223,8 @@ In the **PPU accuracy nightly** Action, set `models` to
 the DeepSeek-V4.1-Flash TP8 prefill cases on eight M890 devices. Future decode
 coverage belongs to DP+EP recipes using the `deepep_low_latency` backend.
 The Actions summary shows the measured latency, baseline and change for every
-shape. The scheduled lane is controlled by
+shape. The performance job fails if any case's median latency is more than
+5% above its checked-in baseline. The scheduled lane is controlled by
 `SCHEDULED_FORWARD_PERF_ENABLED` in `ppu-accuracy-nightly.yaml`.
 
 The recipe container entrypoint can capture a replacement baseline on a

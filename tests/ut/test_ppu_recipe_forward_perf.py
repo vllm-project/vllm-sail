@@ -11,6 +11,7 @@ import yaml
 ROOT = Path(__file__).resolve().parents[2]
 CI_DIR = ROOT / "scripts/ci"
 POLICY = ROOT / "tests/ppu/policy/models/deepseek-v4.1-flash.yaml"
+BASELINE = ROOT / "tests/e2e/perf/baselines/890p/deepseek-v4.1-flash-forward.json"
 
 
 @pytest.fixture
@@ -74,9 +75,7 @@ def test_result_validation_and_comparison(tmp_path, modules):
     with pytest.raises(ValueError, match="rank count"):
         runner.read_measurements(path, expected, 4)
     baseline = {"schema_version": 1, "config": {"devices": 8}, "metrics": metrics}
-    current = {**baseline, "metrics": {"prefill_4k": {"median_us": 140, "cv": 0}}}
     assert runner.assess(baseline, baseline)["status"] == "pass"
-    assert runner.assess(current, baseline)["failure_reason"] == "forward_regression"
     assert (
         runner.assess({**baseline, "config": {}}, baseline)["failure_reason"]
         == "forward_config_mismatch"
@@ -84,14 +83,117 @@ def test_result_validation_and_comparison(tmp_path, modules):
 
 
 @pytest.mark.parametrize(
-    "models, scheduled, enabled, forward",
+    "median_us, cv, case_status, reason",
     [
-        ("forward:deepseek-v4.1-flash", False, False, True),
-        ("", True, False, False),
-        ("", True, True, True),
+        (99, 0, "PASS", "not_applicable"),
+        (104.99, 0, "PASS", "not_applicable"),
+        (105, 0, "PASS", "not_applicable"),
+        (105.00001, 0, "FAIL", "forward_regression"),
+        (106, 0.10, "FAIL", "forward_regression"),
+        (104, 0.16, "UNSTABLE", "forward_measurement_unstable"),
+        (106, 0.16, "FAIL", "forward_regression"),
     ],
 )
-def test_nightly_selection(tmp_path, models, scheduled, enabled, forward):
+def test_forward_regression_threshold(modules, median_us, cv, case_status, reason):
+    _, runner = modules
+    baseline = {
+        "schema_version": 1,
+        "config": {},
+        "metrics": {"prefill_4k": {"median_us": 100, "cv": 0}},
+    }
+    current = {
+        **baseline,
+        "metrics": {"prefill_4k": {"median_us": median_us, "cv": cv}},
+    }
+    actual = runner.assess(current, baseline)
+    assert actual["cases"][0]["status"] == case_status
+    assert actual["failure_reason"] == reason
+    assert actual["status"] == ("pass" if case_status == "PASS" else "fail")
+
+
+def test_one_regressed_case_is_reported_to_nightly(tmp_path, monkeypatch, modules):
+    _, runner = modules
+    from ppu_notify_nightly import collect
+
+    baseline = json.loads(BASELINE.read_text())
+    baseline_us = baseline["metrics"]["prefill_16k"]["median_us"]
+    current = {
+        **baseline,
+        "metrics": {
+            **baseline["metrics"],
+            "prefill_16k": {"median_us": baseline_us * 1.06, "cv": 0},
+        },
+    }
+    report = runner.assess(current, baseline)
+    assert report["status"] == "fail"
+    assert sum(case["status"] == "FAIL" for case in report["cases"]) == 1
+
+    private = tmp_path / "private"
+    (private / "results").mkdir(parents=True)
+    runner.write_json(private / "results/summary.json", report)
+    public = tmp_path / "ppu-recipe-forward_perf-deepseek-v4.1-flash-123-1"
+    public.mkdir()
+    summary = tmp_path / "step-summary.md"
+    for key, value in {
+        "PRIVATE_DIR": str(private),
+        "PUBLIC_DIR": str(public),
+        "GITHUB_STEP_SUMMARY": str(summary),
+        "RECIPE_OUTCOME": "failure",
+        "RETENTION_OUTCOME": "success",
+        "GITHUB_REPOSITORY": "example/framework",
+        "GITHUB_RUN_ID": "123",
+        "NOTIFY_SELECT_RESULT": "success",
+        "NOTIFY_BUILD_RESULT": "success",
+        "NOTIFY_RECIPE_RESULT": "success",
+        "NOTIFY_LEGACY_RESULT": "skipped",
+        "NOTIFY_RECIPE_MATRIX": '{"include":[{"key":"atlas"}]}',
+        "NOTIFY_LEGACY_MATRIX": "",
+        "NOTIFY_FORWARD_SELECTED": "true",
+    }.items():
+        monkeypatch.setenv(key, value)
+    assert runner.publish() == 0
+    assert "| +6.00% | FAIL |" in summary.read_text()
+
+    recipe_job = "Recipe model sanity & micro-E2E / Model sanity & micro-E2E atlas"
+    forward_job = "Recipe forward performance / Forward performance deepseek-v4.1-flash"
+    artifact = tmp_path / "ppu-recipe-model_sanity-atlas-123-1"
+    artifact.mkdir()
+    runner.write_json(
+        artifact / "summary.json",
+        {
+            "model_key": "atlas",
+            "status": "pass",
+            "failure_reason": "not_applicable",
+            "gsm8k": {"gate": "pass", "score": 0.9, "golden_score": 0.9},
+            "micro_e2e": "pass",
+        },
+    )
+    jobs = {recipe_job: ("success", 1), forward_job: ("failure", 1)}
+    monkeypatch.setattr(
+        "ppu_notify_nightly.run_jobs",
+        lambda expected: ({name: jobs[name] for name in expected}, 0),
+    )
+    rows = collect(tmp_path)["results"]
+    assert [(row["model"], row["status"]) for row in rows] == [
+        ("atlas", "pass"),
+        ("deepseek-v4.1-flash-forward", "fail"),
+    ]
+    monkeypatch.setenv("NOTIFY_FORWARD_SELECTED", "")
+    assert collect(tmp_path)["results"] == rows[:1]
+
+
+@pytest.mark.parametrize(
+    "models, scheduled, enabled, skip_build, forward",
+    [
+        ("forward:deepseek-v4.1-flash", False, False, False, True),
+        ("", True, False, False, False),
+        ("", True, True, False, True),
+        ("recipe:deepseek-v4.1-flash", False, False, False, False),
+        ("deepseek-v4-int8", False, False, False, False),
+        ("", False, False, True, False),
+    ],
+)
+def test_nightly_selection(tmp_path, models, scheduled, enabled, skip_build, forward):
     flow = yaml.safe_load(
         (ROOT / ".github/workflows/ppu-accuracy-nightly.yaml").read_text()
     )
@@ -104,7 +206,7 @@ def test_nightly_selection(tmp_path, models, scheduled, enabled, forward):
         "TARGET_SHA": "b" * 40,
         "GITHUB_OUTPUT": str(output),
         "MODELS": models,
-        "SKIP_WHEEL_BUILD": "false",
+        "SKIP_WHEEL_BUILD": str(skip_build).lower(),
         "RECIPE_PUBLIC_ENABLED": "true",
         "SCHEDULED_RECIPE_ENABLED": str(scheduled).lower(),
         "SCHEDULED_FORWARD_PERF_ENABLED": str(enabled).lower(),
@@ -112,7 +214,17 @@ def test_nightly_selection(tmp_path, models, scheduled, enabled, forward):
     subprocess.run([sys.executable, "-B", "-c", script], cwd=ROOT, env=env, check=True)
     values = dict(line.split("=", 1) for line in output.read_text().splitlines())
     assert (values.get("run_forward") == "true") is forward
-    if models:
+    if models.startswith("forward:"):
         assert not values.get("matrix") and not values.get("run_recipe")
+    elif models.startswith("recipe:"):
+        assert not values["matrix"]
+        assert values["recipe_models"] == "deepseek-v4.1-flash"
+        assert (
+            json.loads(values["recipe_matrix"])["include"][0]["key"]
+            == "deepseek-v4.1-flash"
+        )
+    elif models:
+        assert json.loads(values["matrix"]) == {"include": [{"model": models}]}
+        assert not values.get("recipe_matrix")
     else:
         assert json.loads(values["recipe_matrix"])["include"]

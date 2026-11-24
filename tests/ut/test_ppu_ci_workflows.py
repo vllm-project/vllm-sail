@@ -1843,6 +1843,7 @@ def test_accuracy_nightly_routes_selected_models(
         "needs.resolve-image.result": "skipped",
         "needs.select.outputs.recipe_models": values.get("recipe_models", ""),
         "needs.select.outputs.run_recipe": values.get("run_recipe", "false"),
+        "needs.select.outputs.run_forward": values.get("run_forward", ""),
         "needs.select.outputs.matrix": legacy_matrix,
     }
     context.update(
@@ -1855,6 +1856,7 @@ def test_accuracy_nightly_routes_selected_models(
     assert values["full_run"] == str(full_selection).lower()
     assert bool(expression(jobs["notify-summary"]["if"], context)) == full_selection
     assert expression(jobs["accuracy"]["if"], context) == (legacy_cases != [])
+    assert not expression(jobs["recipe-forward-perf"]["if"], context)
     if legacy_cases is None:
         catalog = json.loads((ROOT / "scripts/ci/ppu_e2e_models.json").read_text())
         expected = [
@@ -2527,7 +2529,8 @@ def test_recipe_workflow_refuses_arbitrary_wheel_run(
 def test_recipe_retention_and_publication(
     tmp_path, leaf_name, tier, exit_code, status, retention_case
 ):
-    steps = workflow(leaf_name)["jobs"]["sanity"]["steps"]
+    config = workflow(leaf_name)
+    steps = config["jobs"]["sanity"]["steps"]
     runtime = next(step for step in steps if step.get("id") == "recipe")
     retain = next(step for step in steps if step.get("id") == "retain")
     publish = next(step for step in steps if step.get("id") == "publish")
@@ -2537,7 +2540,18 @@ def test_recipe_retention_and_publication(
     assert upload["with"]["path"] == "${{ steps.runtime.outputs.public }}/summary.json"
     assert steps.index(runtime) < steps.index(retain) < steps.index(publish)
     assert retain["if"] == "always() && steps.runtime.outcome == 'success'"
-    assert retain["env"]["TIER"] == tier
+    if tier == "model_sanity":
+        forward_perf = config[True]["workflow_call"]["inputs"]["forward_perf"]
+        assert forward_perf["type"] == "boolean"
+        assert forward_perf["default"] is False
+        context = {"inputs.forward_perf": forward_perf["default"]}
+        assert expression(retain["env"]["TIER"], context) == tier
+        assert (
+            expression(retain["env"]["TIER"], {"inputs.forward_perf": True})
+            == "forward_perf"
+        )
+    else:
+        assert retain["env"]["TIER"] == tier
     assert all(
         "PPU_CI_PRIVATE_RESULTS_ROOT" not in step.get("env", {}) for step in steps
     )
