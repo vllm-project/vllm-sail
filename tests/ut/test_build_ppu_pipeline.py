@@ -436,9 +436,44 @@ def test_ci_uses_workflow_configured_build_and_runtime_image():
     assert "default" not in inputs["ops_image"]
     build = workflow["jobs"]["build"]
     image = "download.t-head.cn/docker_test/vllm:v0.33.0-20261123-c550c70"
-    expected_build_image = "${{ inputs.build_image || '" + image + "' }}"
-    assert build["container"]["image"] == expected_build_image
-    assert build["env"]["VLLM_SAIL_BUILD_IMAGE"] == build["container"]["image"]
+    build_image = build["container"]["image"]
+    assert "inputs.build_image ||" in build_image
+    assert (
+        f"(github.event_name == 'pull_request' && '{ops_build_image}')" in build_image
+    )
+    assert f"|| '{image}'" in build_image
+    assert build["env"]["VLLM_SAIL_BUILD_IMAGE"] == build_image
+    for field, secret in (
+        ("username", "ci_registry_username"),
+        ("password", "ci_registry_token"),
+    ):
+        credentials = build["container"]["credentials"][field]
+        assert "github.repository == 'vllm-project/vllm-sail'" in credentials
+        assert (
+            "(github.event_name == 'workflow_dispatch' || github.event_name == 'schedule')"
+            in credentials
+        )
+        assert (
+            f"(inputs.build_image == '' || inputs.build_image == '{image}')"
+            in credentials
+        )
+        assert f"&& secrets.{secret} || ''" in credentials
+    assert "ci_registry_" not in str(build["env"])
+    assert "ci_registry_" not in str(build["steps"])
+    trusted_callers = {
+        "ppu-pr-ci.yaml": "ppu",
+        "ppu-accuracy-nightly.yaml": "build",
+        "ppu-pr-nightly.yaml": "build",
+        "ppu-recipe-fast-sanity.yaml": "build",
+        "nightly-wheels.yaml": "build",
+        "perf-regression.yaml": "build",
+    }
+    for name, job_name in trusted_callers.items():
+        jobs = yaml.safe_load((WORKFLOW.parent / name).read_text())["jobs"]
+        assert jobs[job_name]["secrets"] == {
+            "ci_registry_username": "${{ secrets.RELEASE_USERNAME }}",
+            "ci_registry_token": "${{ secrets.RELEASE_TOKEN }}",
+        }
     for name in (
         "_ppu-accuracy-tests.yaml",
         "_ppu-kernel-perf.yaml",
@@ -451,9 +486,28 @@ def test_ci_uses_workflow_configured_build_and_runtime_image():
         "ppu-build-and-test.yaml",
     ):
         runtime_workflow = yaml.safe_load((WORKFLOW.parent / name).read_text())
-        assert runtime_workflow["env"]["PPU_CI_RUNTIME_IMAGE"] == image
+        set_image = next(
+            step
+            for job in runtime_workflow["jobs"].values()
+            for step in job.get("steps", [])
+            if step.get("name") == "Set the CI runtime image"
+        )
+        assert set_image["if"] == "github.event_name != 'pull_request'"
+        assert set_image["env"] == {"CI_RUNTIME_IMAGE": image}
+        assert "PPU_CI_RUNTIME_IMAGE=%s" in set_image["run"]
     pipeline = yaml.safe_load((WORKFLOW.parent / "ppu-build-and-test.yaml").read_text())
     assert "runtime_image" not in pipeline[True]["workflow_call"]["inputs"]
+    assert pipeline["jobs"]["build"]["secrets"] == {
+        "ci_registry_username": "${{ secrets.ci_registry_username }}",
+        "ci_registry_token": "${{ secrets.ci_registry_token }}",
+    }
+    preview = yaml.safe_load((WORKFLOW.parent / "kernel-perf-label.yaml").read_text())
+    build_job = next(
+        job
+        for job in preview["jobs"].values()
+        if job.get("uses") == "./.github/workflows/_ppu-build.yaml"
+    )
+    assert "secrets" not in build_job
     for job in ("pin-unit-tests", "model-tests", "recipe-sanity"):
         assert "image" not in pipeline["jobs"][job]["with"]
     for name in (

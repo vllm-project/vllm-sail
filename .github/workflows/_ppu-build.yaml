@@ -23,6 +23,11 @@ on:
         description: Look for verified native donors before building a PR
         type: boolean
         default: false
+    secrets:
+      ci_registry_username:
+        required: false
+      ci_registry_token:
+        required: false
     outputs:
       image:
         description: Build image recorded for downstream tests
@@ -45,9 +50,26 @@ jobs:
       image: ${{ steps.image.outputs.image }}
       ready_epoch: ${{ steps.ready.outputs.ready_epoch }}
     container:
-      image: ${{ inputs.build_image || 'download.t-head.cn/docker_test/vllm:v0.33.0-20261123-c550c70' }}
+      image: >-
+        ${{ inputs.build_image ||
+        (github.event_name == 'pull_request' && 'download.t-head.cn/docker_release/pytorch@sha256:a33a67832f7ec442c481421e94255518dd67e464406f8e610c15d2b594b21f80') ||
+        'download.t-head.cn/docker_test/vllm:v0.33.0-20261123-c550c70' }}
+      credentials:
+        username: >-
+          ${{ github.repository == 'vllm-project/vllm-sail' &&
+          (github.event_name == 'workflow_dispatch' || github.event_name == 'schedule') &&
+          (inputs.build_image == '' || inputs.build_image == 'download.t-head.cn/docker_test/vllm:v0.33.0-20261123-c550c70') &&
+          secrets.ci_registry_username || '' }}
+        password: >-
+          ${{ github.repository == 'vllm-project/vllm-sail' &&
+          (github.event_name == 'workflow_dispatch' || github.event_name == 'schedule') &&
+          (inputs.build_image == '' || inputs.build_image == 'download.t-head.cn/docker_test/vllm:v0.33.0-20261123-c550c70') &&
+          secrets.ci_registry_token || '' }}
     env:
-      VLLM_SAIL_BUILD_IMAGE: ${{ inputs.build_image || 'download.t-head.cn/docker_test/vllm:v0.33.0-20261123-c550c70' }}
+      VLLM_SAIL_BUILD_IMAGE: >-
+        ${{ inputs.build_image ||
+        (github.event_name == 'pull_request' && 'download.t-head.cn/docker_release/pytorch@sha256:a33a67832f7ec442c481421e94255518dd67e464406f8e610c15d2b594b21f80') ||
+        'download.t-head.cn/docker_test/vllm:v0.33.0-20261123-c550c70' }}
       VLLM_REF: ${{ inputs.vllm_ref }}
       PYTORCH_SAIL_ARCH: ${{ inputs.pytorch_sail_arch || 'ppu_15;ppu_10' }}
       ARTIFACT_DIR: ${{ github.workspace }}/artifacts

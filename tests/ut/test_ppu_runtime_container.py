@@ -17,7 +17,7 @@ def test_runtime_wrapper_uses_preloaded_image_and_explicit_ppu_devices():
     assert 'bash "${script_dir}/ppu_runtime_image.sh" 9>&-' in text
     assert "${source_dir}/scripts/ci/ppu_runtime_image.sh" not in text
     resolver = (ROOT / "scripts/ci/ppu_runtime_image.sh").read_text()
-    assert "Set PPU_CI_RUNTIME_IMAGE to the CI runtime image" in resolver
+    assert "Runner must configure PPU_CI_RUNTIME_IMAGE" in resolver
     assert 'docker image inspect "${runtime_image}"' in resolver
     assert 'docker pull "${runtime_image}" >"${pull_log}" 2>&1' in resolver
     assert "docker image ls" not in resolver
@@ -137,7 +137,7 @@ def test_runtime_wrapper_serializes_jobs_and_verifies_source_identity():
             "PPU_CI_RUNTIME_IMAGE_TAG": "nightly-20261122",
             "PPU_CI_RUNTIME_IMAGE_REPO": "registry.internal/other/vllm",
         },
-        {"PPU_CI_RUNTIME_VERSION": "v0.34.0", "PPU_CI_RUNTIME_IMAGE": ""},
+        {"PPU_CI_RUNTIME_VERSION": "v0.34.0", "PPU_CI_RUNTIME_IMAGE_V034": ""},
     ],
 )
 def test_runtime_image_rejects_illegal_tag_digest_and_cross_repo(tmp_path, bad_env):
@@ -210,9 +210,10 @@ exit 1
         **os.environ,
         "PATH": f"{bin_dir}:{os.environ['PATH']}",
         "HOME": str(tmp_path),
-        "PPU_CI_RUNTIME_IMAGE": default_ref,
+        "PPU_CI_RUNTIME_IMAGE": "registry.internal/team/vllm-base:base",
         "PPU_CI_RUNTIME_IMAGE_REPO": "registry.internal/team/vllm-nightly",
         "PPU_CI_RUNTIME_VERSION": version,
+        "PPU_CI_RUNTIME_IMAGE_V034": "registry.internal/team/vllm-v034-base:base",
         "PPU_CI_RUNTIME_IMAGE_REPO_V034": "registry.internal/team/vllm-v034-nightly",
         "PPU_CI_RUNTIME_IMAGE_ALLOWED_REPOS": "registry.internal/team/",
         "PPU_CI_RUNTIME_DIGEST_OUT": str(digest_out),
