@@ -26,20 +26,19 @@ class Tensor:
         return self
 
 
-@pytest.mark.parametrize("dtype", ["bf16", "fp32"])
 @pytest.mark.parametrize("available", [False, True])
-def test_deepselect_accepts_bf16_and_fp32_when_wheel_is_available(dtype, available):
+def test_deepselect_accepts_bf16_when_wheel_is_available(available):
     ns = {
         "torch": NS(bfloat16="bf16", float32="fp32"),
         "is_deep_select_available": lambda: available,
     }
     assert (
-        function(DEEP_SELECT, "can_use_deep_select", ns)(Tensor((2, 32), dtype), 8)
+        function(DEEP_SELECT, "can_use_deep_select", ns)(Tensor((2, 32)), 8)
         is available
     )
 
 
-@pytest.mark.parametrize("dtype", ["fp16", "fp64", "int32"])
+@pytest.mark.parametrize("dtype", ["fp32", "fp16", "fp64", "int32"])
 def test_unsupported_dtype_never_imports_or_calls_the_wheel(dtype):
     def unavailable():
         pytest.fail("unsupported dtype must not trigger wheel import or call")
@@ -52,7 +51,7 @@ def test_unsupported_dtype_never_imports_or_calls_the_wheel(dtype):
     assert not function(DEEP_SELECT, "can_use_deep_select", ns)(
         Tensor((2, 32), dtype), 8
     )
-    with pytest.raises(TypeError, match="BF16 or FP32"):
+    with pytest.raises(TypeError, match="requires BF16"):
         function(DEEP_SELECT, "deep_select_topk", ns)(
             Tensor((2, 32), dtype), 8, None, None
         )
@@ -71,8 +70,7 @@ def test_deepselect_keeps_dependency_and_abi_errors(monkeypatch):
         function(DEEP_SELECT, "_wheel", {})()
 
 
-@pytest.mark.parametrize("dtype", ["bfloat16", "float32"])
-def test_deepselect_pads_input_and_preserves_k_and_strided_output(dtype):
+def test_deepselect_pads_input_and_preserves_k_and_strided_output():
     torch = pytest.importorskip("torch")
     calls = []
 
@@ -97,10 +95,7 @@ def test_deepselect_pads_input_and_preserves_k_and_strided_output(dtype):
             "can_use_deep_select": lambda *args: True,
         },
     )
-    dtype = getattr(torch, dtype)
-    logits = torch.arange(39, dtype=dtype).reshape(3, 13)
-    if dtype == torch.float32:
-        logits = 1 + logits * torch.finfo(dtype).eps
+    logits = torch.arange(39, dtype=torch.bfloat16).reshape(3, 13)
     out = torch.empty((3, 9), dtype=torch.int32)[:, ::3]
     fn(logits, 3, torch.tensor([13, 1, 0], dtype=torch.int32), out)
     assert calls[0][0] == (1024 // logits.element_size(), 1)
@@ -109,28 +104,6 @@ def test_deepselect_pads_input_and_preserves_k_and_strided_output(dtype):
     assert set(out[0].tolist()) == {10, 11, 12}
     assert out[1].tolist() == [0, -1, -1]
     assert out[2].tolist() == [-1, -1, -1]
-
-
-def test_deepselect_preserves_native_fp32_rejection():
-    """Old-library FP32 rejection raises directly; no downcast or silent switch."""
-    torch = pytest.importorskip("torch")
-    scores = torch.zeros((1, 256), dtype=torch.float32)
-
-    def topk(input, k, **kwargs):
-        assert input is scores and input.dtype == torch.float32
-        raise RuntimeError("PPU DeepSelect currently supports bfloat16 input only")
-
-    fn = function(
-        DEEP_SELECT,
-        "deep_select_topk",
-        {
-            "torch": torch,
-            "_wheel": lambda: NS(topk=topk, get_stride_requirement=lambda: (1024, 32)),
-            "can_use_deep_select": lambda *args: True,
-        },
-    )
-    with pytest.raises(RuntimeError, match="bfloat16 input only"):
-        fn(scores, 8)
 
 
 def test_deepselect_can_allocate_int64_indices_without_row_ends():
@@ -161,18 +134,25 @@ def test_deepselect_can_allocate_int64_indices_without_row_ends():
 
 
 @pytest.mark.parametrize(
-    "backend,available,expected",
+    "backend,dtype,available,expected",
     [
-        ("auto", True, True),
-        ("auto", False, False),
-        ("persistent", True, False),
+        ("auto", "bf16", True, True),
+        ("auto", "bf16", False, False),
+        ("auto", "fp32", True, False),
+        ("persistent", "bf16", True, False),
     ],
 )
-def test_indexer_backend_selection(backend, available, expected):
-    fn = function(
-        INDEXER, "_use_deep_select", {"can_use_deep_select": lambda *a: available}
+def test_indexer_backend_selection(backend, dtype, available, expected):
+    can_use = function(
+        DEEP_SELECT,
+        "can_use_deep_select",
+        {
+            "torch": NS(bfloat16="bf16", float32="fp32"),
+            "is_deep_select_available": lambda: available,
+        },
     )
-    assert fn(None, 2048, backend) is expected
+    fn = function(INDEXER, "_use_deep_select", {"can_use_deep_select": can_use})
+    assert fn(Tensor((2, 4096), dtype), 2048, backend) is expected
 
 
 def test_explicit_deepselect_fails_instead_of_rounding_fp32():

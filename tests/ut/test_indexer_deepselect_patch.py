@@ -44,7 +44,14 @@ def installed(modules):
     platform = NS(is_ppu=lambda: True)
     sail = NS(
         is_deep_select_available=lambda: True,
-        can_use_deep_select=lambda logits, k: logits.dtype in ("bf16", "fp32"),
+        can_use_deep_select=function(
+            HELPER,
+            "can_use_deep_select",
+            {
+                "torch": NS(bfloat16="bf16", float32="fp32"),
+                "is_deep_select_available": lambda: True,
+            },
+        ),
         _wheel=lambda: NS(get_stride_requirement=lambda: (512, 32)),
         deep_select_topk=lambda *args: calls.append(args) or "sail-indices",
     )
@@ -142,8 +149,8 @@ def test_preloaded_consumers_get_all_matching_replacements(
     )
     assert p.has_deep_select()
     assert p.get_deep_select_stride_requirement() == (512, 32)
-    assert p.is_deep_select_supported(NS(dtype="bf16"), 64)
-    assert p.is_deep_select_supported(NS(dtype="fp32"), 64)
+    assert p.is_deep_select_supported(NS(dtype="bf16", ndim=2, shape=(2, 128)), 64)
+    assert not p.is_deep_select_supported(NS(dtype="fp32", ndim=2, shape=(2, 128)), 64)
     assert not p.is_deep_select_supported(NS(dtype="fp16"), 64)
     assert installed.provider.SparseIndexerTopk.resolve_backend is p.resolve_backend
     for module, name, replacement in (
@@ -173,11 +180,10 @@ def test_preloaded_consumers_get_all_matching_replacements(
         load_patch(PATCH)
 
 
-@pytest.mark.parametrize("dtype", ["bf16", "fp32"])
 def test_upstream_entry_returns_sail_indices_and_preserves_optional_arguments(
-    installed, dtype
+    installed,
 ):
-    logits = NS(dtype=dtype)
+    logits = NS(dtype="bf16")
     assert (
         installed.patch.deep_select_topk(logits, 64, indices_dtype="int64")
         == "sail-indices"
@@ -188,28 +194,44 @@ def test_upstream_entry_returns_sail_indices_and_preserves_optional_arguments(
 @pytest.mark.parametrize("backend", ["auto", "deep_select"])
 def test_cached_topk_objects_do_not_retain_cuda_only_support_flags(installed, backend):
     cached = NS(_backend=backend, _has_deep_select=False)
-    resolve = installed.provider.SparseIndexerTopk.resolve_backend
-    assert resolve(cached, NS(dtype="bf16"), 64, 2) == "deep_select"
-    assert resolve(cached, NS(dtype="fp32"), 64, 2) == "deep_select"
+    topk = installed.provider.SparseIndexerTopk
+    bf16 = NS(dtype="bf16", ndim=2, shape=(2, 128))
+    fp32 = NS(dtype="fp32", ndim=2, shape=(2, 128))
+    assert topk.takes_bf16_logits(cached, bf16, 64, 2)
+    assert not topk.takes_bf16_logits(cached, fp32, 64, 2)
+    assert topk.resolve_backend(cached, bf16, 64, 2) == "deep_select"
     if backend == "auto":
-        assert resolve(cached, NS(dtype="fp16"), 64, 2) == "cuda-result"
+        assert topk.resolve_backend(cached, fp32, 64, 2) == "cuda-result"
     else:
         with pytest.raises(RuntimeError, match="never rounded"):
-            resolve(cached, NS(dtype="fp16"), 64, 2)
+            topk.resolve_backend(cached, fp32, 64, 2)
 
 
-@pytest.mark.parametrize("dtype", ["bf16", "fp32"])
-@pytest.mark.parametrize("backend", ["auto", "deep_select"])
-def test_step5_selects_deepselect_without_converting_scores(dtype, backend):
-    """Step5 BF16/FP32 inputs share one DeepSelect entry, keeping raw scores/params."""
-    scores = NS(dtype=dtype, shape=(2, 64))
+@pytest.mark.parametrize(
+    "dtype,backend,expected",
+    [
+        ("bf16", "auto", "deep_select"),
+        ("bf16", "deep_select", "deep_select"),
+        ("fp32", "auto", "auto"),
+        ("fp32", "deep_select", "per_row"),
+    ],
+)
+def test_step5_preserves_scores_with_the_bf16_wheel(
+    installed, dtype, backend, expected
+):
+    scores = NS(dtype=dtype, ndim=2, shape=(2, 64))
+    scores.float = lambda: scores
     calls = []
+    sail = NS(
+        can_use_deep_select=installed.patch._sail.can_use_deep_select,
+        warn_deep_select_fallback=lambda: None,
+    )
     select = function(
         "vllm_sail/patch/enhancement/models/step5_dsa_backend.py",
         "_select_regions",
         {
             "current_platform": NS(is_ppu=lambda: True),
-            "deep_select": NS(can_use_deep_select=lambda x, k: True),
+            "deep_select": sail,
             "_sparse": NS(
                 select_regions=lambda *args, **kwargs: calls.append((args, kwargs))
             ),
@@ -218,7 +240,7 @@ def test_step5_selects_deepselect_without_converting_scores(dtype, backend):
     select(NS(_topk_backend=backend), scores, "current", 8, topk_lengths="ends")
     assert calls == [
         (
-            (scores, "current", 8, "deep_select"),
+            (scores, "current", 8, expected),
             {"topk_lengths": "ends", "paged_prefill": None, "sort": True},
         )
     ]

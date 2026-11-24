@@ -19,7 +19,7 @@ which then replaces upstream's on every platform.
 
 On PPU, ``select_regions`` also resolves ``auto`` / ``deep_select`` like
 upstream does on SM100: the SAIL DeepSelect wheel runs when it applies
-(``vllm_sail.utils.deep_select.can_use_deep_select``: SM 8.9, BF16/FP32,
+(``vllm_sail.utils.deep_select.can_use_deep_select``: SM 8.9, BF16,
 ``VLLM_SAIL_USE_DEEPSELECT``); otherwise an explicit ``deep_select`` falls back
 to ``per_row`` (topKPerRowDecode) before upstream picks the sort and stride,
 and ``auto`` keeps upstream's ``per_row``.
@@ -246,7 +246,7 @@ def _prefill_pair_inputs(self, indexer):
     reason=(
         "Step5 resolves auto to deep_select only on the SM100 family and an "
         "explicit deep_select raises elsewhere; PPU selects the deep_select "
-        "wheel (SM 8.9, BF16/FP32) when it applies and per_row topKPerRowDecode "
+        "wheel (SM 8.9, BF16) when it applies and per_row topKPerRowDecode "
         "otherwise."
     ),
     affected_versions=_AFFECTED,
