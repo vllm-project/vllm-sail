@@ -485,6 +485,13 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
+      - name: Report allowlisted Forward diagnostics
+        if: always() && steps.runtime.outcome == 'success' && inputs.forward_perf
+        env:
+          TRUSTED_CI_DIR: ${{ steps.runtime.outputs.trusted }}
+          PRIVATE_DIR: ${{ steps.runtime.outputs.artifacts }}
+        run: python3 -I "${TRUSTED_CI_DIR}/scripts/ci/ppu_forward_debug.py"
+
       - name: Publish public forward performance summary
         id: publish-forward
         if: always() && steps.runtime.outcome == 'success' && inputs.forward_perf

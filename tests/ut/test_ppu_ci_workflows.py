@@ -665,6 +665,7 @@ def test_debug_structure():
         "model-tests",
         "accuracy-tests",
         "kernel-perf",
+        "forward-perf",
     ]
     assert inputs["target"]["default"] == "both"
     assert inputs["models"]["type"] == "string"
@@ -693,6 +694,15 @@ def test_debug_structure():
             "inputs.target == 'both' || inputs.target == 'kernel-perf'",
             "_ppu-kernel-perf.yaml",
             {},
+        ),
+        "forward-perf": (
+            "inputs.target == 'forward-perf'",
+            "_ppu-recipe-model-sanity.yaml",
+            {
+                "pr_head_sha": "${{ inputs.wheel_source_sha }}",
+                "models": "deepseek-v4.1-flash",
+                "forward_perf": True,
+            },
         ),
     }
     assert set(jobs) == set(expected_jobs)

@@ -16,7 +16,7 @@ on:
         description: Stages to rerun against the existing build
         required: true
         type: choice
-        options: [both, pin-ut, model-tests, accuracy-tests, kernel-perf]
+        options: [both, pin-ut, model-tests, accuracy-tests, kernel-perf, forward-perf]
         default: both
       models:
         description: Comma-separated smoke model catalog keys
@@ -84,3 +84,15 @@ jobs:
       pr_mode: false
       build_run_id: ${{ inputs.build_run_id }}
       wheel_source_sha: ${{ inputs.wheel_source_sha }}
+
+  forward-perf:
+    name: Replay Forward performance
+    if: inputs.target == 'forward-perf'
+    uses: ./.github/workflows/_ppu-recipe-model-sanity.yaml
+    with:
+      pr_mode: false
+      pr_head_sha: ${{ inputs.wheel_source_sha }}
+      wheel_source_sha: ${{ inputs.wheel_source_sha }}
+      build_run_id: ${{ inputs.build_run_id }}
+      models: deepseek-v4.1-flash
+      forward_perf: true
