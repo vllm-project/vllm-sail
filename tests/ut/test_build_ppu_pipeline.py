@@ -980,14 +980,17 @@ def test_runtime_scripts_capture_same_image_stack_before_installing_wheels(scrip
 
 
 @pytest.mark.parametrize("script", ["ppu_e2e_smoke.sh", "ppu_upstream_reuse.sh"])
-def test_runtime_lanes_upgrade_transformers_before_verifying_image_stack(
-    script, tmp_path
-):
+def test_runtime_lanes_install_wheels_before_verifying_image_stack(script, tmp_path):
     from packaging.requirements import Requirement
 
     text = (ROOT / "scripts/ci" / script).read_text()
     start = text.index("python -m pip install")
     end = text.index("\n\n", text.index('ppu_image_stack.py" verify', start))
+    vllm_wheel = tmp_path / "vllm" / "vllm.whl"
+    sail_wheel = tmp_path / "vllm-sail" / "vllm_sail.whl"
+    for wheel in (vllm_wheel, sail_wheel):
+        wheel.parent.mkdir()
+        wheel.touch()
     calls = tmp_path / "calls.jsonl"
     python = tmp_path / "python"
     python.write_text(
@@ -1018,6 +1021,21 @@ def test_runtime_lanes_upgrade_transformers_before_verifying_image_stack(
     recorded = [json.loads(line) for line in calls.read_text().splitlines()]
     assert recorded[-1][0][1] == "verify"
 
+    if script == "ppu_upstream_reuse.sh":
+        assert [args for args, _ in recorded[:-1]] == [
+            [
+                "-m",
+                "pip",
+                "install",
+                "--no-index",
+                "--no-deps",
+                "--force-reinstall",
+                str(vllm_wheel),
+                str(sail_wheel),
+            ]
+        ]
+        return
+
     def requirements(path):
         for line in path.read_text().splitlines():
             line = line.split("#", 1)[0].strip()
@@ -1033,7 +1051,7 @@ def test_runtime_lanes_upgrade_transformers_before_verifying_image_stack(
             if arg == "-r":
                 installed.extend(requirements(Path(args[index + 1])))
     transformers = [req for req in installed if req.name == "transformers"]
-    assert len(transformers) == 1, "runtime must upgrade the image's transformers"
+    assert len(transformers) == 1, "smoke must upgrade the image's transformers"
     assert "5.16.1" in transformers[0].specifier
     assert "5.15.0" not in transformers[0].specifier
     assert "5.20.0" not in transformers[0].specifier
