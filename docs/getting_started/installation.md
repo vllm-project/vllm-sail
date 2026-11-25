@@ -21,6 +21,11 @@ Obtain the SDK and its Python packages through your PPU software distribution.
 Use a matched set of libraries for the active SAIL PyTorch build. The plugin's
 Python requirements do not install the SDK.
 
+The pinned vLLM source uses XGrammar 0.2.8, which requires
+`apache-tvm-ffi>=0.1.11`. For workloads that use TileLang on SDK 2.2.0,
+use `tilelang==0.1.12+v0.1.0.ppu2.2.0` from the PPU package index with
+`apache-tvm-ffi==0.1.11`.
+
 Activate that environment, then set paths for your installation:
 
 ```bash

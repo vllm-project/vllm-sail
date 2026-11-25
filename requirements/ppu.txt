@@ -5,7 +5,8 @@
 # (_C, _moe_C, vllm_flash_attn, ...) that cannot run on PPU. vLLM must be
 # PPU-built from source (or a PPU wheel); vllm_sail/compat.py validates the
 # exact source pin or release version (>=0.32.0,<0.33.0) at runtime instead.
-apache-tvm-ffi==0.1.9
+# XGrammar 0.2.8 and the SDK 2.2.0 TileLang 0.1.12 build require FFI 0.1.11 together.
+apache-tvm-ffi==0.1.11
 fastsafetensors>=0.3.2
 tokenspeed-mla==0.1.2
 # The upstream glm5next model imports Glm5NextTextConfig, which older
@@ -16,6 +17,10 @@ transformers>=5.16.1,<5.20.0
 deep_gemm==1.1.0+v1.1.0.ppu2.2.0
 # SAIL DeepSelect wheel from the PPU package index.
 deep_select==1.0.0
+# Runtime builds from the PPU package index for the SDK 2.2.0 baseline.
+mooncake==0.3.12.post1+v0.1.0.ppu2.2.0
+msa_for_sail==0.1.1+v0.1.0.ppu2.2.0
+pla==1.1.0+v0.1.0.ppu2.2.0
 
 # PPU SDK dependencies — supplied by the SDK and NOT installable from PyPI.
 # Their availability is checked at runtime: acext, flash_attn, flash_attn_3.
