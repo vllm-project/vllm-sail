@@ -130,22 +130,32 @@ def _compute_quant_and_scale(
         # 0.25 <= x < 0.75 maps to 0.5, a denormal number
         E8_BIAS = 127
         E2_BIAS = 1
-        # Move implicit bit 1 at the beginning to mantissa for denormals
-        adjusted_exponents = tl.core.sub(
-            E8_BIAS, exponents + 1, sanitize_overflow=False
+        # Move implicit bit 1 at the beginning to mantissa for denormals. Bits
+        # shifted out are OR-reduced into the LSB as a sticky bit, so the
+        # round-to-even logic below can tell an exact tie from a value that is
+        # merely close to one. Clamp the shift to [0, 31] to avoid oversized
+        # shifts on zeros/tiny values and on normal lanes evaluated by tl.where.
+        adjusted_exponents = tl.minimum(
+            tl.core.sub(E8_BIAS, exponents + 1, sanitize_overflow=False), 31
         )
-        mantissas = tl.where(
-            exponents < E8_BIAS,
-            (0x400000 | (mantissas >> 1)) >> adjusted_exponents,
-            mantissas,
-        )
+        folded_mantissas = 0x400000 | (mantissas >> 1) | (mantissas & 1)
+        denormal_mantissas = folded_mantissas >> adjusted_exponents
+        denormal_mantissas = denormal_mantissas | (
+            (denormal_mantissas << adjusted_exponents) != folded_mantissas
+        ).to(tl.uint32)
+        mantissas = tl.where(exponents < E8_BIAS, denormal_mantissas, mantissas)
 
         # For normal numbers, we change the bias from 127 to 1, and for subnormals, we keep exponent as 0.
         exponents = tl.maximum(exponents, E8_BIAS - E2_BIAS) - (E8_BIAS - E2_BIAS)
 
-        # Combine sign, exponent, and mantissa, while saturating
-        # rounding nearest with tie breaking up by adding +1 to one bit right of the LSB, then shift right
-        e2m1_tmp = tl.minimum((((exponents << 2) | (mantissas >> 21)) + 1) >> 1, 0x7)
+        # Combine sign, exponent, and mantissa, rounding to nearest with ties
+        # broken to even (OCP MX spec, matching hardware cvt.rn.satfinite.e2m1x2.f32
+        # and upstream vLLM's MXFP4 quantizer): adding the kept LSB plus 0x1FFFFF
+        # pushes exact ties toward the even neighbor while any lower (sticky) bit
+        # always rounds up.
+        rounding_bias = ((mantissas >> 22) & 1) + 0x1FFFFF
+        rounded_mantissa = (mantissas + rounding_bias) >> 22  # in {0, 1, 2}
+        e2m1_tmp = tl.minimum((exponents << 1) + rounded_mantissa, 0x7)
         e2m1_value = ((signs >> 28) | e2m1_tmp).to(tl.uint8)
 
         e2m1_value = tl.reshape(
