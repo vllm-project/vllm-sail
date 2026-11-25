@@ -3268,13 +3268,12 @@ def test_upstream_reuse_script_protects_image_and_wheel_imports_and_is_fail_clos
     assert "PPU PIN UT SKIP" not in text
     assert "810E skipped: runner unavailable" in text
     assert "unset VLLM_VERSION PYTHONPATH GH_TOKEN GITHUB_TOKEN" in text
+    assert text.count("python -m pip install ") == 1
     assert "--no-index --no-deps --force-reinstall" in text
-    assert 'PIP_CONSTRAINT="${REUSE_RESULTS_DIR}/image-constraints.txt"' in text
+    assert '--constraints "${REUSE_RESULTS_DIR}/image-constraints.txt"' in text
     assert 'ppu_image_stack.py" capture' in text
     assert 'ppu_image_stack.py" verify' in text
     assert "trap cleanup EXIT" in text
-    assert "requirements/upstream-reuse.txt" in text
-    assert "requirements/dev.txt" not in text
     assert "current_platform.is_ppu()" in text
     assert "export VLLM_PLUGINS=ppu" in text
     assert "VLLM_TARGET_DEVICE" not in text
