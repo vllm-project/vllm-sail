@@ -415,9 +415,7 @@ def test_model_config_fixtures_redirect_offline_without_using_the_hub_cache(
         "    assert json.loads(config.read_text())['model_type'] == 'opt'\n",
         encoding="utf-8",
     )
-    entry = make_entry(
-        path, hub_repos=(), config_fixtures=("facebook/opt-125m",)
-    )
+    entry = make_entry(path, hub_repos=(), config_fixtures=("facebook/opt-125m",))
     runner = UpstreamRunner(upstream)
     try:
         result = runner.run(entry)

@@ -333,6 +333,7 @@ category = "config"
 reason = "Checks the draft position limit for each RoPE type with in-memory configs. The target and draft integration cases require Hub metadata."
 deselect = [
     "tests/config/test_speculative_draft_max_position_embeddings.py::test_eagle_draft_inherits_target_max_model_len",
+    "tests/config/test_speculative_draft_max_position_embeddings.py::test_mtp_draft_inherits_target_max_model_len",
     "tests/config/test_speculative_draft_max_position_embeddings.py::test_dflash_draft_inherits_target_max_model_len",
     "tests/config/test_speculative_draft_max_position_embeddings.py::test_independent_draft_model_keeps_its_own_limit",
 ]
