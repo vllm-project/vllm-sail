@@ -13,7 +13,7 @@ from email.parser import BytesParser
 from pathlib import Path
 
 MANIFEST = "wheel-manifest.json"
-NATIVE_MODULES = ("_C", "_moe_C", "_upstream_C", "_upstream_moe_C")
+NATIVE_MODULES = ("_C", "_moe_C", "_upstream_C", "_upstream_moe_C", "_cumem_allocator")
 NATIVE_INPUTS = (
     ".github/vllm-main-verified.commit",
     ".github/workflows/_ppu-build.yaml",
