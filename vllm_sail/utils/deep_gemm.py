@@ -650,6 +650,12 @@ def has_masked_fused_act_quant() -> bool:
     )
 
 
+def has_int8_mqa_logits() -> bool:
+    """Whether DeepGEMM exports both dense and paged INT8 MQA logits kernels."""
+    _lazy_init()
+    return _int8_mqa_logits_impl is not None and _int8_paged_mqa_logits_impl is not None
+
+
 def get_activation_mode() -> Any:
     """Return DeepGEMM's current `ActivationMode` enum."""
     _lazy_init()

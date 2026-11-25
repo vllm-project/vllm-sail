@@ -40,6 +40,7 @@ from vllm_sail.patch.enhancement.attention import (
     minimax_dspark,  # noqa: F401
     musespark_routing,  # noqa: F401
     mla_prefill_flash_attn,  # noqa: F401
+    packed_token_cache_split,  # noqa: F401
     sparse_attn_indexer,  # noqa: F401
     sparse_mqa_indexer,  # noqa: F401 (requires mla_indexer and indexer_topk)
     sparse_attn_indexer_kpool,  # noqa: F401
