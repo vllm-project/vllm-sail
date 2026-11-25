@@ -83,6 +83,7 @@ def test_public_registry_registers_once_only_on_ppu(monkeypatch, is_ppu):
     }
     for file, cls, name in (
         ("mixed_precision_w4", "MixedPrecisionW4Config", "mixed_precision_w4"),
+        ("w4a8_int8", "W4A8Int8Config", "w4a8_int8"),
         ("fp8_to_int8", "Fp8ToInt8Config", "fp8-to-int8"),
         ("fp8_to_bf16", "Fp8ToBf16Config", "fp8-to-bf16"),
         ("bf16_to_int8", "Bf16ToInt8Config", "bf16-to-int8"),
@@ -111,7 +112,7 @@ def test_public_registry_registers_once_only_on_ppu(monkeypatch, is_ppu):
     assert registered == {}
     module.register()
     module.register()
-    expected = ["mixed_precision_w4"]
+    expected = ["mixed_precision_w4", "w4a8_int8"]
     if is_ppu:
         expected += [
             "fp8-to-int8",

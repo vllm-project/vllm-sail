@@ -128,6 +128,20 @@ def _maybe_make_prepare_finalize_body(
             use_int8_dispatch = False
             use_mxfp4_dispatch = False
 
+        # Once per process: `logger.info_once` is scope="local" by default and
+        # this runs while the MoE layers are built, i.e. before is_local_first_rank()
+        # is meaningful for every worker, so it can silently drop. Guard on the
+        # function object instead and use a plain INFO.
+        if use_int8_dispatch and not getattr(
+            maybe_make_prepare_finalize, "_vllm_sail_int8_logged", False
+        ):
+            maybe_make_prepare_finalize._vllm_sail_int8_logged = True
+            logger.info(
+                "DeepEP LL dispatch: activations are quantized to INT8 inside "
+                "the dispatch kernel (channel-wise, scale = amax/127, one fp32 "
+                "scale per token row); the experts consume that payload directly."
+            )
+
         from vllm_sail.model_executor.layers.fused_moe.prepare_finalize.deepep_ll import (
             DeepEPLLPrepareAndFinalize,
         )

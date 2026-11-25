@@ -31,15 +31,18 @@ def register() -> None:
     from vllm_sail.model_executor.layers.quantization.mixed_precision_w4 import (
         MixedPrecisionW4Config,
     )
+    from vllm_sail.model_executor.layers.quantization.w4a8_int8 import (
+        W4A8Int8Config,
+    )
 
-    name = MixedPrecisionW4Config.get_name()
-
-    if name not in QUANTIZATION_METHODS:
-        register_quantization_config(name)(MixedPrecisionW4Config)
-    else:
-        logger.warning(
-            "Quantization method %r already exists; keeping its owner.", name
-        )
+    for config_cls in (MixedPrecisionW4Config, W4A8Int8Config):
+        name = config_cls.get_name()
+        if name not in QUANTIZATION_METHODS:
+            register_quantization_config(name)(config_cls)
+        else:
+            logger.warning(
+                "Quantization method %r already exists; keeping its owner.", name
+            )
 
     from vllm.platforms import current_platform
 

@@ -9,6 +9,7 @@ from vllm.model_executor.layers.fused_moe import (
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
+    FusedMoEQuantDesc,
 )
 from vllm.model_executor.layers.fused_moe.fused_moe_method_base import (
     FusedMoEMethodBase,
@@ -28,9 +29,14 @@ from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tenso
 from vllm.model_executor.layers.quantization.compressed_tensors.utils import (
     should_ignore_layer,
 )
-from vllm.model_executor.layers.quantization.utils.quant_utils import is_layer_skipped
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    GroupShape,
+    is_layer_skipped,
+)
 from vllm.model_executor.models.utils import WeightsMapper
-from vllm.model_executor.utils import set_weight_attrs
+from vllm.model_executor.utils import replace_parameter, set_weight_attrs
+
+from vllm_sail.compat import fused_moe_use_batched
 
 if TYPE_CHECKING:
     from vllm.model_executor.layers.fused_moe.runner.shared_experts import SharedExperts
@@ -46,6 +52,14 @@ class MixedPrecisionW4Config(QuantizationConfig):
     - Block INT8 for other layers
     - Mixed precision activation schemes
     """
+
+    # Checkpoint expert-weight layout discriminator (u258 P1). The
+    # mixed_precision_w4 checkpoint stores signed-INT4-in-int8 bytes in the
+    # K32-group 2-byte transpose (T) order consumed by acext; the sibling
+    # w4a8_int8 checkpoint (W4A8Int8Config) stores signed-INT4-in-uint8 bytes
+    # in portable plain order consumed by DeepGemm. Verified against real
+    # checkpoint bytes (layers.3 experts.0 gate/down, 4096/4096 value match).
+    weight_layout = "acext_t_order"
 
     def __init__(
         self,
@@ -188,6 +202,54 @@ class W4AInt8MoEMethod(FusedMoEMethodBase):
         self.quant_config = quant_config
         self.ep_size = moe.ep_size
         self.ep_rank = moe.ep_rank
+        # PPU MODIFICATION: begin — MK-only attributes must NOT exist on the
+        # legacy path. Upstream FusedMoEMethodBase.is_monolithic does
+        # `if self.moe_kernel is None: if hasattr(self, "experts_cls"):
+        # return self.experts_cls.is_monolithic()`. Initialising experts_cls=None
+        # unconditionally makes hasattr True and crashes legacy (non-DeepEP)
+        # deployments with None.is_monolithic(). Only create backend/experts_cls
+        # when the MK path is actually assembled. moe_kernel itself is owned by
+        # the base __init__ (None), so it is intentionally not touched here.
+        if self._mk_enabled():
+            # Resolve after plugin installation, never capture an unpatched
+            # oracle callable while quantization configs are being registered.
+            from vllm.model_executor.layers.fused_moe.oracle import w4a8_int8 as oracle
+            from vllm.model_executor.layers.quantization.utils.quant_utils import (
+                kInt4W4A8StaticChannelSym,
+                kInt8DynamicTokenSym,
+            )
+
+            self.backend, self.experts_cls = oracle.select_w4a8_int8_moe_backend(
+                config=self.moe,
+                weight_key=kInt4W4A8StaticChannelSym,
+                activation_key=kInt8DynamicTokenSym,
+                weight_layout=self.quant_config.weight_layout,
+            )
+        # PPU MODIFICATION: end
+
+    def _mk_enabled(self) -> bool:
+        """Whether to assemble the modular-kernel path (DeepEP low-latency).
+
+        Eligibility comes from config fields that are already fixed when
+        FusedMoEConfig is built, so it never depends on
+        get_current_vllm_config() being available at RoutedExperts construction
+        time. Non-DeepEP deployments keep the original direct-acext path.
+        use_batched_activation_format moved from FusedMoEParallelConfig
+        (vLLM <=0.33) to FusedMoEConfig (>=0.34); read it through the compat
+        helper so both homes work.
+
+        u258 P1: the deepgemm_plain layout (w4a8_int8 checkpoint) has NO legacy
+        acext representation — its bytes are portable plain order, which the
+        acext kernel would misread. Always assemble MK for it; a non-batched
+        deployment then fails loudly in the oracle instead of silently
+        corrupting numerics on the legacy path.
+        """
+        if self.quant_config.weight_layout == "deepgemm_plain":
+            return True
+        return (
+            self.moe.moe_parallel_config.use_deepep_ll_kernels
+            and fused_moe_use_batched(self.moe)
+        )
 
     def create_weights(
         self,
@@ -198,13 +260,25 @@ class W4AInt8MoEMethod(FusedMoEMethodBase):
         params_dtype: torch.dtype,
         **extra_weight_attrs,
     ):
+        # u258 P1: container dtype follows the checkpoint layout. The
+        # mixed_precision_w4 checkpoint stores I8 (T-order) bytes; the
+        # w4a8_int8 checkpoint stores U8 (portable plain-order) bytes —
+        # DeepGemm's masked kernel requires torch.uint8 rhs storage
+        # (DeepGEMM-for-sail csrc/apis/gemm.hpp TORCH_CHECK "A8W4 rhs must
+        # use portable packed signed-INT4 torch.uint8 storage"). Shapes and
+        # per-channel fp32 scales are identical across the two layouts.
+        packed_dtype = (
+            torch.uint8
+            if self.quant_config.weight_layout == "deepgemm_plain"
+            else torch.int8
+        )
         # INT4 packed weights for w13 (gate_up_proj) - column parallel
         w13_weight = torch.nn.Parameter(
             torch.empty(
                 num_experts,
                 2 * intermediate_size_per_partition,
                 hidden_size // self.quant_config.pack_factor,
-                dtype=torch.int8,
+                dtype=packed_dtype,
             ),
             requires_grad=False,
         )
@@ -217,7 +291,7 @@ class W4AInt8MoEMethod(FusedMoEMethodBase):
                 num_experts,
                 hidden_size,
                 intermediate_size_per_partition // self.quant_config.pack_factor,
-                dtype=torch.int8,
+                dtype=packed_dtype,
             ),
             requires_grad=False,
         )
@@ -248,30 +322,98 @@ class W4AInt8MoEMethod(FusedMoEMethodBase):
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         """for quant model with acext a8w4 preprocessing"""
-        w13_weight = layer.w13_weight
-        w13_weight_shape = w13_weight.shape
-        w13_weight = w13_weight.view(
-            w13_weight_shape[0],
-            w13_weight_shape[2] * self.quant_config.pack_factor,
-            w13_weight_shape[1] // self.quant_config.pack_factor,
-        )
-        # [E, hidden_size, 2 * intermediate // 2]
-        layer.w13_weight = torch.nn.Parameter(w13_weight, requires_grad=False)
+        if not self._mk_enabled():
+            # Legacy direct-acext path: byte-preserving view relabel, unchanged.
+            w13_weight = layer.w13_weight
+            w13_weight_shape = w13_weight.shape
+            w13_weight = w13_weight.view(
+                w13_weight_shape[0],
+                w13_weight_shape[2] * self.quant_config.pack_factor,
+                w13_weight_shape[1] // self.quant_config.pack_factor,
+            )
+            # [E, hidden_size, 2 * intermediate // 2]
+            layer.w13_weight = torch.nn.Parameter(w13_weight, requires_grad=False)
 
-        w2_weight = layer.w2_weight
-        w2_weight_shape = w2_weight.shape
-        w2_weight = w2_weight.view(
-            w2_weight_shape[0],
-            w2_weight_shape[2] * self.quant_config.pack_factor,
-            w2_weight_shape[1] // self.quant_config.pack_factor,
+            w2_weight = layer.w2_weight
+            w2_weight_shape = w2_weight.shape
+            w2_weight = w2_weight.view(
+                w2_weight_shape[0],
+                w2_weight_shape[2] * self.quant_config.pack_factor,
+                w2_weight_shape[1] // self.quant_config.pack_factor,
+            )
+            # [E, intermediate, hidden_size // 2]
+            layer.w2_weight = torch.nn.Parameter(w2_weight, requires_grad=False)
+            return
+
+        from vllm.model_executor.layers.fused_moe.oracle import w4a8_int8 as oracle
+
+        # MK path: the PPU branch of the patched conversion is a pass-through
+        # that preserves the checkpoint's packed [E, N, K/2] int8 shape and the
+        # 6-tuple contract. The selected experts class then applies its own
+        # weight transform (native: uint8 view + preprocess_a8w4_weight;
+        # fallback: the legacy acext view relabel).
+        (
+            w13,
+            w2,
+            w13_scale,
+            w2_scale,
+            _unused1,
+            _unused2,
+        ) = oracle.convert_to_w4a8_int8_moe_format(
+            layer.w13_weight,
+            layer.w2_weight,
+            layer.w13_weight_scale,
+            layer.w2_weight_scale,
+            group_size=-1,
         )
-        # [E, intermediate, hidden_size // 2]
-        layer.w2_weight = torch.nn.Parameter(w2_weight, requires_grad=False)
+        # Keep the original parameter names: the modular kernel reads
+        # layer.w13_weight / layer.w2_weight, so introducing new names here
+        # would leave the kernel on stale tensors.
+        replace_parameter(layer, "w13_weight", w13)
+        replace_parameter(layer, "w2_weight", w2)
+        replace_parameter(layer, "w13_weight_scale", w13_scale)
+        replace_parameter(layer, "w2_weight_scale", w2_scale)
+
+        self.moe_quant_config = self.get_fused_moe_quant_config(layer)
+        assert self.moe_quant_config is not None
+        self.moe_kernel = oracle.make_w4a8_int8_moe_kernel(
+            moe_quant_config=self.moe_quant_config,
+            moe_config=self.moe,
+            experts_cls=self.experts_cls,
+            routing_tables=layer._expert_routing_tables(),
+            weight_layout=self.quant_config.weight_layout,
+        )
+        self.moe_kernel.fused_experts.process_weights_after_loading(layer)
 
     def get_fused_moe_quant_config(
         self, layer: torch.nn.Module
     ) -> FusedMoEQuantConfig | None:
-        return None
+        if not self._mk_enabled():
+            return None
+        # Declaring INT8 here is what turns on the fused INT8 dispatch: sail's
+        # DeepEP LL factory reads quant_dtype (== _a1.dtype) and passes
+        # use_int8=True, so the dispatch kernel quantizes the *sent* tokens
+        # (channel-wise, scale == amax/127, one fp32 scale per token row) and
+        # ships int8 + scales. The experts class consumes those directly, so no
+        # per-token quantization is run on the padded [E, BNT x EP, K] recv
+        # buffer. PER_TOKEN keeps block_shape None, i.e. channel-wise quant,
+        # which is exactly what int8_int4_m_grouped_gemm_nt_masked expects:
+        # [E, T, K] int8 with fp32 [E, T, 1] scales. Weights are packed INT4
+        # with per-channel scales.
+        return FusedMoEQuantConfig(
+            _a1=FusedMoEQuantDesc(dtype=torch.int8, shape=GroupShape.PER_TOKEN),
+            _a2=FusedMoEQuantDesc(dtype=torch.int8, shape=GroupShape.PER_TOKEN),
+            _w1=FusedMoEQuantDesc(
+                dtype=None,
+                shape=GroupShape.PER_CHANNEL,
+                scale=layer.w13_weight_scale,
+            ),
+            _w2=FusedMoEQuantDesc(
+                dtype=None,
+                shape=GroupShape.PER_CHANNEL,
+                scale=layer.w2_weight_scale,
+            ),
+        )
 
     def apply(
         self,
@@ -282,6 +424,21 @@ class W4AInt8MoEMethod(FusedMoEMethodBase):
         shared_experts: "SharedExperts | None",
         shared_experts_input: torch.Tensor | None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        if self.moe_kernel is not None:
+            return self.moe_kernel.apply(
+                x,
+                layer.w13_weight,
+                layer.w2_weight,
+                topk_weights,
+                topk_ids,
+                activation=layer.activation,
+                global_num_experts=layer.global_num_experts,
+                expert_map=layer.expert_map,
+                apply_router_weight_on_input=layer.apply_router_weight_on_input,
+                shared_experts=shared_experts,
+                shared_experts_input=shared_experts_input,
+            )
+
         from vllm_sail.utils.acext import load_acext
 
         load_acext()

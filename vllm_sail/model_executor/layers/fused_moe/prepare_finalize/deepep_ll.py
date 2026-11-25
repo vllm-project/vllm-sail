@@ -266,11 +266,22 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         quant_config: FusedMoEQuantConfig,
         defer_input_quant: bool = False,
     ) -> tuple[Callable, mk.ReceiverType]:
-        if defer_input_quant:
+        # PPU MODIFICATION: begin — accept defer for raw bf16 dispatch.
+        # With no quantized dispatch configured, prepare already dispatches
+        # bf16 and _do_quant returns it unchanged (quant_dtype=None), which is
+        # exactly the defer contract: the experts quantize internally. Only a
+        # quantized dispatch genuinely conflicts with defer_input_quant.
+        if defer_input_quant and (
+            self.use_fp8_dispatch
+            or self.use_int8_dispatch
+            or self.use_mxfp4_dispatch
+        ):
             raise NotImplementedError(
-                f"{self.__class__.__name__} does not support defer_input_quant=True. "
-                "Please select an MoE kernel that accepts quantized inputs."
+                f"{self.__class__.__name__} does not support defer_input_quant=True "
+                "with a quantized dispatch. Please select an MoE kernel that "
+                "accepts quantized inputs."
             )
+        # PPU MODIFICATION: end
 
         hidden_size = a1.size(1)
         assert hidden_size in self.SUPPORTED_HIDDEN_SIZES, (
@@ -415,11 +426,19 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         quant_config: FusedMoEQuantConfig,
         defer_input_quant: bool = False,
     ) -> mk.PrepareResultType:
-        if defer_input_quant:
+        # PPU MODIFICATION: begin — accept defer for raw bf16 dispatch (see
+        # prepare_async). Only a quantized dispatch conflicts with defer.
+        if defer_input_quant and (
+            self.use_fp8_dispatch
+            or self.use_int8_dispatch
+            or self.use_mxfp4_dispatch
+        ):
             raise NotImplementedError(
-                f"{self.__class__.__name__} does not support defer_input_quant=True. "
-                "Please select an MoE kernel that accepts quantized inputs."
+                f"{self.__class__.__name__} does not support defer_input_quant=True "
+                "with a quantized dispatch. Please select an MoE kernel that "
+                "accepts quantized inputs."
             )
+        # PPU MODIFICATION: end
         hook, receiver = self.prepare_async(
             a1,
             topk_weights,
@@ -428,6 +447,9 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
             expert_map,
             apply_router_weight_on_input,
             quant_config,
+            # PPU MODIFICATION: forward defer so the async path applies the
+            # same accept/reject contract (no-op for raw bf16 dispatch).
+            defer_input_quant=defer_input_quant,
         )
         hook()
         return receiver()
