@@ -38,6 +38,7 @@ def test_recipe_resolves_only_the_tp_prefill_command(tmp_path, modules):
         assert "--nproc-per-node=8" in cmd
         assert "--standalone" in cmd
         assert "--local-addr=127.0.0.1" in cmd[: cmd.index(runner.VLLM_CLI_MODULE)]
+        assert "--exclude-sampler" in cmd[cmd.index(runner.VLLM_CLI_MODULE) + 1 :]
         assert cmd[cmd.index("--load-format") + 1] == "dummy"
         assert "--no-enable-prefix-caching" in cmd
         assert "--tool-call-parser" not in cmd
@@ -145,6 +146,7 @@ def test_forward_regression_threshold(modules, median_us, cv, case_status, reaso
 def test_one_regressed_case_is_reported_to_nightly(tmp_path, monkeypatch, modules):
     _, runner = modules
     from ppu_notify_nightly import collect
+    from ppu_notify_summary import JobExecution
 
     baseline = json.loads(BASELINE.read_text())
     baseline_us = baseline["metrics"]["prefill_16k"]["median_us"]
@@ -199,7 +201,10 @@ def test_one_regressed_case_is_reported_to_nightly(tmp_path, monkeypatch, module
             "micro_e2e": "pass",
         },
     )
-    jobs = {recipe_job: ("success", 1), forward_job: ("failure", 1)}
+    jobs = {
+        recipe_job: JobExecution("success", 1, 201, 60),
+        forward_job: JobExecution("failure", 1, 202, 720),
+    }
     monkeypatch.setattr(
         "ppu_notify_nightly.run_jobs",
         lambda expected: ({name: jobs[name] for name in expected}, 0),
@@ -299,6 +304,7 @@ def test_nightly_selection(tmp_path, models, scheduled, enabled, skip_build, for
     assert (values.get("run_forward") == "true") is forward
     if models.startswith("forward:"):
         assert not values.get("matrix") and not values.get("run_recipe")
+        assert values["full_run"] == "false"
     elif models.startswith("recipe:"):
         assert not values["matrix"]
         assert values["recipe_models"] == "deepseek-v4.1-flash"

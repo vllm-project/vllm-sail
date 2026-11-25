@@ -88,6 +88,7 @@ def commands(resolved, groups, checkpoint, results_dir):
             "0",
             "--routing",
             "zipf",
+            "--exclude-sampler",
             "--iters",
             str(ITERS),
             "--samples",
@@ -102,6 +103,8 @@ def commands(resolved, groups, checkpoint, results_dir):
 def benchmark_args(argv, model_id):
     args = argv[argv.index(VLLM_CLI_MODULE) + 1 : -2]
     args[args.index("--model") + 1] = model_id
+    # Earlier vLLM builds excluded sampling by default when recording the baseline.
+    args.remove("--exclude-sampler")
     return args
 
 
