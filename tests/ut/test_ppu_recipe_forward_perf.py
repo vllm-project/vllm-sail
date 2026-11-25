@@ -36,6 +36,8 @@ def test_recipe_resolves_only_the_tp_prefill_command(tmp_path, modules):
     assert list(commands) == ["prefill"]
     for cmd in commands.values():
         assert "--nproc-per-node=8" in cmd
+        assert "--standalone" in cmd
+        assert "--local-addr=127.0.0.1" in cmd[: cmd.index(runner.VLLM_CLI_MODULE)]
         assert cmd[cmd.index("--load-format") + 1] == "dummy"
         assert "--no-enable-prefix-caching" in cmd
         assert "--tool-call-parser" not in cmd
@@ -44,6 +46,11 @@ def test_recipe_resolves_only_the_tp_prefill_command(tmp_path, modules):
     assert "--max-model-len=102528" in commands["prefill"]
     assert "--kv-cache-memory-bytes=17179869184" in commands["prefill"]
     assert "prefill_100k=102400" in commands["prefill"]
+    baseline = json.loads(BASELINE.read_text())
+    assert {
+        name: runner.benchmark_args(cmd, resolved["hf_model_id"])
+        for name, cmd in commands.items()
+    } == baseline["config"]["benchmark_args"]
 
 
 def test_snapshot_provenance_supports_commit_and_local_cache_ref(tmp_path, modules):

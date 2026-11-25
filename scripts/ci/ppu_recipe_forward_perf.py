@@ -17,6 +17,7 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.append(str(ROOT / "tests/e2e/perf"))
 ITERS = 20
 SAMPLES = 5
+VLLM_CLI_MODULE = "vllm.entrypoints.cli.main"
 REGRESSION_LIMIT = Decimal("1.05")
 MAX_CV = 0.15
 CASE_NAME = re.compile(r"[a-z0-9_]{1,64}")
@@ -70,9 +71,11 @@ def commands(resolved, groups, checkpoint, results_dir):
             "-m",
             "torch.distributed.run",
             "--standalone",
+            # c10d also advertises a bootstrap address to the local ranks.
+            "--local-addr=127.0.0.1",
             f"--nproc-per-node={resolved['ppu_count']}",
             "-m",
-            "vllm.entrypoints.cli.main",
+            VLLM_CLI_MODULE,
             "bench",
             "forward",
             "--model",
@@ -94,6 +97,12 @@ def commands(resolved, groups, checkpoint, results_dir):
             result[name].extend(("--case", case))
         result[name].extend(("--output-json", str(results_dir / f"{name}.json")))
     return result
+
+
+def benchmark_args(argv, model_id):
+    args = argv[argv.index(VLLM_CLI_MODULE) + 1 : -2]
+    args[args.index("--model") + 1] = model_id
+    return args
 
 
 def positive(value):
@@ -247,7 +256,7 @@ def run(args):
             "torch_sha256": stack["torch_sha256"],
             "groups": groups,
             "benchmark_args": {
-                name: [*argv[7:10], resolved["hf_model_id"], *argv[11:-2]]
+                name: benchmark_args(argv, resolved["hf_model_id"])
                 for name, argv in cmd.items()
             },
         },
