@@ -35,6 +35,18 @@ def write_json(path, data):
     path.write_text(json.dumps(data, indent=2, sort_keys=True, allow_nan=False) + "\n")
 
 
+def snapshot_provenance(checkpoint):
+    cache_ref = checkpoint.name
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", cache_ref):
+        raise ValueError("Invalid offline checkpoint snapshot reference")
+    provenance = {"checkpoint_source": "hf_snapshot", "checkpoint_revision": None}
+    if re.fullmatch(r"[0-9a-f]{40}", cache_ref):
+        provenance["checkpoint_revision"] = cache_ref
+    else:
+        provenance["checkpoint_cache_ref"] = cache_ref
+    return provenance
+
+
 def commands(resolved, groups, checkpoint, results_dir):
     from ppu_recipe import _parse_flag_entries, _render_entries
 
@@ -198,18 +210,19 @@ def run(args):
     ]
     if not current_platform.is_ppu() or devices != ["ZW-M890P"] * count or count != 8:
         raise ValueError("Forward performance requires eight M890 PPUs")
-    revision = None
     if args.local_checkpoint is not None:
         if not args.capture_baseline or not args.local_checkpoint.is_absolute():
             raise ValueError("Local checkpoint paths require explicit baseline capture")
         checkpoint = args.local_checkpoint
+        checkpoint_info = {
+            "checkpoint_source": "local_export",
+            "checkpoint_revision": None,
+        }
     else:
         checkpoint = Path(
             snapshot_download(resolved["resolved_model"], local_files_only=True)
         )
-        revision = checkpoint.name
-        if not re.fullmatch(r"[0-9a-f]{40}", revision):
-            raise ValueError("Expected the offline cache's checkpoint revision")
+        checkpoint_info = snapshot_provenance(checkpoint)
     # The mounted export and the CI cache can use different directory layouts.
     checkpoint_files = (
         "config.json",
@@ -240,8 +253,7 @@ def run(args):
         },
         "provenance": {
             "commits": provenance["commits"],
-            "checkpoint_source": "local_export" if revision is None else "hf_snapshot",
-            "checkpoint_revision": revision,
+            **checkpoint_info,
             "runtime_image_digest": provenance.get("runtime_image_digest"),
             "runtime_image_id": provenance.get("runtime_image_id"),
         },
