@@ -46,6 +46,28 @@ def test_recipe_resolves_only_the_tp_prefill_command(tmp_path, modules):
     assert "prefill_100k=102400" in commands["prefill"]
 
 
+def test_snapshot_provenance_supports_commit_and_local_cache_ref(tmp_path, modules):
+    recipe, runner = modules
+    snapshots = tmp_path / "snapshots"
+    alias = "local-ci-20261119"
+    revision = "a" * 40
+    local = runner.snapshot_provenance(snapshots / alias)
+    assert local == {
+        "checkpoint_source": "hf_snapshot",
+        "checkpoint_revision": None,
+        "checkpoint_cache_ref": alias,
+    }
+    recipe.redact_and_verify_public_payload(local)
+    assert runner.snapshot_provenance(snapshots / revision) == {
+        "checkpoint_source": "hf_snapshot",
+        "checkpoint_revision": revision,
+    }
+    with pytest.raises(
+        ValueError, match="Invalid offline checkpoint snapshot reference"
+    ):
+        runner.snapshot_provenance(snapshots / "invalid ref")
+
+
 def test_result_validation_and_comparison(tmp_path, modules):
     _, runner = modules
     expected = {"prefill_4k": [{"query_len": 4096}]}
