@@ -51,7 +51,7 @@ INT_DEFAULTS = {
 BACKENDS = ("MOE_BACKEND", "DENSE_BACKEND")
 # String env vars with a non-None default and no legacy VLLM_PPU_* alias.
 STRING_DEFAULTS = {
-    "KPOOL_DECODE_LOGITS": "non_paged",
+    "KPOOL_DECODE_LOGITS": "paged",
     "QSA_KERNEL": "auto",
     "MEGA_MOE_MMA_TYPE": "fp8xfp4",
 }
@@ -415,11 +415,15 @@ def test_gdn_prefill_e2e_resolver_stubs_match_production(monkeypatch, name):
 @pytest.mark.parametrize(
     "name", ["VLLM_SAIL_KPOOL_DECODE_LOGITS", "VLLM_PPU_KPOOL_DECODE_LOGITS"]
 )
-def test_kpool_rejects_incomplete_paged_logits(monkeypatch, name):
+def test_kpool_accepts_both_decode_logits_backends(monkeypatch, name):
+    """``paged`` is the restored default and ``non_paged`` an explicit opt-in."""
     monkeypatch.delenv("VLLM_SAIL_KPOOL_DECODE_LOGITS", raising=False)
     monkeypatch.delenv("VLLM_PPU_KPOOL_DECODE_LOGITS", raising=False)
-    monkeypatch.setenv(name, "paged")
-    with pytest.raises(ValueError, match="Expected one of non_paged"):
+    for backend in ("non_paged", "paged"):
+        monkeypatch.setenv(name, backend)
+        assert envs.VLLM_SAIL_KPOOL_DECODE_LOGITS == backend
+    monkeypatch.setenv(name, "dense")
+    with pytest.raises(ValueError, match="Expected one of non_paged, paged"):
         _ = envs.VLLM_SAIL_KPOOL_DECODE_LOGITS
 
 
