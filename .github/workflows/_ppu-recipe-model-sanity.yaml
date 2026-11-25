@@ -88,6 +88,7 @@ jobs:
           TIER: ${{ inputs.forward_perf && 'forward_perf' || 'model_sanity' }}
           PR_MODE: ${{ inputs.pr_mode }}
           BUILD_RUN_ID: ${{ inputs.build_run_id }}
+          WHEEL_SOURCE_SHA: ${{ inputs.wheel_source_sha }}
           SELECTED_MATRIX: ${{ inputs.selected_matrix }}
           IMAGE_TAG: ${{ inputs.image_tag }}
           IMAGE_DIGEST: ${{ inputs.image_digest }}
@@ -112,6 +113,9 @@ jobs:
           if [[ "${SKIP_WHEEL_BUILD:-false}" == true ]]; then
             test -z "$BUILD_RUN_ID"
             test -n "${IMAGE_TAG:-}${IMAGE_DIGEST:-}"
+          elif [[ "$TIER" == forward_perf && "${GITHUB_WORKFLOW:-}" == "PPU debug" ]]; then
+            test "$BUILD_RUN_ID" = 45536457776
+            test "$WHEEL_SOURCE_SHA" = ea07366c3d45af15cd584ba08fb3be742a9b6d99
           else
             test "$BUILD_RUN_ID" = "$GITHUB_RUN_ID"
           fi
