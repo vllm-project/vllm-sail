@@ -9,6 +9,7 @@ def install() -> None:
         glm5_next_int8_mla_dequant,
         pp_empty_kv_cache_group,
         pynccl_uint16_gather,
+        qwen4_exp_hc_pad,
         qwen4_exp_ple_quant_scheme,
     )
 
@@ -17,4 +18,5 @@ def install() -> None:
     glm5_next_int8_mla_dequant.install()
     pp_empty_kv_cache_group.install()
     pynccl_uint16_gather.install()
+    qwen4_exp_hc_pad.install()
     qwen4_exp_ple_quant_scheme.install()
