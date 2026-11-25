@@ -332,6 +332,10 @@ def flash_attn_varlen_func(
             raise NotImplementedError("FA2 does not support num_splits > 1")
         if s_aux is not None:
             raise NotImplementedError("FA2 does not support s_aux")
+        if mask_mod is not None:
+            raise NotImplementedError("FA2 does not support mask_mod")
+        if aux_tensors is not None:
+            raise NotImplementedError("FA2 does not support aux_tensors")
         out_fa2, softmax_lse, _, _ = torch.ops.flash_attn._flash_attn_varlen_forward(
             q,
             k,
@@ -363,6 +367,10 @@ def flash_attn_varlen_func(
             out = out_fa2
     elif fa_version == 3:
         assert alibi_slopes is None, "Alibi is not supported in FA3"
+        if mask_mod is not None:
+            raise NotImplementedError("FA3 does not support mask_mod")
+        if aux_tensors is not None:
+            raise NotImplementedError("FA3 does not support aux_tensors")
         # [Note]: Aone#75639039
         # PPU FA3 use max_seqlen_k to choose tile
         # max_seqlen_k is needed when cu_seqlens_k on prefill

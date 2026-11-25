@@ -220,6 +220,87 @@ def test_fa4_probe_does_not_load_sdk(monkeypatch):
     assert "FA4" in interface.fa_version_unsupported_reason(4)
 
 
+@pytest.mark.parametrize("fa_version", [2, 3])
+def test_varlen_rejects_mask_mod_and_aux_tensors_before_dispatch(
+    run_shim, fa_version: int
+) -> None:
+    run_shim(f"""
+        import types
+        import pytest
+
+        class FakeTensor:
+            shape = (1, 1, 64)
+
+            def stride(self, dim):
+                return 1
+
+        dispatched = []
+        torch = types.ModuleType('torch')
+        torch.Tensor = FakeTensor
+        torch.bfloat16 = object()
+        torch.empty_like = lambda x: FakeTensor()
+        torch.ops = types.SimpleNamespace(
+            flash_attn=types.SimpleNamespace(
+                _flash_attn_varlen_forward=lambda *args, **kwargs: (
+                    dispatched.append(('fa2', args, kwargs))
+                    or (FakeTensor(), None, None, None)
+                )
+            ),
+            flash_attn_3=types.SimpleNamespace(
+                fwd=lambda *args, **kwargs: (
+                    dispatched.append(('fa3', args, kwargs))
+                    or (FakeTensor(), None, None, None)
+                )
+            ),
+        )
+        sys.modules['torch'] = torch
+        for name in ('flash_attn', 'flash_attn_3', 'flash_attn_3._C'):
+            sys.modules[name] = types.ModuleType(name)
+        sys.meta_path.pop(0)
+
+        from vllm_sail.attention.flash_attn.flash_attn_interface import (
+            flash_attn_varlen_func,
+        )
+
+        q, k, v = FakeTensor(), FakeTensor(), FakeTensor()
+        cu_q, cu_k = FakeTensor(), FakeTensor()
+        base_kwargs = dict(
+            q=q,
+            k=k,
+            v=v,
+            cu_seqlens_q=cu_q,
+            cu_seqlens_k=cu_k,
+            max_seqlen_q=1,
+            max_seqlen_k=2,
+            softmax_scale=1.0,
+            causal=False,
+            fa_version={fa_version!r},
+        )
+
+        callback_calls = []
+        def mask_mod(*args):
+            callback_calls.append(args)
+            return True
+
+        with pytest.raises(
+            NotImplementedError, match=f'FA{fa_version} does not support mask_mod'
+        ):
+            flash_attn_varlen_func(**base_kwargs, mask_mod=mask_mod)
+        assert dispatched == []
+        assert callback_calls == []
+
+        with pytest.raises(
+            NotImplementedError, match=f'FA{fa_version} does not support aux_tensors'
+        ):
+            flash_attn_varlen_func(**base_kwargs, aux_tensors=[FakeTensor()])
+        assert dispatched == []
+
+        out = flash_attn_varlen_func(**base_kwargs)
+        assert isinstance(out, FakeTensor)
+        assert [tag for tag, _, _ in dispatched] == [f'fa{fa_version}']
+    """)
+
+
 @pytest.mark.upstream_source
 @pytest.mark.parametrize(
     "local,local_name,upstream,upstream_name",
