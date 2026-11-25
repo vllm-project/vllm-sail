@@ -119,8 +119,12 @@ def check_vllm_compatibility(
     ref = _upstream_ref()
     # Only release-line checks accept a developer-supplied version. Commit
     # checks must read the identity recorded in the installed build.
-    override = os.getenv("VLLM_VERSION") if _release_line(ref) is not None else None
-    version = override.strip() if override else installed_vllm_version()
+    override = (
+        (os.getenv("VLLM_VERSION") or "").strip()
+        if _release_line(ref) is not None
+        else ""
+    )
+    version = override or installed_vllm_version()
     mismatch = _mismatch_reason(version, ref)
     if mismatch is None:
         _checked = True

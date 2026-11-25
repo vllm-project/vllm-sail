@@ -83,6 +83,17 @@ def test_release_tag_uses_version_env_override(
     assert compat._last_matched
 
 
+@pytest.mark.parametrize("override", ["", "   "])
+def test_release_tag_blank_version_env_override_falls_back(
+    compat, monkeypatch: pytest.MonkeyPatch, override: str
+) -> None:
+    monkeypatch.setattr(compat, "_upstream_ref", lambda: "v0.33.0")
+    monkeypatch.setattr(compat, "installed_vllm_version", lambda: "0.33.1")
+    monkeypatch.setenv("VLLM_VERSION", override)
+    compat.check_vllm_compatibility(force=True, strict=True)
+    assert compat._last_matched
+
+
 def test_named_ref_ignores_version_env_override(compat, monkeypatch) -> None:
     monkeypatch.setattr(compat, "_upstream_ref", lambda: "main")
     monkeypatch.setattr(compat, "installed_vllm_version", lambda: "0.33.0")
