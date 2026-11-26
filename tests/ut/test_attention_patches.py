@@ -127,6 +127,14 @@ _ATTENTION_TARGETS = (
     ),
     ("vllm.v1.kv_cache_interface", "MLAAttentionSpec.__init__"),
     (
+        "vllm.v1.worker.gpu.attn_utils",
+        "build_slot_mappings_by_layer",
+    ),
+    (
+        "vllm.v1.worker.utils",
+        "AttentionGroup._with_kernel_block_table",
+    ),
+    (
         "vllm.v1.worker.utils",
         "AttentionGroup.map_kv_cache_to_kernel_blocks",
     ),

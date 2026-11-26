@@ -105,10 +105,18 @@ def takes_bf16_logits(self, logits, topk_tokens, num_rows) -> bool:
     # always False: the caller then upcasts the BF16 logits to FP32, which the
     # SAIL wheel rejects in resolve_backend. Resolve at call time instead.
     # "auto" is included so PPU prefers DeepSelect without an explicit
-    # --kernel-config; when the wheel or shape does not qualify, upstream's
-    # FP32 chain still runs.
-    if current_platform.is_ppu() and self._backend in ("auto", "deep_select"):
-        return _sail.can_use_deep_select(logits, topk_tokens)
+    # --kernel-config. The stride(1) check mirrors upstream's own guard, and
+    # when DeepSelect does not qualify (disabled wheel, unsupported shape, or
+    # non-contiguous logits) the decision falls through to upstream — its
+    # cooperative BF16 path must stay reachable instead of being cut off by
+    # an unconditional False from the SAIL check.
+    if (
+        current_platform.is_ppu()
+        and self._backend in ("auto", "deep_select")
+        and logits.stride(1) == 1
+        and _sail.can_use_deep_select(logits, topk_tokens)
+    ):
+        return True
     return _original_takes_bf16(self, logits, topk_tokens, num_rows)
 
 

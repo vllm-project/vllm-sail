@@ -10,17 +10,16 @@ therefore writes its keys at slots derived from the block table
 ``AttentionGroup.map_kv_cache_to_kernel_blocks`` describes as "compressed
 caches, written from their block table".
 
-The guard there derives that contract from ``tokens_per_state`` alone and
-refuses every cache that stores one state per token, so binding the packed
-indexer cache fails with "cannot be split into". A backend that declares
-``writes_kv_cache_from_block_table`` meets the contract without compression, so
-take the same split path for it. Every other cache, and every other platform,
-keeps upstream's check.
+Upstream (e83d82a) infers that contract from the spec and splits every cache
+that is not written through slot mappings, so the packed indexer cache — a
+self-addressed spec whose ``uses_slot_mapping`` is False — binds natively and
+delegates straight to upstream. What remains fork-side is the draft cache:
 
 A dense MLA draft (EAGLE3/DSpark on Kimi-K3.1, retargeted to FLASHMLA on PPU)
 adds a second per-token cache to the packed group: its pages ride at the head
 of the same block rows, so the indexer's 64-token kernel blocks force a split
-of the draft's cache too, and upstream's guard raises there as well. Unlike the
+of the draft's cache too, and upstream's guard raises there as well
+(``uses_slot_mapping`` stays True for it). Unlike the
 indexer, the draft's layers write through manager-block slot mappings, so the
 split alone would misaddress every write: this patch also splits the draft's
 cache view and registers its layers in ``_slot_remaps``, and the patched
@@ -198,14 +197,21 @@ def _force_split_token_cache(self, kv_cache: torch.Tensor) -> torch.Tensor | Non
     kernel_rows = spec.get_num_kernel_states(self.kernel_block_size)
     if kv_cache.shape[-2] == kernel_rows:
         return None
-    if kv_cache.shape[1] != 1 or kv_cache.stride(0) % (
-        kernel_rows * kv_cache.stride(-2)
-    ):
+    # A padded page spreads its kernel blocks evenly (formula aligned with
+    # upstream e83d82a): page_stride accounts for the padding between pages,
+    # so a padded layout is neither miscomputed nor falsely rejected.
+    row_bytes = spec.num_heads * spec.state_content_size_bytes
+    page_stride = (
+        kernel_rows
+        * kv_cache.stride(-2)
+        * spec.page_size_bytes
+        // (spec.num_states * row_bytes)
+    )
+    if kv_cache.shape[1] != 1 or kv_cache.stride(0) % page_stride:
         return None
     # Same geometry as the indexer's split: kernel block j of block b is
     # ``b * kernel_block_stride + j``. The view spans the other layers' pages
     # between blocks (never addressing them), which ``view`` cannot express.
-    page_stride = kernel_rows * kv_cache.stride(-2)
     self.kernel_block_stride = kv_cache.stride(0) // page_stride
     num_pages = (kv_cache.shape[0] - 1) * self.kernel_block_stride + (
         kv_cache.shape[-2] // kernel_rows
@@ -453,103 +459,34 @@ _install_precompute_context_kv_patch()
     "vllm.v1.worker.utils",
     "AttentionGroup.map_kv_cache_to_kernel_blocks",
     reason=(
-        "Kimi-K3.1's packed DSA indexer cache holds one state per token and is "
-        "written from its block table, but the guard infers that from "
-        "tokens_per_state instead of consulting writes_kv_cache_from_block_table, "
-        "so the packed cache cannot be split into the 64-token kernel blocks its "
-        "kernels address and KV cache binding fails."
+        "Kimi-K3.1's packed DSA indexer cache is a self-addressed spec "
+        "(uses_slot_mapping False) that upstream e83d82a maps natively, so it "
+        "delegates straight to upstream. What remains is the draft cache that "
+        "shares the indexer's forced kernel block size: it keeps writing "
+        "through manager-block slot mappings, upstream refuses to split it, "
+        "and KV cache binding fails — the force-split below splits its view "
+        "and registers its layers' slot-mapping rewrites."
     ),
     remove_when=(
-        "map_kv_cache_to_kernel_blocks asks the backend "
-        "(writes_kv_cache_from_block_table) instead of inferring it from "
-        "tokens_per_state."
+        "a slot-mapping-written token cache sharing the packed indexer's "
+        "forced kernel block size binds without a force-split (e.g. upstream "
+        "splits slot-mapping caches or derives per-group kernel pages from "
+        "the cache layout itself)."
     ),
 )
 def map_kv_cache_to_kernel_blocks(self, kv_cache):
-    # PPU MODIFICATION: begin — upstream infers the compressed-cache contract
-    # from ``tokens_per_state``; here the backend declares it, so a cache that
-    # stores one state per token can still be split. The shape and stride tests
-    # below still decide whether the split is addressable, and an unaddressable
-    # cache keeps upstream's error. Every other platform keeps upstream's check.
+    # PPU MODIFICATION: begin — upstream (e83d82a) infers the contract from
+    # the spec and splits every cache that is not written through slot
+    # mappings, so self-addressed specs (the packed DSA indexer's) delegate
+    # straight to upstream instead of inspecting a backend contract. The fork
+    # path only covers slot-mapping-written token caches sharing the forced
+    # kernel block size, which need the force-split (plus the slot-mapping
+    # rewrites it registers) to bind.
     if not current_platform.is_ppu():
         return _upstream_map_kv_cache_to_kernel_blocks(self, kv_cache)
-    writes_from_block_table = getattr(
-        self.backend, "writes_kv_cache_from_block_table", None
-    )
-    # A backend that spells the contract as a plain bool keeps upstream's
-    # check: calling it here would crash KV cache binding for every group
-    # on this platform, not just the packed indexer cache.
-    declared = (
-        bool(writes_from_block_table())
-        if callable(writes_from_block_table)
-        else None
-    )
-    backend_name = self.backend.get_name()
-    if not declared:
-        # Only a cache with no contract attribute at all (FLASHMLA's token
-        # cache) may be force-split; a backend that spells the contract as a
-        # plain bool opted out of the split path explicitly.
-        force_split = (
-            _force_split_token_cache(self, kv_cache)
-            if writes_from_block_table is None
-            else None
-        )
+    if self.kv_cache_spec.uses_slot_mapping:
+        force_split = _force_split_token_cache(self, kv_cache)
         if force_split is not None:
             return force_split
-        _report_once(
-            f"skip:{backend_name}",
-            "Packed kernel-block split skipped for %s "
-            "(writes_kv_cache_from_block_table=%r).",
-            backend_name,
-            declared,
-        )
-        return _upstream_map_kv_cache_to_kernel_blocks(self, kv_cache)
-    assert self.kernel_block_size is not None
-    spec = self.kv_cache_spec
-    kernel_rows = spec.get_num_kernel_states(self.kernel_block_size)
-    if kv_cache.shape[-2] == kernel_rows:
-        return kv_cache
-    if kv_cache.shape[1] != 1 or kv_cache.stride(0) % (
-        kernel_rows * kv_cache.stride(-2)
-    ):
-        # Warning, not info: upstream's message blames the block size, but an
-        # unaddressable layout (strided rows, another KVCacheLayout) is the
-        # usual cause, and this line is the only place that says so.
-        _report_once(
-            f"unsplittable:{backend_name}",
-            "Packed %s cache cannot be split into %d-token kernel blocks "
-            "(shape=%s, strides=%s); reporting upstream's error, which names "
-            "the block size even when the layout is the cause.",
-            backend_name,
-            self.kernel_block_size,
-            tuple(kv_cache.shape),
-            kv_cache.stride(),
-            warn=True,
-        )
-        return _upstream_map_kv_cache_to_kernel_blocks(self, kv_cache)
-    # Kernel block j of block b is b * kernel_block_stride + j. The view spans
-    # the other layers' pages between blocks (never addressing them), which
-    # ``view`` cannot express.
-    page_stride = kernel_rows * kv_cache.stride(-2)
-    self.kernel_block_stride = kv_cache.stride(0) // page_stride
-    num_pages = (kv_cache.shape[0] - 1) * self.kernel_block_stride + (
-        kv_cache.shape[-2] // kernel_rows
-    )
-    _report_once(
-        f"split:{backend_name}",
-        "Split %s cache into %d-token kernel blocks: block_size=%d shape=%s "
-        "strides=%s pages=%d kernel_block_stride=%d.",
-        backend_name,
-        self.kernel_block_size,
-        spec.block_size,
-        tuple(kv_cache.shape),
-        kv_cache.stride(),
-        num_pages,
-        self.kernel_block_stride,
-    )
-    split = kv_cache.as_strided(
-        (num_pages, *kv_cache.shape[1:-2], kernel_rows, kv_cache.shape[-1]),
-        (page_stride, *kv_cache.stride()[1:]),
-    )
+    return _upstream_map_kv_cache_to_kernel_blocks(self, kv_cache)
     # PPU MODIFICATION: end
-    return split

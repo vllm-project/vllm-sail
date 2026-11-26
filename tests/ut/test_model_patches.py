@@ -319,6 +319,9 @@ _EXPECTED_TARGETS = {
     "vllm.models.kimi_k3.nvidia.ops.dsa_indexer.indexer_k_norm_quant_insert",
     "vllm.models.kimi_k3.nvidia.ops.dsa_indexer.indexer_q_quant_fold_weights",
     "vllm.models.kimi_k3.nvidia.ops.dsa_indexer.dsa_fused_prologue",
+        (
+            "vllm.models.kimi_k3.common.dsa_cache.SelfAddressedMLASpec.from_spec"
+        ),
     "vllm.model_executor.models.llama4.Llama4MoE.custom_routing_function",
     "vllm.models.minimax_m3.nvidia.model.MiniMaxM3Model._init_fused_moe_finalize",
     "vllm.models.minimax_m3.nvidia.model.MiniMaxM3MLP.__init__",
