@@ -1066,6 +1066,9 @@ def test_runtime_lanes_upgrade_transformers_before_verifying_image_stack(
         ("vllm_only", None),
         ("vllm_fingerprint", None),
         ("vllm_wheel_hash", None),
+        ("tagged_vllm_only", None),
+        ("tagged_image_changed", None),
+        ("tagged_image_unverified", None),
     ],
 )
 def test_native_repack_selects_first_verified_donor(
@@ -1079,12 +1082,30 @@ def test_native_repack_selects_first_verified_donor(
         source, pytorch_sail_arch=arch, vllm_sail_hg_flags="-O3"
     )
     pin, sail_commit = "1" * 40, "2" * 40
-    upstream_only = first_failure in {
+    tagged = first_failure in {
+        "tagged_vllm_only",
+        "tagged_image_changed",
+        "tagged_image_unverified",
+    }
+    upstream_only = tagged or first_failure in {
         "vllm_only",
         "vllm_fingerprint",
         "vllm_wheel_hash",
     }
     image = f"sdk@sha256:{'a' * 64}" if upstream_only else ""
+    image_id = ""
+    if tagged:
+        image = f"docker-image-id:sha256:{'a' * 64}"
+        if first_failure != "tagged_image_unverified":
+            digest = "b" if first_failure == "tagged_image_changed" else "a"
+            image_id = f"sha256:{digest * 64}"
+        else:
+            fingerprint = manifest.native_fingerprint(
+                source,
+                build_image="sdk:ci",
+                pytorch_sail_arch=arch,
+                vllm_sail_hg_flags="-O3",
+            )
     donor_root = tmp_path / "native-reuse"
     for slot in ("1", "2", "3", "upstream"):
         if slot == "upstream" and not upstream_only:
@@ -1208,7 +1229,8 @@ git() {
             "VLLM_SAIL_NATIVE_REUSE_ROOT": (
                 "" if first_failure == "legacy" else str(donor_root)
             ),
-            "VLLM_SAIL_BUILD_IMAGE": image,
+            "VLLM_SAIL_BUILD_IMAGE": "sdk:ci" if tagged else image,
+            "VLLM_SAIL_BUILD_IMAGE_ID": image_id,
             "VLLM_REPOSITORY": "https://github.com/vllm-project/vllm.git",
             "PREPARED_ENV": "0",
             "CMAKE_BUILD_TYPE": "Release",
@@ -1233,8 +1255,10 @@ git() {
     expected_order = list(range(1, (selected or 3) + 1))
     if first_failure in {"missing_sidecar", "invalid_sidecar"}:
         expected_order.remove(1)
+    elif first_failure == "tagged_image_unverified":
+        expected_order = []
     assert attempted == [str(slot) for slot in expected_order]
-    if first_failure == "vllm_only":
+    if first_failure in {"vllm_only", "tagged_vllm_only"}:
         assert "entered cold build" not in result.stdout
         assert "reuse_mode=vllm-only\n" in build_manifest.read_text()
         (wheel,) = wheels.iterdir()

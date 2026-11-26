@@ -152,6 +152,9 @@ still supply the upstream vLLM wheel. The build requires the exact upstream
 commit, matching vLLM build fingerprint and a verified wheel containing the
 Rust frontend. A match skips the upstream source and Rust build while compiling
 the SAIL extensions from the commit under test.
+For tag-referenced build images, the hosted runner records the running
+container's immutable Docker image ID. If the ID is unavailable, the build
+compiles from source.
 
 The PR Fast Sanity lane runs when `PPU_RECIPE_PUBLIC_ENABLED` is unset or set to
 `true`. Setting it to `false` disables the lane. The PPU CI gate still requires

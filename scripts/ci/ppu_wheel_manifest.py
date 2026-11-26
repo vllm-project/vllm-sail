@@ -250,8 +250,8 @@ def native_fingerprint(source: Path, **settings: str) -> str:
 def vllm_build_fingerprint(source: Path, *, commit: str, image: str) -> str:
     if not re.fullmatch(r"[0-9a-f]{40}", commit):
         raise ValueError("vLLM wheel reuse requires a pinned upstream commit")
-    if not re.fullmatch(r"[^@]+@sha256:[0-9a-f]{64}", image):
-        raise ValueError("vLLM wheel reuse requires a digest-pinned build image")
+    if not re.fullmatch(r"(?:[^@]+@|docker-image-id:)sha256:[0-9a-f]{64}", image):
+        raise ValueError("vLLM wheel reuse requires an immutable build image identity")
     inputs = {
         "schema": 1,
         "commit": commit,

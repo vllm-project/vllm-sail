@@ -68,6 +68,33 @@ jobs:
       PYTORCH_SAIL_ARCH: ${{ inputs.pytorch_sail_arch || 'ppu_15;ppu_10' }}
       ARTIFACT_DIR: ${{ github.workspace }}/artifacts
     steps:
+      - name: Record actual image ID for a tagged build image
+        id: build-image-id
+        if: ${{ !contains(env.VLLM_SAIL_BUILD_IMAGE, '@') }}
+        continue-on-error: true
+        shell: bash
+        env:
+          CONTAINER_ID: ${{ job.container.id }}
+        run: |
+          set -euo pipefail
+          [[ "$CONTAINER_ID" =~ ^[0-9a-f]{64}$ ]]
+          # The hosted runner mounts its Docker socket into the job container.
+          # Inspect the running container by ID; a tag may have moved since pull.
+          curl --fail --silent --show-error --max-time 10 --noproxy '*' \
+            --unix-socket /var/run/docker.sock --get \
+            --data-urlencode "filters={\"id\":[\"$CONTAINER_ID\"]}" \
+            http://localhost/containers/json | python3 -c '
+          import json, os, re, sys
+
+          (container,) = json.load(sys.stdin)
+          image_id = container["ImageID"]
+          if container["Id"] != os.environ["CONTAINER_ID"] or not re.fullmatch(
+              r"sha256:[0-9a-f]{64}", image_id
+          ):
+              sys.exit("Docker did not report an immutable ID for the job image")
+          print(f"image_id={image_id}")
+          ' >> "$GITHUB_OUTPUT"
+
       - name: Disable internal GitHub mirror rewrite
         shell: bash
         run: |
@@ -208,6 +235,7 @@ jobs:
           SOURCE_2: ${{ steps.donor-2.outcome == 'success' && steps.donors.outputs.source_2 || '' }}
           SOURCE_3: ${{ steps.donor-3.outcome == 'success' && steps.donors.outputs.source_3 || '' }}
           SOURCE_UPSTREAM: ${{ steps.donor-upstream.outcome == 'success' && steps.donors.outputs.source_upstream || '' }}
+          VLLM_SAIL_BUILD_IMAGE_ID: ${{ steps.build-image-id.outputs.image_id }}
         run: |
           set -euo pipefail
           slot=0

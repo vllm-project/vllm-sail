@@ -150,20 +150,31 @@ NATIVE_REUSE_DIR="${VLLM_SAIL_NATIVE_REUSE_DIR:-}"
 NATIVE_REUSE=0
 VLLM_REUSE=0
 vllm_fingerprint=""
-if [[ "${VLLM_SAIL_BUILD_IMAGE:-}" =~ ^[^@]+@sha256:[0-9a-f]{64}$ &&
-    "${VLLM_REF}" =~ ^[0-9a-f]{40}$ &&
-    "${VLLM_REPOSITORY}" == https://github.com/vllm-project/vllm.git ]] &&
-    ((PREPARED_ENV == 0)); then
+build_image="${VLLM_SAIL_BUILD_IMAGE:-}"
+immutable_image=0
+if [[ "${build_image}" =~ ^[^@]+@sha256:[0-9a-f]{64}$ ]]; then
+    immutable_image=1
+elif ((PREPARED_ENV == 0)) &&
+    [[ -n "${build_image}" && "${build_image}" != *@* &&
+       "${VLLM_SAIL_BUILD_IMAGE_ID:-}" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+    # Docker's image ID hashes the config, which binds all image layers.
+    build_image="docker-image-id:${VLLM_SAIL_BUILD_IMAGE_ID}"
+    immutable_image=1
+    printf 'build_image_id=%s\n' "${VLLM_SAIL_BUILD_IMAGE_ID}" >>"${MANIFEST}"
+fi
+if ((PREPARED_ENV == 0 && immutable_image)) &&
+    [[ "${VLLM_REF}" =~ ^[0-9a-f]{40}$ &&
+       "${VLLM_REPOSITORY}" == https://github.com/vllm-project/vllm.git ]]; then
     vllm_fingerprint="$(python "${ROOT_DIR}/scripts/ci/ppu_wheel_manifest.py" \
         fingerprint-vllm "${ROOT_DIR}" --vllm-commit "${VLLM_REF}" \
-        --build-image "${VLLM_SAIL_BUILD_IMAGE}")"
+        --build-image "${build_image}")"
 fi
 
 # A native-reuse artifact is only a hint from the trusted controller. Every
 # donor operation is guarded so malformed or legacy artifacts fall back to a
 # full compile instead of failing the CI run.
 fingerprint_args=(
-    --build-image "${VLLM_SAIL_BUILD_IMAGE:-}"
+    --build-image "${build_image}"
     --pytorch-sail-arch "${PYTORCH_SAIL_ARCH}"
     --cmake-build-type "${CMAKE_BUILD_TYPE:-Release}"
     --cmake-hgcc-dir "${CMAKE_HGCC_DIR:-}"
@@ -229,7 +240,8 @@ try_donors() {
     return 1
 }
 
-if [[ "${VLLM_REF}" =~ ^[0-9a-f]{40}$ ]]; then
+if [[ "${VLLM_REF}" =~ ^[0-9a-f]{40}$ ]] &&
+    { ((immutable_image)) || [[ -z "${build_image}" ]]; }; then
     if try_donors prepare_native_reuse 1 2 3; then
         VLLM_REUSE=1
         # A legacy paired donor may lack an independent vLLM fingerprint.

@@ -756,6 +756,12 @@ def test_build_leaf_preserves_retry_identity_and_image_output():
     }
     assert "if" not in build
     assert "needs" not in build
+    image_id = next(
+        step for step in build["steps"] if step.get("id") == "build-image-id"
+    )
+    assert image_id["env"] == {"CONTAINER_ID": "${{ job.container.id }}"}
+    assert image_id["continue-on-error"] is True
+    assert build["steps"].index(image_id) < build["steps"].index(checkouts(build)[0])
     caller = workflow("ppu-build-and-test.yaml")["jobs"]["build"]
     assert caller["uses"] == "./.github/workflows/_ppu-build.yaml"
     role = next(step for step in build["steps"] if step.get("id") == "donor-checkout")
@@ -795,6 +801,10 @@ def test_build_leaf_preserves_retry_identity_and_image_output():
         step
         for step in build["steps"]
         if step.get("name") == "Build or repackage wheels"
+    )
+    assert (
+        package["env"]["VLLM_SAIL_BUILD_IMAGE_ID"]
+        == "${{ steps.build-image-id.outputs.image_id }}"
     )
     assert (
         package["env"]["VLLM_SAIL_NATIVE_REUSE_ROOT"]
