@@ -29,8 +29,6 @@ from vllm.platforms import current_platform
 
 from vllm_sail.patch.utils import patch
 
-_AFFECTED = ">=0.32.0,<0.33.0"
-
 # Captured before patching so the replacement can delegate to it.
 _upstream_dispatch_forward = CustomOp.dispatch_forward
 
@@ -44,7 +42,6 @@ _upstream_dispatch_forward = CustomOp.dispatch_forward
         "assumed CUDA-compatible, so the default delegates to forward_cuda. Ops "
         "with a genuinely different PPU kernel override this method."
     ),
-    affected_versions=_AFFECTED,
     remove_when="upstream adds a forward_ppu hook, or PPU stops needing per-op overrides.",
 )
 def forward_ppu(self, *args, **kwargs):
@@ -61,7 +58,6 @@ def forward_ppu(self, *args, **kwargs):
         "only redirects when upstream selected forward_cuda AND the op class "
         "actually overrides forward_ppu."
     ),
-    affected_versions=_AFFECTED,
     remove_when="upstream's dispatch ladder gains a PPU (or vendor-hook) branch.",
 )
 def dispatch_forward(self, compile_native: bool):

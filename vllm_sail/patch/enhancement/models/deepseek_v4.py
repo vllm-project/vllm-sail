@@ -16,8 +16,6 @@ from vllm_sail.models.deepseek_v4.flashmla import (
 )
 from vllm_sail.patch.utils import PATCH_MARKER, patch
 
-_AFFECTED = ">=0.32.0,<0.33.0"
-
 _SELECTOR_TARGET = "vllm.models.deepseek_v4.nvidia.model._select_dsv4_attn_cls"
 
 
@@ -30,7 +28,6 @@ _SELECTOR_TARGET = "vllm.models.deepseek_v4.nvidia.model._select_dsv4_attn_cls"
         "projection and unpadded head-count contract while preserving every "
         "non-PPU and non-FlashMLA selection."
     ),
-    affected_versions=_AFFECTED,
     remove_when=(
         "vLLM exposes a DeepSeek V4 attention-class registration hook, or its "
         "selector natively resolves the PPU plugin FlashMLA implementation."
@@ -55,7 +52,6 @@ _INDEXER_Q_TARGET = f"{_INDEXER_MODULE}.DeepseekV4Indexer._q_rope_quant"
         "SAIL MXFP4 logits require BF16 weights; emit them in the fused query "
         "producer instead of allocating a conversion in every logits call."
     ),
-    affected_versions=_AFFECTED,
     remove_when="The V4 indexer selects its scoring weights dtype through a platform hook.",
 )
 def indexer_q_rope_quant(self, positions, q, rotary_emb, indexer_weights):
@@ -98,7 +94,6 @@ _INDEXER_REMOVE_WHEN = (
     _Q_MODULE,
     "_indexer_weights_out_dtypes",
     reason="PPU SM89 dense MXFP4 query producers need BF16 explicit warmup keys.",
-    affected_versions=_AFFECTED,
     remove_when="The query warmup enumerates the PPU dense MXFP4 weights dtype.",
 )
 def _indexer_weights_out_dtypes(vllm_config):
@@ -124,7 +119,6 @@ def _indexer_weights_out_dtypes(vllm_config):
         "INT8 quantizer with its scale folded into the logits weights. "
         "The directly called upstream function has no registration hook."
     ),
-    affected_versions=_AFFECTED,
     remove_when=_INDEXER_REMOVE_WHEN,
 )
 def fused_indexer_q_rope_quant(
@@ -184,7 +178,6 @@ def fused_indexer_q_rope_quant(
         "emit signed INT8 bytes and a float32 scale in the same paged layout. "
         "The compressor launcher has no backend registration hook."
     ),
-    affected_versions=_AFFECTED,
     remove_when=_INDEXER_REMOVE_WHEN,
 )
 def compress_norm_rope_store_triton(
@@ -210,6 +203,7 @@ def compress_norm_rope_store_triton(
     quant_block,
     token_stride,
     scale_dim,
+    fp8_scale=None,
 ):
     implementation = getattr(compress_norm_rope_store_triton, PATCH_MARKER)[
         f"{_K_MODULE}.compress_norm_rope_store_triton"
@@ -232,6 +226,8 @@ def compress_norm_rope_store_triton(
     ):
         from vllm_sail.models.deepseek_v4.ops.cache import compress_mla_rope_store_fp8
 
+        if fp8_scale is not None:
+            raise NotImplementedError("810E packed MLA does not support a plain FP8 KV scale")
         implementation = compress_mla_rope_store_fp8
     return implementation(
         state_cache,
@@ -256,6 +252,7 @@ def compress_norm_rope_store_triton(
         quant_block,
         token_stride,
         scale_dim,
+        **({"fp8_scale": fp8_scale} if fp8_scale is not None and head_dim != 128 else {}),
     )
 
 
@@ -279,7 +276,6 @@ def _rebind_indexer_aliases():
                     "This DeepSeek V4 consumer captured its indexer operation "
                     "before PPU installation and would bypass PPU 1.0 INT8 dispatch."
                 ),
-                affected_versions=_AFFECTED,
                 remove_when=(
                     "vLLM resolves DeepSeek V4 indexer operations through module "
                     "lookups or a registry instead of importing them by value."

@@ -48,16 +48,22 @@ already-loaded aliases, including optional modules.
 | Path | Responsibility |
 | --- | --- |
 | [`vllm_sail/platform.py`](../../vllm_sail/platform.py) | PPU platform hooks and backend selection |
-| [`vllm_sail/registry`](../../vllm_sail/registry) | Kernel registration and MoE backend integration |
-| [`vllm_sail/attention`](../../vllm_sail/attention) | Attention adapters and SDK integration |
-| [`vllm_sail/model_executor`](../../vllm_sail/model_executor) | PPU layers, kernels and tuning data |
-| [`vllm_sail/models`](../../vllm_sail/models) | PPU model implementations and registrations |
-| [`vllm_sail/native`](../../vllm_sail/native) | Toolchain detection, source manifests, extension loading and capability checks |
+| [`vllm_sail/registry`](../../vllm_sail/registry) | Kernel registration, quantization configs and MoE backend integration |
+| [`vllm_sail/attention`](../../vllm_sail/attention) | Attention adapters, FlashAttention shims and SDK integration |
+| [`vllm_sail/model_executor`](../../vllm_sail/model_executor) | PPU layers, online quantization, kernels and tuning data |
+| [`vllm_sail/models`](../../vllm_sail/models) | PPU model implementations, model-specific ops and registrations |
+| [`vllm_sail/native`](../../vllm_sail/native) | Toolchain detection, source manifests, extension loading, Triton op fallbacks and capability checks |
 | [`vllm_sail/patch`](../../vllm_sail/patch) | Reviewed runtime adaptations to upstream behavior |
+| [`vllm_sail/utils`](../../vllm_sail/utils) | SDK wrappers (`acext`, `deep_gemm`, `deep_select`), MegaMoE helpers and DeepGEMM tuning data |
+| [`vllm_sail/profiling`](../../vllm_sail/profiling) | Optional NVTX instrumentation and config-gated layerwise NVTX hooks |
+| [`vllm_sail/benchmarks`](../../vllm_sail/benchmarks) | Profiling-aware serving benchmark wrapper |
 | [`csrc/plugin`](../../csrc/plugin) | Authored HGGC kernels, headers, host bindings and their build manifest |
 | [`csrc/upstream`](../../csrc/upstream) | Generated upstream HGGC kernels and their input manifest |
-| [`tools`](../../tools) | Kernel generation and patch maintenance |
-| [`tests/ut`](../../tests/ut) / [`tests/e2e`](../../tests/e2e) | CPU merge gate / device correctness tests |
+| [`tools`](../../tools) | Kernel generation, patch maintenance, env-doc generation and online-quantization validation |
+| [`scripts`](../../scripts) | Local wheel builds, CI orchestration, model sanity and GSM8K evaluation runners |
+| [`tests/ut`](../../tests/ut) / [`tests/e2e`](../../tests/e2e) | CPU merge gate / device correctness, accuracy and performance tests |
+| [`tests/ppu`](../../tests/ppu) / [`tests/upstream_reuse`](../../tests/upstream_reuse) | Recipe-driven PPU CI policies / curated upstream vLLM test reuse |
+| [`tests/tensor`](../../tests/tensor) / [`tests/integration`](../../tests/integration) | PyTorch numerical tests and mocked-device loader integration tests |
 
 ## Integration rules
 
@@ -76,7 +82,11 @@ already-loaded aliases, including optional modules.
 ## Optional profiling
 
 [`vllm_sail/profiling`](../../vllm_sail/profiling) owns optional instrumentation.
-It installs only when explicitly enabled and the required profiling libraries
-are available. Core inference and the CPU test environment must remain usable
-without those dependencies. Keep instrumentation scoped to the lifecycle and
+NVTX range instrumentation installs only when `VLLM_SAIL_NVTX_PROFILE` is enabled
+and the required profiling libraries are available. Separately,
+[`vllm_sail/profiling/layerwise.py`](../../vllm_sail/profiling/layerwise.py)
+installs config-gated hooks for `--enable-layerwise-nvtx-tracing` for the V2
+runner's target and draft/MTP models without requiring `VLLM_SAIL_NVTX_PROFILE` or PyPI
+`nvtx`. Core inference and the CPU test environment must remain usable without
+profiling dependencies. Keep instrumentation scoped to the lifecycle and
 operation it measures.

@@ -12,7 +12,6 @@ from types import SimpleNamespace as NS
 
 import pytest
 
-from tests.support.upstream import SUPPORTED_RANGE
 from vllm_sail.patch.utils import PATCH_REGISTRY, patch
 
 np = pytest.importorskip("numpy")
@@ -409,7 +408,6 @@ def test_install_records_real_targets_and_reapplication_guard(
     assert EXECUTE_MODEL_TARGET in records
     for record in records.values():
         assert record.reason and record.remove_when
-        assert record.affected_versions == SUPPORTED_RANGE
 
     # The framework rejects a second application of the same patch; idempotency
     # is enforced one level up, by vllm_sail.patch.install().
@@ -421,6 +419,5 @@ def test_install_records_real_targets_and_reapplication_guard(
             "vllm.v1.worker.gpu.input_batch",
             "InputBatch.make_dummy",
             reason="test",
-            affected_versions="test",
             remove_when="test",
         )(lambda *args, **kwargs: None)

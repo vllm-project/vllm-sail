@@ -40,8 +40,12 @@ _MOE_SOURCE_CASES = [
 
 @pytest.fixture
 def moe_source_boundary(modules, upstream_source_root):
-    """读取真实 getter、格式及支持检查；其他准入谓词为边界替身，不证明设备能力。"""
+    """Read real getters, formats, and support checks; other gating predicates are doubles and do not prove device capability."""
     ns = SimpleNamespace
+    modules(
+        "vllm.model_executor.layers.quantization.online.requantization",
+        is_requantization_source=lambda: False,
+    )
     root = upstream_source_root / "vllm/model_executor/layers/fused_moe"
     formats = function(
         root / "modular_kernel.py", "FusedMoEActivationFormat", {"Enum": Enum}
@@ -67,6 +71,7 @@ def moe_source_boundary(modules, upstream_source_root):
                 use_nixl_ep_kernels=False,
                 use_deepep_v2_kernels=format_name == "PaddedStandard",
                 use_moonep_kernels=False,
+                use_alltoall_batched_kernels=False,
             ),
             is_act_and_mul=True,
             activation="silu",
@@ -82,7 +87,14 @@ def moe_source_boundary(modules, upstream_source_root):
     admission = function(
         root / "modular_kernel.py",
         "FusedMoEExperts.is_supported_config",
-        {"envs": ns(VLLM_BATCH_INVARIANT=False)},
+        {
+            "envs": ns(VLLM_BATCH_INVARIANT=False),
+            "check_activation_quant_fallback": function(
+                root.parent / "quantization/utils/quant_utils.py",
+                "check_activation_quant_fallback",
+                {},
+            ),
+        },
     )
 
     def expert(format_name):
@@ -92,6 +104,13 @@ def moe_source_boundary(modules, upstream_source_root):
             {
                 "activation_format": staticmethod(lambda: formats[format_name]),
                 "is_supported_config": staticmethod(admission),
+                "executed_activation_key": staticmethod(
+                    function(
+                        root / "modular_kernel.py",
+                        "FusedMoEExperts.executed_activation_key",
+                        {},
+                    )
+                ),
                 "is_monolithic": staticmethod(lambda: False),
                 **{
                     name: staticmethod(lambda *args: True)
@@ -193,7 +212,7 @@ def test_real_expert_admission_uses_directional_format_relation(
 def test_real_public_moe_selectors_preserve_ppu_format_boundary(
     modules, moe_source_boundary, case, format_name, explicit
 ):
-    """执行真实 adapter、委托 selector 和共享 oracle；优先级及非格式准入单独验证。"""
+    """Execute real adapter, delegated selector, and shared oracle; priority and non-format gating are verified separately."""
     boundary = moe_source_boundary
     module, enum_name, oracle_name, select_name = case
     path = boundary.root / "oracle" / (module + ".py")
@@ -216,6 +235,7 @@ def test_real_public_moe_selectors_preserve_ppu_format_boundary(
         is_cuda=lambda: True,
         is_rocm=lambda: False,
         is_tpu=lambda: False,
+        is_xpu=lambda: False,
         is_out_of_tree=lambda: False,
     )
     modules("vllm.platforms", current_platform=platform)
@@ -256,7 +276,28 @@ def test_real_public_moe_selectors_preserve_ppu_format_boundary(
         "map_" + ("wna16" if module == "int_wna16" else module) + "_backend",
         namespace,
     )
-    load_moe_oracle(path, oracle_name, namespace)
+    if module == "int_wna16":
+        namespace.update(
+            user_activation_override=lambda *args: (None, None),
+            get_current_vllm_config_or_none=lambda: None,
+            check_activation_quant_fallback=lambda *args: None,
+        )
+        for helper in (
+            "_requested_activation_key",
+            "_backend_activation_key",
+            "_filter_by_activation",
+            "_activation_fallback_reason",
+        ):
+            function(path, helper, namespace)
+    resolved_oracle = load_moe_oracle(path, oracle_name, namespace)
+    setattr(namespace["oracle"], oracle_name, resolved_oracle)
+    if module == "int_wna16":
+        namespace["oracle"]._requested_activation_key = namespace[
+            "_requested_activation_key"
+        ]
+        namespace["oracle"]._activation_fallback_reason = namespace[
+            "_activation_fallback_reason"
+        ]
     namespace["_upstream_" + select_name] = function(path, select_name, namespace)
     if module in ("fp8", "int_wna16"):
         function(
@@ -288,13 +329,45 @@ def test_real_public_moe_selectors_preserve_ppu_format_boundary(
         assert result == (expected_backend, boundary.experts[format_name])
 
 
+@pytest.mark.parametrize("case", _MOE_SOURCE_CASES)
+def test_explicit_batched_ppu_requantization_source_never_selects_compute(case):
+    module, enum_name, oracle_name, select_name = case
+    placeholder = (object(), object())
+    config = SimpleNamespace(
+        moe_backend="ppu_deep_gemm",
+        activation_format=SimpleNamespace(is_batched=True),
+        is_lora_enabled=False,
+    )
+    oracle = SimpleNamespace(maybe_skip_for_requantization_source=lambda: placeholder)
+    provider = SimpleNamespace(kInt8StaticChannelSym=None, kInt8DynamicTokenSym=None)
+    setattr(provider, oracle_name, oracle)
+    env = {
+        "oracle": provider,
+        enum_name: SimpleNamespace(PPU_DEEPGEMM=object()),
+        "_PPU_ALIASES": ("ppu_deep_gemm",),
+    }
+    path = f"vllm_sail/registry/moe_backends/{module}.py"
+    if module == "fp8":
+        function(path, "_select_ppu_backend", env)
+    if module == "int_wna16":
+        function(path, "_select_batched_ppu_backend", env)
+    args = {
+        "unquantized": (),
+        "fp8": (None, None),
+        "int8": (None, None),
+        "int_wna16": (None, None, False, False),
+    }[module]
+    assert function(path, select_name, env)(config, *args) is placeholder
+
+
 def _real_unquantized_lora_selector(modules, boundary, accelerated):
-    """读取真实 selector/共享 oracle；仅替换设备准入及专家计算边界。"""
+    """Read real selector and shared oracle; replace only device gating and expert compute boundaries."""
     path = boundary.root / "oracle/unquantized.py"
     backend = function(path, "UnquantizedMoeBackend", {"Enum": Enum})
     events, logs = [], []
     platform = SimpleNamespace(
         is_tpu=lambda: False,
+        is_xpu=lambda: False,
         is_out_of_tree=lambda: False,
     )
 
@@ -440,7 +513,7 @@ def test_real_shared_oracle_observes_live_mapping_and_bf16_override(
 def test_wna16_bound_maker_uses_shared_format_guard_before_expert_construction(
     modules, moe_source_boundary, expert_format, input_format
 ):
-    """绑定真实 copied maker 和共享 helper；不声称完整模块安装或设备计算通过。"""
+    """Bind real copied maker and shared helpers; does not claim full module installation or device compute passes."""
     from vllm_sail.patch.bodies import bind_body
 
     boundary = moe_source_boundary
@@ -468,7 +541,7 @@ def test_wna16_bound_maker_uses_shared_format_guard_before_expert_construction(
         "make_moe_kernel",
         {
             "maybe_make_prepare_finalize": prepare_finalize,
-            "logger": ns(info_once=lambda *a: None),
+            "logger": ns(info_once=lambda *a: None, debug_once=lambda *a: None),
             "mk": ns(
                 FusedMoEKernel=lambda pf, experts: ns(
                     prepare_finalize=pf, experts=experts
@@ -480,6 +553,7 @@ def test_wna16_bound_maker_uses_shared_format_guard_before_expert_construction(
         ("cpu_moe", "CPUExpertsInt4"),
         ("int4_emulation_moe", "Int4EmulationTritonExperts"),
         ("rdna3_moe", "Rdna3WNA16Experts"),
+        ("rdna3_int4_int8_moe", "Rdna3Int4Int8Experts"),
         ("xpu_moe", "XPUExpertsWNA16"),
         ("zentorch_moe", "ZentorchExpertsWNA16"),
     ):
@@ -550,7 +624,7 @@ def test_wna16_bound_maker_uses_shared_format_guard_before_expert_construction(
 
 @pytest.fixture
 def nvfp4_factory_boundary(moe_source_boundary):
-    """真实 factory 与共享 helper；PF、专家构造和 tensor 计算是明确的外部边界。"""
+    """Real factory and shared helpers; prepare/finalize, expert construction, and tensor compute are explicit boundaries."""
     boundary = moe_source_boundary
     ns = SimpleNamespace
     path = boundary.root / "oracle/nvfp4.py"
@@ -600,7 +674,7 @@ def nvfp4_factory_boundary(moe_source_boundary):
         "make_moe_kernel",
         {
             "maybe_make_prepare_finalize": prepare_finalize,
-            "logger": ns(info_once=lambda *a: None),
+            "logger": ns(info_once=lambda *a: None, debug_once=lambda *a: None),
             "mk": ns(FusedMoEKernel=assemble),
         },
     )
@@ -633,6 +707,7 @@ def nvfp4_factory_boundary(moe_source_boundary):
 
 
 _NVFP4_BACKENDS = [
+    "NONE",
     "B12X",
     "FLASHINFER_TRTLLM",
     "FLASHINFER_CUTLASS",
@@ -791,7 +866,7 @@ def oracles():
 def test_imported_nvfp4_factory_has_real_shared_provider_and_safe_early_rejection(
     oracles, monkeypatch, backend_name
 ):
-    """真实模块及绑定，PF/计算不执行；在兼容 Torch 环境运行才有 provider 证据。"""
+    """Real modules and bindings without running prepare/finalize or compute; run in compatible Torch for provider evidence."""
     from vllm.model_executor.layers.fused_moe.oracle import base, nvfp4
 
     from vllm_sail.patch.utils import PATCH_MARKER
@@ -809,7 +884,7 @@ def test_imported_nvfp4_factory_has_real_shared_provider_and_safe_early_rejectio
     observed = []
 
     def forbidden_prepare(**kwargs):
-        pytest.fail("不支持的 per-token backend 不得创建 prepare/finalize")
+        pytest.fail("Unsupported per-token backend must not create prepare/finalize")
 
     monkeypatch.setattr(base, "maybe_make_prepare_finalize", forbidden_prepare)
     if backend in nvfp4.PER_TOKEN_NVFP4_MOE_BACKENDS:
@@ -857,7 +932,7 @@ def test_imported_nvfp4_factory_has_real_shared_provider_and_safe_early_rejectio
 
 @pytest.fixture
 def nvfp4_cpu_runtime(oracles):
-    """真实导入与 CPU tensor；不证明 installed wheel 归属、PPU 图或 native 计算。"""
+    """Real imports and CPU tensors; does not prove installed wheel ownership, PPU graphs, or native compute."""
     import torch
     from vllm.model_executor import utils
     from vllm.model_executor.layers.fused_moe import config
@@ -982,7 +1057,7 @@ def test_imported_nvfp4_incompatible_derived_reload_rebinds_without_changing_old
             dtype=torch.float64 if change == "dtype" else source.dtype,
             device="cpu",
         )
-        # 本例只改变 checkpoint 输入；derived 属性由真实 factory/refill 管理。
+        # Only checkpoint inputs vary here; derived attributes are managed by the real factory/refill.
         setattr(layer, name, torch.nn.Parameter(new, requires_grad=False))
     second = f.make(backend_name)
     for previous, snapshot, current, source, attr in zip(
@@ -1037,35 +1112,34 @@ def test_imported_requantization_scope_restores_context_and_skips_nvfp4_selectio
 ):
     from contextvars import Context
 
-    from vllm.model_executor.layers.fused_moe.experts.nvfp4_emulation_moe import (
-        Nvfp4QuantizationEmulationTritonExperts,
-    )
     from vllm.model_executor.layers.fused_moe.oracle import nvfp4
+    from vllm.model_executor.layers.fused_moe.oracle.base import (
+        RequantizationSourceExperts,
+    )
     from vllm.model_executor.layers.quantization.online import requantization as req
 
     def forbidden(*args, **kwargs):
-        pytest.fail("requantization source 不得进入普通 backend selection")
+        pytest.fail("Requantization source must not enter ordinary backend selection")
 
     monkeypatch.setattr(nvfp4, "prioritize_humming", forbidden)
-    monkeypatch.setattr(nvfp4, "NvFp4MoEKernelOracle", forbidden)
     error = RuntimeError("requantization source scope failed")
     assert not req.is_requantization_source()
     with pytest.raises(RuntimeError) as raised:
-        with req.requantization_source_scope():
+        with req.skip_checkpoint_backend_selection():
             assert req.is_requantization_source()
             assert not Context().run(req.is_requantization_source)
             assert nvfp4.select_nvfp4_moe_backend(object(), object(), object()) == (
-                nvfp4.NvFp4MoeBackend.EMULATION,
-                Nvfp4QuantizationEmulationTritonExperts,
+                nvfp4.NvFp4MoeBackend.NONE,
+                RequantizationSourceExperts,
             )
             if fail_inside == "inner":
                 with pytest.raises(RuntimeError) as nested:
-                    with req.requantization_source_scope():
+                    with req.skip_checkpoint_backend_selection():
                         assert req.is_requantization_source()
                         raise error
                 assert nested.value is error and req.is_requantization_source()
             else:
-                with req.requantization_source_scope():
+                with req.skip_checkpoint_backend_selection():
                     assert req.is_requantization_source()
                 assert req.is_requantization_source()
             raise error
@@ -1089,7 +1163,9 @@ def test_imported_requantization_release_keeps_runtime_parameters_and_loader(
     assert not method.create_requantization_source_weights(layer)
     assert method.requantization_source_parameters == {}
     calls = []
-    loader = object()
+
+    def loader(param, weight):
+        param.data.copy_(weight)
 
     def create_weights(target, *args, **kwargs):
         calls.append((target, args, kwargs))
@@ -1100,11 +1176,12 @@ def test_imported_requantization_release_keeps_runtime_parameters_and_loader(
 
     source = SimpleNamespace(create_weights=create_weights)
     method.set_requantization_source(source)
-    assert method.requantization_source is source and method.uses_meta_device is False
+    assert method.requantization_source is source
     assert method.create_requantization_source_weights(layer, 17, marker="checkpoint")
     assert calls == [(layer, (17,), {"marker": "checkpoint"})]
     tracked = dict(method.requantization_source_parameters)
     assert set(tracked) == {"serialized", "obsolete"}
+    assert all(value.is_meta for value in tracked.values())
     assert all(getattr(layer, name) is value for name, value in tracked.items())
     assert all(value.requantization_source is True for value in tracked.values())
     assert all(
@@ -1116,7 +1193,9 @@ def test_imported_requantization_release_keeps_runtime_parameters_and_loader(
         new = torch.tensor([3.0, 6.0], device="cpu")
         f.utils.replace_parameter(layer, "serialized", new)
         runtime = layer.serialized
-        assert runtime is not tracked["serialized"] and runtime.weight_loader is loader
+        assert runtime is not tracked["serialized"]
+        assert runtime.weight_loader is tracked["serialized"].weight_loader
+        assert runtime.weight_loader.__wrapped__ is loader
         assert not getattr(runtime, "requantization_source", False)
         torch.testing.assert_close(runtime, new)
     elif action == "removed":
@@ -1435,7 +1514,6 @@ def test_every_oracle_patch_records_original_and_rejects_reapplication(
                 module_name,
                 attribute,
                 reason=record.reason,
-                affected_versions=record.affected_versions,
                 remove_when=record.remove_when,
             )(replacement)
 
@@ -1530,7 +1608,7 @@ def test_select_unquantized_delegates_for_non_ppu_backends(
 def test_installed_unquantized_lora_preserves_real_selector_layout_guard(
     monkeypatch, oracles, format_name, backend_name
 ):
-    """真实安装的 provider/adapter 交界；专家替身不证明 LoRA 设备计算。"""
+    """Real installed provider/adapter boundary; expert doubles do not prove LoRA device compute."""
     plugin = oracles.unquantized
     _set_platform(monkeypatch, oracles, ppu=True)
     platform_type = type(oracles.current_platform)

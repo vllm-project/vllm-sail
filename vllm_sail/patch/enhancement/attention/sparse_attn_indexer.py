@@ -19,6 +19,12 @@ The fork makes three changes to ``SparseAttnIndexer``:
 The fork's module-level ``from vllm._ppu_ops import ppu_ops`` is what
 ``vllm_sail.ops`` replaces; importing it here ensures the custom op is
 registered before any forward call.
+
+Dense indexers call the module-level ``sparse_attn_indexer`` op directly
+(``models/kimi_k3/nvidia/dsa.py``), bypassing ``SparseAttnIndexer`` entirely.
+Two helper patches keep that path on the PPU kernels: ``mqa_logits_mx_inputs``
+caps FP4 producer weights to BF16, and the ``fp8_fp4_*`` logits helpers pin the
+BF16 output dtype SAIL emits.
 """
 
 from __future__ import annotations
@@ -34,11 +40,12 @@ from vllm.utils.deep_gemm import has_deep_gemm
 from vllm.utils.torch_utils import _encode_layer_name
 
 import vllm_sail.ops  # noqa: F401  (registers torch.ops.vllm.ppu_sparse_attn_indexer)
+import vllm_sail.utils.deep_gemm as _ppu_deep_gemm
 from vllm_sail.patch.bodies import bind_body
-from vllm_sail.patch.utils import patch
+from vllm_sail.patch.enhancement.dsa_indexer_gate import int8_indexer_active
+from vllm_sail.patch.utils import PATCH_MARKER, patch
 from vllm_sail.utils.deep_gemm import is_deep_gemm_supported
 
-_AFFECTED = ">=0.32.0,<0.33.0"
 _MODULE = "vllm.model_executor.layers.sparse_attn_indexer"
 
 logger = init_logger(__name__)
@@ -59,7 +66,6 @@ def _with_target_globals(fn):
         "DeepGEMM. The PPU op also publishes its required producer weights "
         "dtype, following SparseMQAIndexer's contract."
     ),
-    affected_versions=_AFFECTED,
     remove_when="upstream downgrades the missing-DeepGEMM error to a warning, or PPU always ships DeepGEMM.",
 )
 @_with_target_globals
@@ -79,6 +85,8 @@ def sparse_attn_indexer_init(
     candidate_blocks: torch.Tensor | None = None,
     candidate_block_size: int = 0,
     candidate_write: bool = False,
+    cache_layout: str | None = None,
+    skip_topk_buffer_clear: bool = False,
 ):
     # PPU MODIFICATION: begin
     # An out-of-class copied method has no implicit __class__ cell.
@@ -93,8 +101,16 @@ def sparse_attn_indexer_init(
     self.max_total_seq_len = max_total_seq_len
     self.topk_indices_buffer = topk_indices_buffer
     self.skip_k_cache_insert = skip_k_cache_insert
+    # Set when the caller already filled topk_indices_buffer[:num_tokens]
+    # with -1 earlier in the forward.
+    self.skip_topk_buffer_clear = skip_topk_buffer_clear
     self.use_fp4_cache = use_fp4_cache
     self.compress_ratio = compress_ratio
+    # Physical layout override for the insert/gather kernels ("NORMAL" =
+    # block-flat), for caches whose layout cannot be inferred from the
+    # tensor alone, e.g. a strided section view of a larger allocation.
+    # None keeps the wrappers' block-size-based auto-selection.
+    self.cache_layout = cache_layout
     # v4.1 two-level selection: the candidate source indexer writes the
     # top candidate blocks here; later indexers mask their scores with it.
     self.candidate_blocks = candidate_blocks
@@ -120,12 +136,13 @@ def sparse_attn_indexer_init(
     # PPU MODIFICATION: end
     parallel_config = vllm_config.parallel_config
     self.topk_backend = vllm_config.kernel_config.sparse_indexer_topk_backend
+    get_indexer_topk(self.topk_backend)
     self.logits_dtype = STR_DTYPE_TO_TORCH_DTYPE[
         vllm_config.attention_config.resolve_indexer_logits_dtype("float32")
     ]
     # PPU MODIFICATION: begin
     if current_platform.is_ppu():
-        # SAIL 默认保留 MXFP4 的 BF16 与 FP8/INT8 的 FP32 原生归约。
+        # SAIL defaults to native BF16 reduction for MXFP4 and native FP32 reduction for FP8/INT8.
         default = "bfloat16" if use_fp4_cache else "float32"
         self.logits_dtype = STR_DTYPE_TO_TORCH_DTYPE[
             vllm_config.attention_config.resolve_indexer_logits_dtype(default)
@@ -141,6 +158,27 @@ def sparse_attn_indexer_init(
     self.dcp_rank = get_dcp_group().rank_in_group if self.dcp_world_size > 1 else 0
     self.use_pcp = parallel_config.prefill_context_parallel_size > 1
     self.pcp_shard_decode_requests = parallel_config.pcp_shard_decode_requests
+    self.dcp_direct_topk_max_rows = 0
+    if (
+        self.dcp_world_size > 1
+        and not self.use_pcp
+        # PPU MODIFICATION: begin
+        and not current_platform.is_ppu()
+        # PPU MODIFICATION: end
+        and parallel_config.dcp_comm_backend == "a2a"
+        and not parallel_config.use_ubatching
+        and current_platform.is_cuda()
+        and has_cutedsl()
+    ):
+        from vllm.v1.attention.ops.dcp import get_dcp_workspace_max_num_tokens
+
+        # Rendezvous now, while every rank is constructing the model.
+        max_rows = get_dcp_workspace_max_num_tokens(vllm_config)
+        workspace = _get_direct_dcp_topk_workspace(
+            topk_indices_buffer.device, max_rows, topk_tokens
+        )
+        if workspace is not None:
+            self.dcp_direct_topk_max_rows = max_rows
     # PPU MODIFICATION: begin
     self._cp_kv_cache_interleave_size: int | None = None
     # PPU MODIFICATION: end
@@ -191,6 +229,192 @@ def sparse_attn_indexer_init(
 
 
 _upstream_forward_native = _indexer.SparseAttnIndexer.forward_native
+_upstream_mqa_logits_mx_inputs = _indexer.mqa_logits_mx_inputs
+
+
+@patch(
+    _MODULE,
+    "mqa_logits_mx_inputs",
+    reason=(
+        "PPU's MXFP4 MQA logits kernels require BF16 weights, but upstream "
+        "gates the weights cast behind mqa_logits_use_mx_scales(), which is "
+        "SM100-only; on PPU (capability 89) FP32 producer weights pass "
+        "through and the SAIL DeepGEMM kernel rejects them. Cast FP32 "
+        "weights to BF16 for FP4 queries (non-None q_scale); FP8 queries "
+        "(q_scale folded into FP32 weights) are untouched. The signature "
+        "follows upstream's ``logits_dtype`` (the dtype its SM100 kernels "
+        "reduce in) and forwards it, but PPU's SAIL kernels emit BF16 logits "
+        "whatever it says, so the signalled dtype cannot be honoured here."
+    ),
+    remove_when="mqa_logits_use_mx_scales() covers PPU, or the cast moves out of the SM100 gate.",
+)
+def mqa_logits_mx_inputs_ppu(q, q_scale, weights, logits_dtype=torch.float32):
+    result = _upstream_mqa_logits_mx_inputs(q, q_scale, weights, logits_dtype)
+    if q_scale is None or not current_platform.is_ppu():
+        return result
+    q_scale_out, weights_out = result
+    if weights_out.dtype != torch.bfloat16:
+        weights_out = weights_out.to(torch.bfloat16)
+    return q_scale_out, weights_out
+
+
+_upstream_fp8_fp4_mqa_logits = _indexer.fp8_fp4_mqa_logits
+_upstream_fp8_fp4_paged_mqa_logits = _indexer.fp8_fp4_paged_mqa_logits
+
+_LOGITS_PIN_REASON = (
+    "Upstream's weighted MXFP4 logits take a ``logits_dtype`` that defaults to "
+    "FP32, while SAIL's MXFP4 kernels emit BF16 only (and reject an unsupported "
+    "requested dtype). Pin BF16 for PPU's packed-FP4 queries, whose Q reaches "
+    "the kernel as int8 values with int32 scales, and let upstream's "
+    "``as_fp32_logits`` upcast when its own path needs FP32. Legacy FP8 "
+    "queries (indexer_kv_dtype=\"fp8\"; Q is float8_e4m3fn with q_scale "
+    "folded into FP32 weights) dispatch to SAIL's FP8 kernels, which keep "
+    "FP32 weights and emit FP32 logits."
+)
+_LOGITS_PIN_REMOVE_WHEN = (
+    "SAIL's MXFP4 logits emit FP32, or upstream resolves the logits dtype "
+    "through the platform instead of a single default."
+)
+
+
+def fp8_fp4_mqa_logits_ppu(
+    q,
+    kv,
+    weights,
+    cu_seqlen_ks,
+    cu_seqlen_ke,
+    max_seqlen_k=None,
+    logits_dtype=torch.float32,
+):
+    if not current_platform.is_ppu():
+        return _upstream_fp8_fp4_mqa_logits(
+            q,
+            kv,
+            weights,
+            cu_seqlen_ks,
+            cu_seqlen_ke,
+            max_seqlen_k,
+            logits_dtype=logits_dtype,
+        )
+    # Q reaches the kernel either as int8-packed FP4 values with int32 scales
+    # or as FP8 values with per-token scales folded into FP32 weights
+    # (q_scale=None). MXFP4 requires BF16 producer weights and emits BF16
+    # logits; the FP8 kernel keeps FP32 weights and emits FP32 logits.
+    q_values = q[0] if isinstance(q, tuple) else q
+    if q_values.dtype != torch.int8:
+        return _ppu_deep_gemm.fp8_mqa_logits(
+            q_values,
+            kv,
+            weights,
+            cu_seqlen_ks,
+            cu_seqlen_ke,
+            clean_logits=False,
+            max_seqlen_k=max_seqlen_k if max_seqlen_k else 0,
+        )
+    if weights.dtype != torch.bfloat16:
+        weights = weights.to(torch.bfloat16)
+    return _ppu_deep_gemm.fp8_fp4_mqa_logits(
+        q,
+        kv,
+        weights,
+        cu_seqlen_ks,
+        cu_seqlen_ke,
+        clean_logits=False,
+        logits_dtype=torch.bfloat16,
+        max_seqlen_k=max_seqlen_k,
+    )
+
+
+def fp8_fp4_paged_mqa_logits_ppu(
+    q,
+    kv_cache,
+    weights,
+    context_lens,
+    block_tables,
+    schedule_metadata,
+    max_model_len=None,
+    logits_dtype=torch.float32,
+    indices=None,
+):
+    if not current_platform.is_ppu():
+        return _upstream_fp8_fp4_paged_mqa_logits(
+            q,
+            kv_cache,
+            weights,
+            context_lens,
+            block_tables,
+            schedule_metadata,
+            max_model_len,
+            logits_dtype=logits_dtype,
+            indices=indices,
+        )
+    q_values = q[0] if isinstance(q, tuple) else q
+    if q_values.dtype != torch.int8:
+        # Legacy FP8 Q: SAIL's FP8 paged kernel keeps FP32 weights, ignores
+        # request indices (the metadata builder already drops them), and
+        # emits FP32 logits.
+        return _ppu_deep_gemm.fp8_paged_mqa_logits(
+            q_values,
+            kv_cache,
+            weights,
+            context_lens,
+            block_tables,
+            schedule_metadata,
+            max_model_len,
+            clean_logits=False,
+        )
+    if weights.dtype != torch.bfloat16:
+        weights = weights.to(torch.bfloat16)
+    if indices is None:
+        # SAIL's paged kernel needs request ownership per query row; the indexer
+        # metadata builder supplies it whenever it selects varlen decode.
+        raise ValueError("SAIL paged MXFP4 logits require request indices on PPU")
+    return _ppu_deep_gemm.fp8_fp4_paged_mqa_logits(
+        q,
+        kv_cache,
+        weights,
+        context_lens,
+        block_tables,
+        schedule_metadata,
+        max_model_len,
+        clean_logits=False,
+        logits_dtype=torch.bfloat16,
+        indices=indices,
+    )
+
+
+def _install_logits_dtype_pin() -> None:
+    """Pin the FP4 logits dtype unless the int8 indexer patch owns these names.
+
+    SM80-class PPUs load ``enhancement.models.kimi_k3_dsa_indexer``, which
+    patches both names for its int8 scoring path and accepts arbitrary keyword
+    arguments already; a second registration would trip the double-patch guard.
+    The shared gate answers for that patch's *effective* mode: when its int8
+    path is downgraded (an older DeepGEMM without the int8 kernels), the FP8
+    path here is the live one and this pin must stay installed.
+    """
+    if int8_indexer_active():
+        return
+    for name, replacement in (
+        ("fp8_fp4_mqa_logits", fp8_fp4_mqa_logits_ppu),
+        ("fp8_fp4_paged_mqa_logits", fp8_fp4_paged_mqa_logits_ppu),
+    ):
+        if getattr(getattr(_indexer, name), PATCH_MARKER, None) is not None:
+            logger.info(
+                "Keeping the existing %s patch; it already selects the PPU "
+                "logits dtype.",
+                name,
+            )
+            continue
+        patch(
+            _MODULE,
+            name,
+            reason=_LOGITS_PIN_REASON,
+            remove_when=_LOGITS_PIN_REMOVE_WHEN,
+        )(replacement)
+
+
+_install_logits_dtype_pin()
 
 
 @patch(
@@ -201,7 +425,6 @@ _upstream_forward_native = _indexer.SparseAttnIndexer.forward_native
         "before the CUDA branch, so the disabled-custom-op path also uses the "
         "PPU kernel; other platforms delegate to the upstream implementation."
     ),
-    affected_versions=_AFFECTED,
     remove_when="upstream's forward_native grows a platform hook, or PPU stops overriding this op.",
 )
 def sparse_attn_indexer_forward_native(
@@ -227,7 +450,6 @@ def sparse_attn_indexer_forward_native(
         "custom_op_dispatch patch (enabled path) or the forward_native redirect "
         "(disabled path)."
     ),
-    affected_versions=_AFFECTED,
     remove_when="upstream adds a forward_ppu hook and the PPU op moves into the dispatch ladder.",
 )
 def sparse_attn_indexer_forward_ppu(

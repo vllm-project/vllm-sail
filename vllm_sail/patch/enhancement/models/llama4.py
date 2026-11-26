@@ -14,8 +14,6 @@ from vllm.model_executor.models.llama4 import Llama4MoE
 
 from vllm_sail.patch.utils import patch
 
-_AFFECTED = ">=0.32.0,<0.33.0"
-
 # Captured before patching; torch.compile is lazy, so this is cheap at
 # import time and mirrors the fork's decorator placement.
 _upstream_custom_routing_function = Llama4MoE.custom_routing_function
@@ -31,7 +29,6 @@ _compiled_custom_routing_function = torch.compile(_upstream_custom_routing_funct
         "is a graph break. Delegates by calling the compiled upstream "
         "function."
     ),
-    affected_versions=_AFFECTED,
     remove_when=(
         "upstream applies torch.compile to Llama4MoE.custom_routing_function "
         "itself."

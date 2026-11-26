@@ -14,7 +14,6 @@ from vllm_sail import envs
 ROOT = Path(envs.__file__).resolve().parents[1]
 PATCH_ROOT = ROOT / "vllm_sail/patch"
 SKIP_DIRS = frozenset({"template", "__pycache__"})
-SUPPORTED_RANGE = ">=0.32.0,<0.33.0"
 FUNC_NODES = (ast.FunctionDef, ast.AsyncFunctionDef)
 DEF_NODES = (*FUNC_NODES, ast.ClassDef)
 BLOCK_NODES = (ast.If, ast.Try, ast.ExceptHandler, ast.For, ast.While, ast.With)
@@ -311,5 +310,16 @@ def compatibility_problems(replacement: ast.AST, upstream: ast.AST) -> list[str]
                         f"{len(call_args)} positional, keywords {sorted(call_kwargs)}: {exc}"
                     )
                     continue
+                # Older inspect versions can leave a required positional-only
+                # parameter unbound when its name was passed through **kwargs.
+                for param in rep.parameters.values():
+                    if (
+                        param.kind is inspect.Parameter.POSITIONAL_ONLY
+                        and param.default is inspect.Parameter.empty
+                        and param.name not in bound.arguments
+                    ):
+                        problems.append(
+                            f"missing required positional-only argument {param.name!r}"
+                        )
                 problems.extend(bound_value_problems(original, bound))
     return sorted(set(problems))

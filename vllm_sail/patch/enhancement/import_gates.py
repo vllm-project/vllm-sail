@@ -21,8 +21,6 @@ from vllm.utils import import_utils
 
 from vllm_sail.patch.utils import PATCH_MARKER, patch
 
-_AFFECTED = ">=0.32.0,<0.33.0"
-
 _upstream_has_cutedsl = import_utils.has_cutedsl
 _upstream_has_humming = import_utils.has_humming
 
@@ -36,7 +34,6 @@ _upstream_has_humming = import_utils.has_humming
         "declares PlatformEnum.CUDA, so vLLM would select CuTeDSL kernels that "
         "fail at launch."
     ),
-    affected_versions=_AFFECTED,
     remove_when="PPU gains CuTeDSL support, or upstream gates this on a real device capability.",
 )
 def has_cutedsl() -> bool:
@@ -49,7 +46,6 @@ def has_cutedsl() -> bool:
     "vllm.utils.import_utils",
     "has_humming",
     reason=("Humming kernels do not run on PPU; same reasoning as has_cutedsl above."),
-    affected_versions=_AFFECTED,
     remove_when="PPU gains Humming support, or upstream gates this on a real device capability.",
 )
 def has_humming() -> bool:
@@ -60,12 +56,15 @@ def has_humming() -> bool:
 
 _CONSUMERS = {
     "has_cutedsl": (
+        "vllm.model_executor.layers.sparse_attn_indexer",
         "vllm.models.deepseek_v4.common.ops.cache_utils",
         "vllm.models.deepseek_v4.common.ops.fused_indexer_q",
-        "vllm.model_executor.layers.sparse_attn_indexer",
         "vllm.models.deepseek_v41.common.ops.cache_utils",
         "vllm.models.deepseek_v41.nvidia.flash_mla_mega_attn",
+        "vllm.models.deepseek_v41.nvidia.ops.mhc",
         "vllm.models.glm5next.nvidia.sparse_indexer",
+        "vllm.models.kimi_k3.nvidia.ops.dcp_topk_merge",
+        "vllm.v1.attention.ops.dcp",
     ),
     "has_humming": (
         "vllm.model_executor.kernels.linear.mixed_precision.humming",
@@ -76,7 +75,6 @@ _CONSUMERS = {
         "vllm.model_executor.kernels.linear.scaled_mm.humming",
         "vllm.model_executor.layers.fused_moe.experts.fused_humming_moe",
         "vllm.model_executor.layers.quantization.utils.humming.moe",
-        "vllm.model_executor.layers.quantization.utils.humming.schema",
     ),
 }
 
@@ -93,7 +91,6 @@ def _rebind_loaded_consumers():
                 consumer,
                 name,
                 reason="A preloaded consumer must observe the PPU optional-kernel gate.",
-                affected_versions=_AFFECTED,
                 remove_when="vLLM resolves optional-kernel probes through their provider module.",
             )(replacement)
 

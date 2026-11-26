@@ -25,6 +25,7 @@ def upstream_constructor(
     """Strict external constructor contract; the registered adapter runs intact."""
     record_ctor(self, config, vllm_config, prefix, aux_stream, run_gemm_rs_ar)  # noqa: F821
     self.model_config = vllm_config.model_config
+    self.use_recoverssm = False
     self.local_num_heads = config.num_heads // 8
     self.head_dim = 128
     backend = resolve_kda_prefill_backend(  # noqa: F821
@@ -90,12 +91,25 @@ def kda_constructor(modules):
             def _forward(self, *args):
                 raise AssertionError("forward is not part of constructor test")
 
-            def get_kv_cache_spec(self, config):
-                return CacheSpec()
+            def get_kv_cache_checkpoint_alignment(self, config):
+                return 128
 
             def get_state_dtype(self):
                 return "bf16", "fp32"
 
+            def _recoverssm_verify(self, *args):
+                raise AssertionError("verify is not part of constructor test")
+
+        class CommitContext:
+            @classmethod
+            def create(cls, layers, **kwargs):
+                raise AssertionError("commit is not part of constructor test")
+
+        modules("vllm.models.kimi_k3.nvidia.kda_metadata", NULL_BLOCK_ID=0)
+        modules(
+            "vllm.models.kimi_k3.nvidia.ops.recoverssm",
+            KDARecoverSSMCommitContext=CommitContext,
+        )
         provider = modules(
             "vllm.models.kimi_k3.nvidia.kda",
             KimiK3DeltaAttention=Attention,
@@ -207,8 +221,6 @@ def test_cache_spec_keeps_unrelated_fields(kda_constructor, backend):
     c = kda_constructor()
     config, cfg = configs(backend)
     layer = c.provider.KimiK3DeltaAttention(config, cfg)
-    spec = layer.get_kv_cache_spec(cfg)
-    assert spec.retained == "unchanged"
-    assert (spec.num_prefill_checkpoint_blocks, spec.prefill_checkpoint_alignment) == (
-        (0, None) if backend == "flashkda" else (3, 128)
+    assert layer.get_kv_cache_checkpoint_alignment(cfg) == (
+        None if backend == "flashkda" else 128
     )

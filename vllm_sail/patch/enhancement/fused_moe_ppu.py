@@ -57,7 +57,6 @@ _QUANTIZE_INPUT_CONSUMERS = tuple(
         "prepare_finalize.no_dp_ep",
     )
 ) + ("vllm.model_executor.models.k2_horizon",)
-AFFECTED_VERSIONS = ">=0.32.0,<0.33.0"
 
 REASON_DTYPE_STR = (
     "PPU int8 W8A8 MoE flows look up tuned configs by the name int8_w8a8; "
@@ -105,43 +104,36 @@ METADATA = (
     (
         f"{_CONFIG_MODULE}._get_config_dtype_str",
         REASON_DTYPE_STR,
-        AFFECTED_VERSIONS,
         REMOVE_WHEN_DTYPE_STR,
     ),
     (
         f"{_CONFIG_MODULE}.int8_w8a8_moe_quant_config",
         REASON_INT8_CONFIG,
-        AFFECTED_VERSIONS,
         REMOVE_WHEN_INT8_CONFIG,
     ),
     (
         f"{_INT8_ORACLE_MODULE}.make_int8_moe_quant_config",
         REASON_INT8_CONFIG,
-        AFFECTED_VERSIONS,
         REMOVE_WHEN_INT8_CONFIG,
     ),
     (
         f"{_UTILS_MODULE}.moe_kernel_quantize_input",
         REASON_MXFP4_QUANTIZE,
-        AFFECTED_VERSIONS,
         REMOVE_WHEN_MXFP4_QUANTIZE,
     ),
     (
         f"{_TRITON_MODULE}.TritonExperts.moe_sum",
         REASON_MOE_SUM,
-        AFFECTED_VERSIONS,
         REMOVE_WHEN_MOE_SUM,
     ),
     (
         f"{_NAIVE_DP_EP_MODULE}._quantize_and_setup_dispatch",
         REASON_MXFP4_DISPATCH,
-        AFFECTED_VERSIONS,
         REMOVE_WHEN_MXFP4_DISPATCH,
     ),
     (
         f"{_NAIVE_DP_EP_MODULE}._unwrap_scale_and_prepare_for_moe",
         REASON_MXFP4_DISPATCH,
-        AFFECTED_VERSIONS,
         REMOVE_WHEN_MXFP4_DISPATCH,
     ),
 )
@@ -165,7 +157,6 @@ def _rebind_loaded_quantize_input_aliases(original, replacement) -> None:
                     "Preloaded MoE consumers retain the upstream quantizer and "
                     "bypass PPU MXFP4 input quantization."
                 ),
-                affected_versions=AFFECTED_VERSIONS,
                 remove_when=REMOVE_WHEN_MXFP4_QUANTIZE,
             )(replacement)
 
@@ -191,7 +182,6 @@ def install() -> None:
         _CONFIG_MODULE,
         "_get_config_dtype_str",
         reason=REASON_DTYPE_STR,
-        affected_versions=AFFECTED_VERSIONS,
         remove_when=REMOVE_WHEN_DTYPE_STR,
     )
     def _get_config_dtype_str(
@@ -214,7 +204,6 @@ def install() -> None:
         _CONFIG_MODULE,
         "int8_w8a8_moe_quant_config",
         reason=REASON_INT8_CONFIG,
-        affected_versions=AFFECTED_VERSIONS,
         remove_when=REMOVE_WHEN_INT8_CONFIG,
     )
     def _int8_w8a8_moe_quant_config(
@@ -231,7 +220,6 @@ def install() -> None:
         _INT8_ORACLE_MODULE,
         "make_int8_moe_quant_config",
         reason=REASON_INT8_CONFIG,
-        affected_versions=AFFECTED_VERSIONS,
         remove_when=REMOVE_WHEN_INT8_CONFIG,
     )
     def _make_int8_moe_quant_config(
@@ -243,6 +231,7 @@ def install() -> None:
         w1_bias=None,
         w2_bias=None,
         per_act_token_quant: bool = False,
+        per_out_ch_quant: bool = False,
         layer=None,
         swiglu_limit: float | None = None,
         gemm1_alpha: float | None = None,
@@ -257,6 +246,7 @@ def install() -> None:
                 a1_scale=a1_scale,
                 a2_scale=a2_scale,
                 per_act_token_quant=per_act_token_quant,
+                per_out_ch_quant=per_out_ch_quant,
                 gemm1_clamp_limit=swiglu_limit,
                 gemm1_alpha=gemm1_alpha,
                 gemm1_beta=gemm1_beta,
@@ -272,6 +262,7 @@ def install() -> None:
             w1_bias=w1_bias,
             w2_bias=w2_bias,
             per_act_token_quant=per_act_token_quant,
+            per_out_ch_quant=per_out_ch_quant,
             layer=layer,
         )
 
@@ -279,7 +270,6 @@ def install() -> None:
         _UTILS_MODULE,
         "moe_kernel_quantize_input",
         reason=REASON_MXFP4_QUANTIZE,
-        affected_versions=AFFECTED_VERSIONS,
         remove_when=REMOVE_WHEN_MXFP4_QUANTIZE,
     )
     def _moe_kernel_quantize_input(
@@ -322,7 +312,6 @@ def install() -> None:
         _NAIVE_DP_EP_MODULE,
         "_quantize_and_setup_dispatch",
         reason=REASON_MXFP4_DISPATCH,
-        affected_versions=AFFECTED_VERSIONS,
         remove_when=REMOVE_WHEN_MXFP4_DISPATCH,
     )
     def _quantize_and_setup_dispatch(a1, quant_config, defer_input_quant=False):
@@ -354,7 +343,6 @@ def install() -> None:
         _NAIVE_DP_EP_MODULE,
         "_unwrap_scale_and_prepare_for_moe",
         reason=REASON_MXFP4_DISPATCH,
-        affected_versions=AFFECTED_VERSIONS,
         remove_when=REMOVE_WHEN_MXFP4_DISPATCH,
     )
     def _unwrap_scale_and_prepare_for_moe(scales, quant_config):
@@ -382,7 +370,6 @@ def install() -> None:
         _TRITON_MODULE,
         "TritonExperts.moe_sum",
         reason=REASON_MOE_SUM,
-        affected_versions=AFFECTED_VERSIONS,
         remove_when=REMOVE_WHEN_MOE_SUM,
     )
     def _moe_sum(

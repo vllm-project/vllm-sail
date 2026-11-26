@@ -21,10 +21,11 @@ def test_registered_finalize_retains_ordinary_ppu_path(modules, ppu):
             return result
 
     def unavailable(*args, **kwargs):
-        raise AssertionError("本 finalize 用例不应进入 MLP、GEMM-RS 或 norm")
+        raise AssertionError("This finalize case must not enter MLP, GEMM-RS, or norm")
 
     modules(
         "vllm.models.minimax_m3.nvidia.model",
+        GateLinear=unavailable,
         MiniMaxM3Model=Model,
         MiniMaxM3MLP=type("MLP", (), {}),
         MiniMAXGemmaRMSNorm=type("Norm", (), {"forward": unavailable}),

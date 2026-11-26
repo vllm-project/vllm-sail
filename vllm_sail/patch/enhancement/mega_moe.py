@@ -7,7 +7,6 @@ import sys
 
 from vllm_sail.patch.utils import patch
 
-_AFFECTED = ">=0.32.0,<0.33.0"
 _REASON = "SAIL MegaMoE needs MXFP4 dispatch and PPU-specific scale layouts."
 _REMOVE_WHEN = "vLLM supports selecting an out-of-tree MegaMoE expert backend."
 _EXPERT_CONSUMERS = (
@@ -37,7 +36,6 @@ def install() -> None:
         deep_gemm_mega_moe.__name__,
         "DeepGemmMegaMoEExperts",
         reason=_REASON,
-        affected_versions=_AFFECTED,
         remove_when=_REMOVE_WHEN,
     )(PPUDeepGemmMegaMoEExperts)
 
@@ -52,7 +50,6 @@ def install() -> None:
                 module_name,
                 "DeepGemmMegaMoEExperts",
                 reason=_REASON,
-                affected_versions=_AFFECTED,
                 remove_when=_REMOVE_WHEN,
             )(PPUDeepGemmMegaMoEExperts)
     _installed = True

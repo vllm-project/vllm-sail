@@ -105,7 +105,7 @@ def test_deep_gemm_helpers_are_rebound_to_the_ppu_wrapper(
 def test_ppu_deep_gemm_consumers_do_not_probe_cuda_jit_compiler(
     monkeypatch, installed, module_name, enabled
 ):
-    """验证真实安装的按值绑定；不启动 nvcc，也不声明 PPU DeepGEMM 计算可用。"""
+    """Verify real installed by-value bindings; does not invoke nvcc or claim PPU DeepGEMM compute support."""
     import vllm.utils.deep_gemm as cuda_deep_gemm
     from vllm.platforms import current_platform
 
@@ -158,15 +158,21 @@ def test_ppu_deep_gemm_warmup_gate(monkeypatch: pytest.MonkeyPatch, installed) -
 
     assert kw_patch._ppu_deep_gemm_warmup_enabled() is True
 
-    monkeypatch.setenv("VLLM_PPU_MOE_BACKEND", "deepgemm")
+    # The gate reads the canonical VLLM_SAIL_* names, which take precedence
+    # over their VLLM_PPU_* aliases — a host that exports the canonical names
+    # (e.g. a serving env) must not leak into these assertions.
+    monkeypatch.delenv("VLLM_SAIL_DENSE_BF16_DEEPGEMM", raising=False)
+    monkeypatch.delenv("VLLM_PPU_DENSE_BF16_DEEPGEMM", raising=False)
+
+    monkeypatch.setenv("VLLM_SAIL_MOE_BACKEND", "deepgemm")
     assert kw_patch._ppu_deep_gemm_warmup_enabled() is True
 
-    monkeypatch.setenv("VLLM_PPU_MOE_BACKEND", "acext")
-    monkeypatch.setenv("VLLM_PPU_DENSE_BACKEND", "acext")
+    monkeypatch.setenv("VLLM_SAIL_MOE_BACKEND", "acext")
+    monkeypatch.setenv("VLLM_SAIL_DENSE_BACKEND", "acext")
     assert kw_patch._ppu_deep_gemm_warmup_enabled() is False
 
     # Either selector allowing DeepGEMM is enough.
-    monkeypatch.setenv("VLLM_PPU_DENSE_BACKEND", "deepgemm")
+    monkeypatch.setenv("VLLM_SAIL_DENSE_BACKEND", "deepgemm")
     assert kw_patch._ppu_deep_gemm_warmup_enabled() is True
 
 
@@ -220,7 +226,6 @@ def test_kernel_warmup_delegates_off_ppu_and_runs_ppu_warmup_on_ppu(
     )
     for name in (
         "qwen_vl_triton_warmup",
-        "mamba_triton_warmup",
         "replayssm_lifecycle_warmup",
         "_warmup_gemm_rs_ar",
         "_warmup_flashinfer_attention",

@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Retain ordinary MiniMax MoE finalize on PPU."""
+"""Adapt MiniMax M3 initialization, norm and router selection for PPU."""
 
 from vllm.models.minimax_m3.nvidia import model as _model
 from vllm.models.minimax_m3.nvidia.model import MiniMaxM3Model
@@ -10,6 +10,7 @@ from vllm_sail.patch.bodies import bind_body
 from vllm_sail.patch.utils import patch
 
 _original_init = MiniMaxM3Model._init_fused_moe_finalize
+_original_gate_linear = _model.GateLinear
 _original_mlp_init = _model.MiniMaxM3MLP.__init__
 _original_supports_qkv_fused_epilogue = _model._supports_qkv_fused_epilogue
 _original_maybe_init_gemm_rs = _model._maybe_init_gemm_rs
@@ -20,9 +21,30 @@ _ppu_mlp_init = bind_body(_mlp_body, _model)
 
 @patch(
     "vllm.models.minimax_m3.nvidia.model",
+    "GateLinear",
+    reason="MiniMax fixes the gate weight to FP32. BF16 weights let the upstream unquantized router GEMM consume BF16 activations and return FP32 logits on PPU.",
+    remove_when="MiniMax exposes a router weight dtype choice independently of the FP32 logits dtype.",
+)
+def make_gate_linear(*args, **kwargs):
+    if (
+        current_platform.is_ppu()
+        and not _model.envs.VLLM_BATCH_INVARIANT
+        and _model.torch.get_default_dtype() == _model.torch.bfloat16
+        and len(args) <= 2
+        and not kwargs.get("bias", False)
+        and kwargs.get("quant_config") is None
+        and not kwargs.get("force_fp32_compute", False)
+        and kwargs.get("params_dtype") == _model.torch.float32
+        and kwargs.get("out_dtype") == _model.torch.float32
+    ):
+        kwargs["params_dtype"] = _model.torch.bfloat16
+    return _original_gate_linear(*args, **kwargs)
+
+
+@patch(
+    "vllm.models.minimax_m3.nvidia.model",
     "_supports_qkv_fused_epilogue",
     reason="MiniMax imports NVIDIA MXFP8 kernel providers before checking the device. PPU channelwise FP8/INT8 projections use the ordinary GEMM and SAIL attention path.",
-    affected_versions=">=0.32.0,<0.33.0",
     remove_when="MiniMax checks platform capability before importing the NVIDIA-only QKV fused-epilogue providers.",
 )
 def supports_qkv_fused_epilogue(attn):
@@ -35,7 +57,6 @@ def supports_qkv_fused_epilogue(attn):
     "vllm.models.minimax_m3.nvidia.model",
     "MiniMaxM3MLP.__init__",
     reason="The dense MLP eagerly imports an SM100-only MXFP8 optimization before checking its capability. PPU keeps the original linear and activation path without importing NVIDIA kernels.",
-    affected_versions=">=0.32.0,<0.33.0",
     remove_when="MiniMax dense MLP gates the NVIDIA-only optimization import through a platform capability, or PPU implements that optimization.",
 )
 def init_mlp(
@@ -67,7 +88,6 @@ def init_mlp(
     "vllm.models.minimax_m3.nvidia.model",
     "_maybe_init_gemm_rs",
     reason="MiniMax GEMM-RS imports SM100 CuTeDSL before its capability check. PPU retains sequence parallel with ordinary GEMM and reduce-scatter.",
-    affected_versions=">=0.32.0,<0.33.0",
     remove_when="MiniMax resolves GEMM-RS through a platform capability before importing CuTeDSL.",
 )
 def maybe_init_gemm_rs(vllm_config, use_sequence_parallel):
@@ -80,7 +100,6 @@ def maybe_init_gemm_rs(vllm_config, use_sequence_parallel):
     "vllm.models.minimax_m3.nvidia.model",
     "_bind_gemm_rs",
     reason="Explicit GEMM-RS constructor flags must not import NVIDIA CuTeDSL on PPU; a None binding preserves the real reduce-scatter fallback.",
-    affected_versions=">=0.32.0,<0.33.0",
     remove_when="The GEMM-RS binding is platform-aware before importing NVIDIA dependencies.",
 )
 def bind_gemm_rs(linear):
@@ -93,7 +112,6 @@ def bind_gemm_rs(linear):
     "vllm.models.minimax_m3.nvidia.model",
     "MiniMAXGemmaRMSNorm.forward",
     reason="The new 2-D norm imports the NVIDIA ops package, whose initializer eagerly imports CuTeDSL. PPU retains the existing unquantized Gemma norm contract.",
-    affected_versions=">=0.32.0,<0.33.0",
     remove_when="The Triton norm can be imported without NVIDIA-only package initialization and is verified on PPU.",
 )
 def norm_forward(self, x, residual=None, mxfp8=False):
@@ -113,7 +131,6 @@ def norm_forward(self, x, residual=None, mxfp8=False):
     "vllm.models.minimax_m3.nvidia.model",
     "MiniMaxM3Model._init_fused_moe_finalize",
     reason="PPU inherits CUDA identity but does not implement NVIDIA's collective MoE finalize kernel or its dependencies.",
-    affected_versions=">=0.32.0,<0.33.0",
     remove_when="MiniMax gates fused finalize through a platform implementation capability or PPU implements and verifies that collective kernel.",
 )
 def init_fused_moe_finalize(self, vllm_config):

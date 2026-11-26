@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""真实 ShardQ producer 保留 cache 几何并重编号紧凑查询与 positions。"""
+"""Real ShardQ producer preserves cache geometry and renumbers compact queries and positions."""
 
 import ast
 from types import SimpleNamespace as NS
@@ -8,7 +8,7 @@ import pytest
 
 
 class Values:
-    """CPU buffer 边界替身；numpy() 返回可写共享视图，不复制输出。"""
+    """CPU buffer boundary double; numpy() returns a writable shared view without copying outputs."""
 
     def __init__(self, values):
         import numpy as np

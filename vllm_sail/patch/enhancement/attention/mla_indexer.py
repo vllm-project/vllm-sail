@@ -55,7 +55,6 @@ from vllm.v1.attention.backends.mla.indexer import (
 import vllm_sail.utils.deep_gemm as _ppu_deep_gemm
 from vllm_sail.patch.utils import patch, patch_value
 
-_AFFECTED = ">=0.32.0,<0.33.0"
 _MODULE = "vllm.v1.attention.backends.mla.indexer"
 
 #: Builder currently inside ``build``. The rebound paged-MQA-logits metadata
@@ -72,7 +71,6 @@ patch_value(
         "Fork constant: thread blocks per compute unit used by PPU DeepGEMM "
         "when sizing the fp4 indexer scheduler-metadata buffer."
     ),
-    affected_versions=_AFFECTED,
     remove_when="upstream defines the constant itself (patch_value becomes a no-op).",
 )
 
@@ -178,7 +176,6 @@ patch(
         "metadata correct in upstream's single fill. The CUDA helper has no "
         "such parameter."
     ),
-    affected_versions=_AFFECTED,
     remove_when=(
         "vllm.utils.deep_gemm dispatches on current_platform internally, or "
         "upstream accepts a DeepGEMM backend registry."
@@ -198,7 +195,6 @@ _upstream_supports_varlen_paged_mqa_logits = (
         "SAIL SM89 accepts device-built varlen query rows and request IDs "
         "through the PPU next_n=1 paged-logits adapter, without an SM100 gate."
     ),
-    affected_versions=_AFFECTED,
     remove_when="The indexer delegates varlen query-row support to the platform.",
 )
 def _supports_varlen_paged_mqa_logits() -> bool:
@@ -231,7 +227,6 @@ patch(
     _MODULE,
     "_supports_flattened_device_query_lens",
     reason="Use device query lengths for adaptive V4.1 verification with SAIL fixed-length paged logits.",
-    affected_versions=_AFFECTED,
     remove_when="The indexer delegates flattened device-query-length support to the platform.",
 )(_supports_flattened_device_query_lens)
 
@@ -247,7 +242,6 @@ _upstream_uses_fp4 = _indexer_module.dsa_indexer_uses_fp4
         "SM100. On sm_89, only V4/V4.1 have MXFP4 producers and default "
         "indexer_kv_dtype to mxfp4."
     ),
-    affected_versions=_AFFECTED,
     remove_when="The indexer exposes a platform capability hook.",
 )
 def dsa_indexer_uses_fp4(vllm_config):
@@ -255,13 +249,21 @@ def dsa_indexer_uses_fp4(vllm_config):
 
     if not current_platform.is_ppu():
         return _upstream_uses_fp4(vllm_config)
-    # PPU MODIFICATION: begin -- only V4/V4.1 have MXFP4 query/cache producers.
+    # PPU MODIFICATION: begin -- only V4/V4.1 and Kimi K3.1 have MXFP4
+    # query/cache producers.
     model_config = vllm_config.model_config
     hf_config = model_config.hf_text_config
     supports_fp4 = hf_config.model_type in (
         "deepseek_v4",
         "deepseek_v41",
         "deepseek_v41_text",
+        # Kimi K3.1 shares the DSA indexer and quantises its cache through
+        # ``dsa_cache`` when this helper resolves True. ``hf_text_config``
+        # surfaces either the top-level or the text sub-config type depending
+        # on how the checkpoint was serialized, so accept both spellings.
+        "kimi_k3",
+        "kimi_k31",
+        "kimi_linear",
     )
     # sm_89 (Zhenwu M890) defaults these models to the MXFP4 indexer
     # cache. It halves the per-token K cache (132B -> 68B) and keeps the whole
@@ -278,7 +280,9 @@ def dsa_indexer_uses_fp4(vllm_config):
     if kv_dtype == "mxfp4" and not current_platform.is_device_capability(89):
         raise ValueError("PPU indexer_kv_dtype='mxfp4' requires capability sm_89")
     if kv_dtype == "mxfp4" and not supports_fp4:
-        raise ValueError("PPU indexer_kv_dtype='mxfp4' requires DeepSeek V4 or V4.1")
+        raise ValueError(
+            "PPU indexer_kv_dtype='mxfp4' requires DeepSeek V4/V4.1 or Kimi K3.1"
+        )
     return kv_dtype == "mxfp4"
 
 
@@ -290,6 +294,15 @@ for _consumer_name in (
     "vllm.models.deepseek_v4.attention",
     "vllm.models.deepseek_v41.attention",
     "vllm.model_executor.layers.sparse_mqa_indexer",
+    # Kimi K3.1's ``dsa_cache`` is already imported when this module loads: the
+    # ``kda`` patch (installed earlier in ``attention/__init__``) imports
+    # ``vllm.models.kimi_k3``, whose package ``__init__`` imports
+    # ``nvidia.model``, which imports ``common.dsa_cache`` at module scope. Its
+    # name is a ``from ... import`` alias, so it keeps pointing at upstream's
+    # helper, which silently resolves ``'auto'`` to fp8 -- the model would keep
+    # its FP8 indexer cache and FP8 MQA-logits kernels while this module's
+    # builder reports the MXFP4 capability.
+    "vllm.models.kimi_k3.common.dsa_cache",
 ):
     _consumer = sys.modules.get(_consumer_name)
     if (
@@ -300,7 +313,6 @@ for _consumer_name in (
             _consumer_name,
             "dsa_indexer_uses_fp4",
             reason="Preloaded indexer consumers must use SAIL's MXFP4 capability.",
-            affected_versions=_AFFECTED,
             remove_when="Consumers resolve the helper through its provider module.",
         )(dsa_indexer_uses_fp4)
 
@@ -326,12 +338,25 @@ def _builder_init_wrapper(self, *args, **kwargs) -> None:
         return
     _select_paged_decode_layout(self)
     hf_config = self.vllm_config.model_config.hf_text_config
-    self.indexer_n_head = getattr(self.kv_cache_spec, "indexer_n_head", 0) or getattr(
-        hf_config, "index_n_heads", 0
+    # Kimi K3.1 nests the indexer geometry under ``dsa_config`` (and names
+    # the head count ``index_num_heads``); DeepSeek V4/V4.1 (and the
+    # KV-cache spec) put ``index_n_heads`` on the text config itself.
+    dsa_config = getattr(hf_config, "dsa_config", None)
+    if dsa_config is None or isinstance(dsa_config, dict):
+        dsa_get = (dsa_config or {}).get
+    else:
+        dsa_get = lambda name: getattr(dsa_config, name, 0)  # noqa: E731
+    self.indexer_n_head = (
+        getattr(self.kv_cache_spec, "indexer_n_head", 0)
+        or getattr(hf_config, "index_n_heads", 0)
+        or getattr(hf_config, "index_num_heads", 0)
+        or dsa_get("index_num_heads")
     )
-    self.indexer_q_head_dim = getattr(
-        self.kv_cache_spec, "indexer_q_head_dim", 0
-    ) or getattr(hf_config, "index_head_dim", 0)
+    self.indexer_q_head_dim = (
+        getattr(self.kv_cache_spec, "indexer_q_head_dim", 0)
+        or getattr(hf_config, "index_head_dim", 0)
+        or dsa_get("index_head_dim")
+    )
     if (getattr(hf_config, "index_kpool", 1) or 1) > 1:
         # GLM-5-Next zero-pads its queries and weights to at least 32 heads.
         self.indexer_n_head = max(32, self.indexer_n_head)
@@ -365,7 +390,6 @@ patch(
         "buffer for fp4 paged logits. Delegates to the upstream __init__ so "
         "upstream buffer/refactor drift cannot break this plugin."
     ),
-    affected_versions=_AFFECTED,
     remove_when="upstream grows PPU branches in the DSA indexer metadata builder.",
 )(_builder_init_wrapper)
 
@@ -401,7 +425,6 @@ def _decode_request_ids(context_lens, request_lens, flattened):
         "with ones without publishing indices, so preserve ownership from the "
         "separate per-request counts before the metadata call."
     ),
-    affected_versions=_AFFECTED,
     remove_when="The non-varlen indexer decode preparation publishes request IDs to metadata generation.",
 )
 def _prepare_decode_wrapper(
@@ -467,7 +490,9 @@ def _build_wrapper(
             self, common_prefix_len, common_attn_metadata, fast_build
         )
         if self._sail_paged_schedule_key is not None and metadata.decode is not None:
-            metadata.decode._sail_paged_schedule_key = self._sail_paged_schedule_key
+            # The decode record is slotted upstream. Keep SAIL provenance on
+            # the step that owns it, not on a shared tensor or the decode row.
+            metadata._sail_paged_schedule_key = self._sail_paged_schedule_key
         return metadata
     finally:
         _current_builder.pop()
@@ -484,7 +509,6 @@ patch(
         "(including TP prefill row sharding), so "
         "upstream drift cannot break this plugin."
     ),
-    affected_versions=_AFFECTED,
     remove_when=(
         "upstream exposes the builder to the paged metadata helper without "
         "module-level context."
@@ -516,7 +540,6 @@ patch(
         "metadata_extra; otherwise the fp4 scheduler metadata would be "
         "refreshed in the fp8 layout and upstream's shape assertion would fail."
     ),
-    affected_versions=_AFFECTED,
     remove_when=(
         "upstream exposes the builder to the paged metadata helper without "
         "module-level context."

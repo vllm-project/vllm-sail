@@ -15,7 +15,6 @@ from vllm.v1.kv_cache_interface import MLAAttentionSpec
 
 from vllm_sail.patch.utils import patch
 
-_AFFECTED = ">=0.32.0,<0.33.0"
 _MODULE = "vllm.v1.kv_cache_interface"
 
 
@@ -35,7 +34,6 @@ MLAAttentionSpec.__dataclass_fields__ = {
 MLAAttentionSpec.__annotations__.update(_IndexerGeometry.__annotations__)
 
 _upstream_spec_init = MLAAttentionSpec.__init__
-_upstream_merge = MLAAttentionSpec.merge.__func__
 
 
 @patch(
@@ -49,7 +47,6 @@ _upstream_merge = MLAAttentionSpec.merge.__func__
         "it accepts the two extra kwargs, delegates the rest, and stores them "
         "via object.__setattr__."
     ),
-    affected_versions=_AFFECTED,
     remove_when="upstream adds the indexer geometry fields to MLAAttentionSpec.",
 )
 def mla_attention_spec_init(
@@ -64,29 +61,6 @@ def mla_attention_spec_init(
     object.__setattr__(self, "indexer_q_head_dim", indexer_q_head_dim)
 
 
-@patch(
-    _MODULE,
-    "MLAAttentionSpec.merge",
-    reason=(
-        "Fork forwards indexer_n_head/indexer_q_head_dim through "
-        "MLAAttentionSpec.merge (from specs[0], like the other geometry "
-        "fields); DeepseekV32IndexerMetadataBuilder reads them off the merged "
-        "group spec. Delegates to upstream merge, then copies the values from "
-        "specs[0] onto the merged (frozen) spec."
-    ),
-    affected_versions=_AFFECTED,
-    remove_when="upstream adds the indexer geometry fields to MLAAttentionSpec.",
-)
-def mla_attention_spec_merge(cls, specs):
-    merged = _upstream_merge(cls, specs)
-    first = specs[0]
-    object.__setattr__(merged, "indexer_n_head", getattr(first, "indexer_n_head", None))
-    object.__setattr__(
-        merged, "indexer_q_head_dim", getattr(first, "indexer_q_head_dim", None)
-    )
-    return merged
-
-
 _upstream_eq = MLAAttentionSpec.__eq__
 _upstream_hash = MLAAttentionSpec.__hash__
 
@@ -95,7 +69,6 @@ _upstream_hash = MLAAttentionSpec.__hash__
     _MODULE,
     "MLAAttentionSpec.__eq__",
     reason="Indexer geometry participates in KV spec grouping as in the PPU fork.",
-    affected_versions=_AFFECTED,
     remove_when="Upstream declares the indexer geometry dataclass fields.",
 )
 def mla_attention_spec_eq(self, other):
@@ -112,7 +85,6 @@ def mla_attention_spec_eq(self, other):
     _MODULE,
     "MLAAttentionSpec.__hash__",
     reason="Hash indexer geometry consistently with MLA spec equality.",
-    affected_versions=_AFFECTED,
     remove_when="Upstream declares the indexer geometry dataclass fields.",
 )
 def mla_attention_spec_hash(self):
@@ -130,7 +102,6 @@ def _extend_existing_subclass(cls):
     original_hash = cls.__hash__
     metadata = dict(
         reason="Existing MLA spec subclasses must retain geometry through dataclass operations.",
-        affected_versions=_AFFECTED,
         remove_when="Upstream declares the indexer geometry dataclass fields.",
     )
 

@@ -6,7 +6,7 @@ CPU runner with no vLLM:
 
 * **Bare-CPU import + metadata shape.** The leaf module defines its
   replacements without importing vLLM at module scope; its mandatory
-  ``reason`` / ``affected_versions`` / ``remove_when`` metadata is asserted
+  ``reason`` / ``remove_when`` metadata is asserted
   from ``METADATA`` and by AST-scanning every ``patch`` call.
 * **Behaviour against stubs.** ``install()`` is exercised against throwaway
   stand-ins for the two upstream modules, asserting each patch lands and
@@ -32,7 +32,7 @@ from vllm_sail.patch.utils import PATCH_REGISTRY
 MODULE_PATH = (
     Path(__file__).parents[2] / "vllm_sail" / "patch" / "enhancement" / "mxfp4.py"
 )
-REQUIRED_METADATA = ("reason", "affected_versions", "remove_when")
+REQUIRED_METADATA = ("reason", "remove_when")
 N_TARGETS = 10
 
 
@@ -292,11 +292,10 @@ def test_module_imports_on_bare_cpu(mxfp4_module) -> None:
 def test_metadata_shape(mxfp4_module) -> None:
     metadata = mxfp4_module.METADATA
     assert len(metadata) == N_TARGETS
-    for target, reason, affected, remove_when in metadata:
+    for target, reason, remove_when in metadata:
         assert target.startswith("vllm."), target
-        for value in (reason, affected, remove_when):
+        for value in (reason, remove_when):
             assert isinstance(value, str) and value.strip(), target
-        assert ">=" in affected and "<" in affected, target
         assert remove_when.strip().lower() != "todo", target
 
 
@@ -806,7 +805,7 @@ def test_deepseek_v4_mxfp4_selector_preserves_activation_mode(
 def test_rocm_requant_does_not_select_aiter_on_ppu(
     upstream_source_root, monkeypatch, name
 ):
-    """PPU 的 CUDA 兼容身份不能触发 ROCm 专用权重重排。"""
+    """PPU's CUDA-compatible identity must not trigger ROCm-specific weight shuffling."""
     platforms = ModuleType("vllm.platforms")
     platforms.current_platform = SimpleNamespace(is_rocm=lambda: False)
     monkeypatch.setitem(sys.modules, "vllm.platforms", platforms)

@@ -13,7 +13,6 @@ from vllm_sail.patch.utils import patch
 from vllm_sail.registry.moe_backends._extend import extend_enum
 
 _MODULE = "vllm.model_executor.layers.fused_moe.oracle.unquantized"
-_AFFECTED = ">=0.32.0,<0.33.0"
 _REMOVE_WHEN = (
     "upstream gains a register_moe_backend() extension point mirroring "
     "register_linear_kernel(), which would delete this patch."
@@ -41,7 +40,6 @@ _upstream_select_unquantized_moe_backend = oracle.select_unquantized_moe_backend
         "The unquantized oracle has no registration API for PPU DeepGEMM and "
         "Acext experts, so PPU needs its own ordered candidate list."
     ),
-    affected_versions=_AFFECTED,
     remove_when=_REMOVE_WHEN,
 )
 def _get_priority_backends(
@@ -87,7 +85,6 @@ def _get_priority_backends(
     _MODULE,
     "backend_to_kernel_cls",
     reason="The unquantized oracle cannot resolve plugin-owned PPU expert classes.",
-    affected_versions=_AFFECTED,
     remove_when=_REMOVE_WHEN,
 )
 def backend_to_kernel_cls(
@@ -116,7 +113,6 @@ def backend_to_kernel_cls(
     _MODULE,
     "map_unquantized_backend",
     reason="The public MoE backend strings have no upstream mapping to PPU members.",
-    affected_versions=_AFFECTED,
     remove_when=_REMOVE_WHEN,
 )
 def map_unquantized_backend(
@@ -138,19 +134,23 @@ def map_unquantized_backend(
         "Explicit ppu_deep_gemm requests need the batched PPU member when the "
         "prepare/finalize path uses batched expert activations."
     ),
-    affected_versions=_AFFECTED,
     remove_when=_REMOVE_WHEN,
 )
 def select_unquantized_moe_backend(
     moe_config: FusedMoEConfig,
 ) -> tuple[UnquantizedMoeBackend, type[mk.FusedMoEExperts] | None]:
-    # LoRA 的布局门控和专家选择归 upstream；不得由 batched PPU 快分支绕过。
+    # LoRA layout gating and expert selection belong to upstream; do not bypass via the batched PPU fast path.
     if moe_config.is_lora_enabled:
         return _upstream_select_unquantized_moe_backend(moe_config)
     if (
         moe_config.moe_backend == "ppu_deep_gemm"
         and moe_config.activation_format.is_batched
     ):
+        source = (
+            oracle.UnquantizedMoEKernelOracle.maybe_skip_for_requantization_source()
+        )
+        if source is not None:
+            return source
         backend = UnquantizedMoeBackend.BATCHED_PPU_DEEPGEMM
         for kernel_cls in backend_to_kernel_cls(backend):
             supported, reason = kernel_cls.is_supported_config(

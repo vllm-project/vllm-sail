@@ -288,7 +288,14 @@ print(tomllib.loads(Path("rust-toolchain.toml").read_text())["toolchain"]["chann
 PY
         )"
         export RUSTUP_TOOLCHAIN
-        rustup toolchain install "${RUSTUP_TOOLCHAIN}" --profile minimal
+        # The configured distribution mirror may return a transient HTTP 504.
+        for attempt in 1 2 3; do
+            if rustup toolchain install "${RUSTUP_TOOLCHAIN}" --profile minimal; then
+                break
+            fi
+            ((attempt < 3)) || fail "failed to install Rust ${RUSTUP_TOOLCHAIN} after ${attempt} attempts"
+            sleep "$((2 ** attempt))"
+        done
         rustc --version | tee "${LOG_DIR}/rustc-version.log"
         cargo --version | tee "${LOG_DIR}/cargo-version.log"
         python tools/use_existing_torch.py
@@ -345,7 +352,7 @@ if ((NATIVE_REUSE == 0)); then
 from vllm_sail.native.toolchain import decide, probe
 from vllm_sail.compat import check_vllm_compatibility
 
-check_vllm_compatibility()
+check_vllm_compatibility(strict=True)
 decision = decide(probe())
 print(decision.reason)
 if not decision.build:
@@ -358,7 +365,7 @@ else
         python - <<'PY'
 from vllm_sail.compat import check_vllm_compatibility
 
-check_vllm_compatibility()
+check_vllm_compatibility(strict=True)
 print("native extensions supplied by verified donor wheel")
 PY
     ) 2>&1 | tee "${LOG_DIR}/native-preflight.log"

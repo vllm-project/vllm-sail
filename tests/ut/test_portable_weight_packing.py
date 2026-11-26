@@ -140,7 +140,7 @@ def test_packed_weights_match_upstream_independent_reference(bits, activation8):
 def test_real_wna16_ppu_conversion_preserves_expert_weights_scales_and_padding(
     upstream_source_root, modules, frontend, backend, experts, intermediate
 ):
-    """真实 adapter、转换、padding、scales 与 MoE wrapper；配置类型和 op 注册是边界，不证明 GEMM。"""
+    """Real adapter, conversion, padding, scales, and MoE wrapper; config types and op registration are boundaries and do not prove GEMM."""
     import inspect
     import math
     from enum import Enum
@@ -185,6 +185,7 @@ def test_real_wna16_ppu_conversion_preserves_expert_weights_scales_and_padding(
     ):
         function(utils_path, name, namespace)
     for name in (
+        "WNA16WeightFormat",
         "WNA16MoEBackend",
         "_pad_w13_shard_cols",
         "_pad_rows",
@@ -291,7 +292,7 @@ def test_real_wna16_ppu_conversion_preserves_expert_weights_scales_and_padding(
         for value, snapshot in zip(inputs, before, strict=False)
     )
 
-    # 独立构造每个 gate/up shard 的 padding；不以被测 padding/helper 自证。
+    # Build padding independently per gate/up shard rather than self-checking with the helper under test.
     expected13 = torch.zeros((experts, hidden, 2 * padded), dtype=torch.int32)
     expected13[:, :, :intermediate] = raw13[:, :, :intermediate]
     expected13[:, :, padded : padded + intermediate] = raw13[:, :, intermediate:]
@@ -316,7 +317,7 @@ def test_real_wna16_ppu_conversion_preserves_expert_weights_scales_and_padding(
         assert packed.dtype == torch.int32 and packed.is_contiguous()
         assert torch.equal(packed, expected)
 
-    # group32 scales 的 8×8 转置顺序是独立 oracle，不调用真实 permutation helper。
+    # The 8x8 transpose order for group32 scales is an independent oracle, not calling the real permutation helper.
     expected_s13 = torch.zeros((experts, hidden // group, 2 * padded))
     expected_s13[:, :, :intermediate] = scales13.transpose(1, 2)[:, :, :intermediate]
     expected_s13[:, :, padded : padded + intermediate] = scales13.transpose(1, 2)[
@@ -329,7 +330,7 @@ def test_real_wna16_ppu_conversion_preserves_expert_weights_scales_and_padding(
         assert scales.shape == raw.shape and scales.dtype == torch.float32
         assert scales.is_contiguous() and torch.equal(scales, expected)
 
-    # 将真实转换结果交给实际标准／batched expert 的形状消费者；不执行构造或 GEMM。
+    # Feed real converted results to the actual standard/batched expert shape consumers without running construction or GEMM.
     base_size = function(
         source / "model_executor/layers/fused_moe/modular_kernel.py",
         "FusedMoEExpertsModular.moe_problem_size",
@@ -363,7 +364,7 @@ def test_real_wna16_ppu_conversion_preserves_expert_weights_scales_and_padding(
 def test_real_marlin_wrappers_preserve_native_arguments_after_scale_removal(
     upstream_source_root, wrapper, explicit_options
 ):
-    """真实 Python wrapper 的完整参数行序；native 仅捕获调用，不证明 PPU GEMM。"""
+    """Full argument order for the real Python wrapper; native captures calls only and does not prove PPU GEMM."""
     calls = []
     result = object()
 
@@ -427,7 +428,7 @@ def test_real_marlin_wrappers_preserve_native_arguments_after_scale_removal(
             64,
             *((True, True, True) if explicit_options else (False, False, False)),
         )
-    # 完整 tuple 同时约束 native 参数个数、global scale/zero/workspace 行序和所有选项。
+    # The full tuple constrains native arg count, global scale/zero/workspace order, and all options.
     assert calls == [expected]
 
 
@@ -439,7 +440,7 @@ def test_real_marlin_wrappers_preserve_native_arguments_after_scale_removal(
 def test_real_dense_marlin_consumers_preserve_padding_and_new_gemm_contract(
     upstream_source_root, policy, provided_workspace, fp32_reduce
 ):
-    """真实 consumer、padding 和 dispatcher；Torch 为真，GEMM 只返回预定行，不提供数值证据。"""
+    """Real consumer, padding, and dispatcher; Torch is real, GEMM returns fixed rows and gives no numerical evidence."""
     torch = pytest.importorskip("torch")
     source = upstream_source_root / "vllm"
     utils = source / "model_executor/layers/quantization/utils/marlin_utils.py"

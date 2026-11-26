@@ -118,8 +118,6 @@ from __future__ import annotations
 import importlib
 from functools import lru_cache
 
-AFFECTED_VERSIONS = ">=0.32.0,<0.33.0"
-
 _QSA_OPS_MODULE = "vllm.models.qwen4_exp.nvidia.ops.qsa"
 
 REASON = (
@@ -241,7 +239,6 @@ def install() -> None:
         _QSA_OPS_MODULE,
         "_select_config",
         reason=REASON,
-        affected_versions=AFFECTED_VERSIONS,
         remove_when=REMOVE_WHEN,
     )(dispatch)
 

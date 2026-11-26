@@ -15,7 +15,11 @@ including model registration. :func:`register_model` remains public for
 backward compatibility and focused tests, but is not a separate entry point.
 """
 
-from vllm_sail.version import __version__, __version_tuple__
+from vllm_sail.logger import configure_sail_logging
+
+configure_sail_logging()
+
+from vllm_sail.version import __version__, __version_tuple__  # noqa: E402
 
 __all__ = [
     "__version__",
@@ -76,8 +80,8 @@ def register() -> str:
 def register_out_of_tree() -> None:
     """Install the complete ``vllm.general_plugins`` lifecycle.
 
-    Order matters: the compatibility check runs first so that a version
-    mismatch produces a clear error instead of an obscure patch failure. Model
+    The compatibility check runs first to warn about a version mismatch before
+    installing patches. Strict mode raises before patch installation. Model
     registration belongs to this same hook so an exact-name plugin allowlist
     cannot enable the PPU platform while filtering out its model overrides.
     """

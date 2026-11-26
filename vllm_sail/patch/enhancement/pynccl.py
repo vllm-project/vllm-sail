@@ -17,7 +17,6 @@ from vllm.platforms import current_platform
 from vllm_sail.patch.bodies import bind_body
 from vllm_sail.patch.utils import patch
 
-_AFFECTED = ">=0.32.0,<0.33.0"
 _WRAPPER = "vllm.distributed.device_communicators.pynccl_wrapper"
 _COMMUNICATOR = "vllm.distributed.device_communicators.pynccl"
 _upstream_suspend = _pynccl.PyNcclCommunicator.suspend
@@ -35,7 +34,6 @@ def _with_target_globals(fn):
         "ncclCommResume. Upstream tolerates this only on ROCm, so loading "
         "the PPU library raises and silently disables PyNccl."
     ),
-    affected_versions=_AFFECTED,
     remove_when=(
         "Upstream permits missing ncclCommSuspend/ncclCommResume on PPU, "
         "or the minimum supported SAIL SDK exports both symbols."
@@ -117,7 +115,6 @@ def __init__(self, so_file: str | None = None):
         "PPU must have both ncclCommSuspend and ncclCommResume before "
         "suspending a communicator; upstream checks only the former."
     ),
-    affected_versions=_AFFECTED,
     remove_when=(
         "Upstream checks both suspend/resume symbols before suspension, "
         "or the minimum supported SAIL SDK exports both symbols."

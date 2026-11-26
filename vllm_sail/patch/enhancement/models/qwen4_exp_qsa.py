@@ -57,7 +57,6 @@ _REASON = (
     "PPU FA3's QSA kernel is faster than the Triton one on Zhenwu M890 for the "
     "shapes it instantiates, and upstream hard-wires the Triton kernel."
 )
-_AFFECTED = ">=0.32.0,<0.33.0"
 _REMOVE_WHEN = (
     "Qwen4ExpQSAImpl grows a backend-selection hook that a plugin can register "
     "an FA3 QSA implementation with."
@@ -173,7 +172,6 @@ _impl_forward = qsa.Qwen4ExpQSAImpl.forward
     _MODULE,
     "Qwen4ExpQSAImpl.__init__",
     reason=_REASON,
-    affected_versions=_AFFECTED,
     remove_when=_REMOVE_WHEN,
 )
 def impl_init(
@@ -183,8 +181,12 @@ def impl_init(
     scale: float,
     num_kv_heads: int,
     kv_cache_dtype: str,
+    index_group=None,
 ) -> None:
-    _impl_init(self, num_heads, head_size, scale, num_kv_heads, kv_cache_dtype)
+    _impl_init(self, num_heads, head_size, scale, num_kv_heads, kv_cache_dtype, index_group=index_group)
+    if index_group is not None:
+        self._sail_qsa_fa3 = resolve_qsa_fa3_kernel(envs.VLLM_SAIL_QSA_KERNEL, cuda_reason="HiSparse index groups require upstream QSA")
+        return
     # Resolved here, not per step: the answer depends only on the shape, the
     # environment and the wheel, and reserving the workspace here keeps the
     # allocation out of the CUDA graph capture the builder allows.
@@ -204,7 +206,6 @@ def impl_init(
     _MODULE,
     "Qwen4ExpQSAImpl.forward",
     reason=_REASON,
-    affected_versions=_AFFECTED,
     remove_when=_REMOVE_WHEN,
 )
 def impl_forward(

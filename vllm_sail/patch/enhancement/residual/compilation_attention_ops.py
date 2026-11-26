@@ -36,16 +36,15 @@ REASON = (
     "are traced into a piecewise graph segment instead of being attention "
     "boundaries."
 )
-AFFECTED_VERSIONS = ">=0.32.0,<0.33.0"
 REMOVE_WHEN = (
     "upstream includes the PPU indexer ops in CompilationConfig._attention_ops "
     "itself, or the PPU indexers stop registering their own torch ops and reuse "
     "vllm::sparse_attn_indexer."
 )
 
-#: (target, reason, affected versions, remove_when) for every patch installed
+#: (target, reason, remove_when) for every patch installed
 #: by this module. Read by the metadata-shape unit tests.
-METADATA = ((f"{_MODULE}.{_TARGET}", REASON, AFFECTED_VERSIONS, REMOVE_WHEN),)
+METADATA = ((f"{_MODULE}.{_TARGET}", REASON, REMOVE_WHEN),)
 
 _upstream_set_splitting_ops = None
 _installed = False
@@ -66,7 +65,6 @@ def install() -> None:
         _MODULE,
         _TARGET,
         reason=REASON,
-        affected_versions=AFFECTED_VERSIONS,
         remove_when=REMOVE_WHEN,
     )
     def set_splitting_ops_for_v1(self, all2all_backend, data_parallel_size=1):

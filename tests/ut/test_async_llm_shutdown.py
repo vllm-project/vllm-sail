@@ -15,7 +15,6 @@ from types import SimpleNamespace as NS
 import pytest
 
 from tests.support.source import function
-from tests.support.upstream import SUPPORTED_RANGE
 from vllm_sail.patch.utils import PATCH_REGISTRY, original_of, patch
 
 MODULE_PATH = Path(__file__).parents[2] / "vllm_sail/patch/bugfix/async_llm_shutdown.py"
@@ -134,7 +133,6 @@ def test_install_records_real_target_and_reapplication_guard(
     assert original_of(replacement, TARGET) is original
     assert PATCH_REGISTRY[-1].target == TARGET
     assert PATCH_REGISTRY[-1].reason and PATCH_REGISTRY[-1].remove_when
-    assert PATCH_REGISTRY[-1].affected_versions == SUPPORTED_RANGE
     count = len(PATCH_REGISTRY)
     shutdown_module.install()
     assert len(PATCH_REGISTRY) == count
@@ -143,7 +141,6 @@ def test_install_records_real_target_and_reapplication_guard(
             "vllm.v1.engine.async_llm",
             "AsyncLLM.shutdown",
             reason="test",
-            affected_versions="test",
             remove_when="test",
         )(shutdown_module._wrap_shutdown(replacement))
 
@@ -208,6 +205,7 @@ def test_real_output_loop_distinguishes_shutdown_from_engine_failure(
 
         class Core:
             def __init__(self):
+                self.resources = NS(engine_dead=unexpected_death, stop_requested=False)
                 self.future = loop.create_future()
 
             async def get_output_async(self):
@@ -215,6 +213,7 @@ def test_real_output_loop_distinguishes_shutdown_from_engine_failure(
 
             def shutdown(self, timeout=None):
                 assert timeout == 0
+                self.resources.stop_requested = not self.resources.engine_dead
                 settled = threading.Event()
 
                 def close():

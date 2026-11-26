@@ -40,7 +40,6 @@ from vllm_sail.patch.utils import patch
 
 logger = init_logger(__name__)
 
-_AFFECTED = ">=0.32.0,<0.33.0"
 
 _original_select_indexer_impl = _indexer_module.select_indexer_impl_cls
 _original_select_main_backend_and_impl = (
@@ -130,15 +129,14 @@ def _select_sail_attend(topk_blocks: int, kv_cache_dtype: str, fallback: str) ->
         "MiniMax M3 indexer scoring/top-k is served by the SAIL MSA kernels on "
         "PPU, whose dtype defaults differ from the NVIDIA/ROCm selectors."
     ),
-    affected_versions=_AFFECTED,
     remove_when="vLLM MiniMax M3 backend selection exposes a per-platform "
     "selector hook for PPU.",
 )
-def select_indexer_impl_cls(*, topk_blocks: int, indexer_kv_dtype="bf16"):
+def select_indexer_impl_cls(*, topk_blocks: int, indexer_kv_dtype="bf16", use_flashinfer_msa=False):
     if _select_sail_indexer(indexer_kv_dtype, "upstream indexer selector"):
         return MiniMaxM3IndexerSailMSAImpl
     return _original_select_indexer_impl(
-        topk_blocks=topk_blocks, indexer_kv_dtype=indexer_kv_dtype
+        topk_blocks=topk_blocks, indexer_kv_dtype=indexer_kv_dtype, use_flashinfer_msa=use_flashinfer_msa
     )
 
 
@@ -149,7 +147,6 @@ def select_indexer_impl_cls(*, topk_blocks: int, indexer_kv_dtype="bf16"):
         "MiniMax M3 block-sparse attention is served by the SAIL fmha_sail "
         "kernels on PPU instead of the Triton sparse attend."
     ),
-    affected_versions=_AFFECTED,
     remove_when="vLLM MiniMax M3 backend selection exposes a per-platform "
     "selector hook for PPU.",
 )
@@ -159,6 +156,7 @@ def select_main_backend_and_impl_cls(
     kv_cache_dtype: str,
     num_kv_heads: int,
     emits_sparse_block_table: bool = False,
+    use_flashinfer_msa: bool = False,
 ):
     if _select_sail_attend(topk_blocks, kv_cache_dtype, "upstream selector"):
         return MiniMaxM3SparseSailMSABackend, MiniMaxM3SparseSailMSAImpl
@@ -167,6 +165,7 @@ def select_main_backend_and_impl_cls(
         kv_cache_dtype=kv_cache_dtype,
         num_kv_heads=num_kv_heads,
         emits_sparse_block_table=emits_sparse_block_table,
+        use_flashinfer_msa=use_flashinfer_msa,
     )
 
 
@@ -178,7 +177,6 @@ def select_main_backend_and_impl_cls(
         "default so the indexer runs its fp8 score path; other models and "
         "other PPUs keep the caller's default."
     ),
-    affected_versions=_AFFECTED,
     remove_when="vLLM lets a platform default the indexer cache dtype.",
 )
 def resolve_indexer_kv_dtype(self, default):

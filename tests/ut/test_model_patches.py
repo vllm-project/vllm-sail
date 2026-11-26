@@ -5,8 +5,8 @@ Two tiers, following the suite's established split:
 
 * Bare CPU (no vLLM, no torch required): every module in
   ``vllm_sail/patch/enhancement/models/`` is parsed with ``ast`` and must
-  carry well-formed mandatory metadata (``reason`` / ``affected_versions``
-  / ``remove_when``) on every ``@patch`` call. The patch modules themselves
+  carry well-formed mandatory metadata (``reason`` / ``remove_when``) on
+  every ``@patch`` call. The patch modules themselves
   import their vLLM targets at import time — that is the framework's
   convention (see ``custom_op_dispatch.py``) — so actually importing them
   is gated on vLLM being installed, exactly like ``test_patch_install.py``.
@@ -42,7 +42,6 @@ MODELS_PATCH_DIR = (
 REPO_ROOT = pathlib.Path(__file__).parents[2]
 
 EXPECTED_MODULES = {
-    "deepseek_mtp",
     "deepseek_v2",
     "deepseek_v4",
     "deepseek_v4_cache",
@@ -50,6 +49,7 @@ EXPECTED_MODULES = {
     "deepseek_v4_compressor",
     "deepseek_v4_graph_warmup",
     "deepseek_v41",
+    "deepseek_v41_device",
     "deepseek_v41_engram",
     "deepseek_v41_indexer",
     "deepseek_v41_int8",
@@ -58,6 +58,7 @@ EXPECTED_MODULES = {
     "glm5_next_indexer",
     "glm5_next_mtp",
     "kimi_k3",
+    "kimi_k3_dsa_indexer",
     "llama4",
     "minimax_m3",
     "minimax_m3_msa",
@@ -67,7 +68,6 @@ EXPECTED_MODULES = {
     "qwen3_next",
     "qwen4_exp_qsa",
     "qwen4_exp_qsa_fp4",
-    "step3p5_mtp",
     "step5_dsa_backend",
     "step5_indexer_fp16",
     "step5_mtp",
@@ -75,7 +75,7 @@ EXPECTED_MODULES = {
     "step5_soft_fp8",
 }
 
-REQUIRED_METADATA = ("reason", "affected_versions", "remove_when")
+REQUIRED_METADATA = ("reason", "remove_when")
 
 
 def _patch_module_files() -> list[pathlib.Path]:
@@ -305,10 +305,8 @@ def installed_model_patches():
 _EXPECTED_TARGETS = {
     "vllm.model_executor.models.deepseek_v2.Indexer.__init__",
     "vllm.model_executor.models.deepseek_v2.Indexer.forward",
-    "vllm.model_executor.models.deepseek_v2.DeepseekV2Model.__init__",
-    "vllm.model_executor.models.deepseek_v2.DeepseekV2Model.load_weights",
-    "vllm.model_executor.models.deepseek_mtp.DeepSeekMTP.__init__",
-    "vllm.model_executor.models.deepseek_mtp.DeepSeekMTP.load_weights",
+    "vllm.model_executor.models.deepseek_v2.init_indexer_wk_weights_proj",
+    "vllm.model_executor.models.deepseek_v2.Indexer.process_weights_after_loading",
     "vllm.models.deepseek_v4.nvidia.model._select_dsv4_attn_cls",
     (
         "vllm.models.kimi_k3.nvidia.latent_moe_runner.LatentMoERunner."
@@ -316,9 +314,17 @@ _EXPECTED_TARGETS = {
     ),
     ("vllm.models.kimi_k3.nvidia.latent_moe_runner.LatentMoERunner._select_tail_tier"),
     "vllm.models.kimi_k3.nvidia.latent_moe_runner.LatentMoERunner.__init__",
+    "vllm.models.kimi_k3.nvidia.model.KimiMoE.__init__",
     "vllm.models.kimi_k3.nvidia.model.KimiRoutedOutputTransform.forward",
+    "vllm.models.kimi_k3.nvidia.ops.dsa_indexer.indexer_k_norm_quant_insert",
+    "vllm.models.kimi_k3.nvidia.ops.dsa_indexer.indexer_q_quant_fold_weights",
+    "vllm.models.kimi_k3.nvidia.ops.dsa_indexer.dsa_fused_prologue",
+        (
+            "vllm.models.kimi_k3.common.dsa_cache.SelfAddressedMLASpec.from_spec"
+        ),
     "vllm.model_executor.models.llama4.Llama4MoE.custom_routing_function",
     "vllm.models.minimax_m3.nvidia.model.MiniMaxM3Model._init_fused_moe_finalize",
+    "vllm.models.minimax_m3.nvidia.model.GateLinear",
     "vllm.models.minimax_m3.nvidia.model.MiniMaxM3MLP.__init__",
     "vllm.models.minimax_m3.nvidia.model._supports_qkv_fused_epilogue",
     "vllm.models.minimax_m3.nvidia.model._maybe_init_gemm_rs",
@@ -331,7 +337,6 @@ _EXPECTED_TARGETS = {
     "vllm.model_executor.models.qwen3_next.th_nvtx_range_pop",
     "vllm.models.qwen4_exp.nvidia.qsa.Qwen4ExpQSAImpl.__init__",
     "vllm.models.qwen4_exp.nvidia.qsa.Qwen4ExpQSAImpl.forward",
-    "vllm.model_executor.models.step3p5_mtp.Step3p5MTP.load_weights",
     "vllm.models.qwen4_exp.common.qsa_indexer.QSACompressedKeyCache.__init__",
     (
         "vllm.models.qwen4_exp.common.qsa_indexer."
@@ -371,7 +376,7 @@ _EXPECTED_TARGETS = {
     "vllm.models.step5.nvidia.ops.qkv_indexer_norm_rope.qkv_indexer_norm_rope",
     (
         "vllm.models.step5.common.sparse_summary_cache."
-        "Step5SparseSummaryCacheLayer.get_kv_cache_spec"
+        "Step5SparseSummaryCacheLayer.get_kv_cache_config"
     ),
     "vllm.models.step5.nvidia.flashinfer_sparse.Step5FlashInferSparse.decode_logits",
     "vllm.models.step5.nvidia.flashinfer_sparse.Step5FlashInferSparse.logits",
@@ -434,6 +439,106 @@ def test_kimi_k3_quantized_up_proj_forces_tier_one(
         LatentMoERunner._select_tail_tier(runner, None, None)
         is LatentTailTier.ALLREDUCE_OVERLAP
     )
+
+
+@pytest.mark.requires_runtime
+def test_kimi_k3_megamoe_owes_shared_reduction_only_without_sequence_parallel(
+    installed_model_patches, monkeypatch
+) -> None:
+    """Only the eager MegaMoE path with TP-sharded shared experts owes a sum."""
+    from types import SimpleNamespace
+
+    from vllm.platforms import current_platform
+
+    from vllm_sail.patch.enhancement.models import kimi_k3 as patch_module
+
+    monkeypatch.setattr(type(current_platform), "is_ppu", lambda self=None: True)
+    # The upstream initializer builds the whole MoE layer; the flag logic below
+    # only needs the attributes it publishes.
+    monkeypatch.setattr(patch_module, "_upstream_moe_init", lambda self, *a, **k: None)
+
+    def flag(**overrides):
+        transform = SimpleNamespace()
+        moe = SimpleNamespace(
+            routed_output_transform=transform,
+            use_mega_moe=True,
+            tp_size=8,
+            use_sequence_parallel=False,
+        )
+        for name, value in overrides.items():
+            setattr(moe, name, value)
+        patch_module.moe_init(moe)
+        return getattr(transform, "_mega_shared_partial", None)
+
+    # Pipeline parallelism disables sequence parallelism, so the shared expert
+    # falls back to a TP-sharded down_proj whose partial nobody sums.
+    assert flag() is True
+    # Sequence parallelism replicates the shared expert: no collective is owed.
+    assert flag(use_sequence_parallel=True) is False
+    # A single TP rank holds the whole expert, so its output is already complete.
+    assert flag(tp_size=1) is False
+    # Every other backend runs the shared expert through a MoERunner tail.
+    assert flag(use_mega_moe=False) is None
+
+
+@pytest.mark.requires_runtime
+def test_kimi_k3_megamoe_sums_shared_partial_before_the_epilogue(
+    installed_model_patches, monkeypatch
+) -> None:
+    """The flagged shared output is all-reduced before the residual epilogue."""
+    from types import SimpleNamespace
+
+    from vllm.models.kimi_k3.nvidia.model import KimiRoutedOutputTransform
+    from vllm.platforms import current_platform
+
+    from vllm_sail.patch.enhancement.models import kimi_k3 as patch_module
+
+    class UpProj:
+        # Anything but UnquantizedLinearMethod takes the layer-GEMM branch, so
+        # the epilogue below runs without touching a real weight.
+        quant_method = object()
+
+        def __call__(self, hidden_states):
+            return hidden_states, None
+
+    class Residual:
+        def __init__(self) -> None:
+            self.added: list[object] = []
+
+        def add_(self, value):
+            self.added.append(value)
+            return self
+
+    reduced = []
+
+    def fake_all_reduce(tensor):
+        reduced.append(tensor)
+        return tensor
+
+    monkeypatch.setattr(
+        patch_module, "tensor_model_parallel_all_reduce", fake_all_reduce
+    )
+    monkeypatch.setattr(type(current_platform), "is_ppu", lambda self=None: True)
+
+    def run(flag):
+        transform = SimpleNamespace(norm=None, up_proj=UpProj())
+        if flag is not None:
+            transform._mega_shared_partial = flag
+        residual = Residual()
+        result = KimiRoutedOutputTransform.forward(transform, "routed", residual)
+        return residual, result
+
+    residual, result = run(True)
+    assert reduced == [residual]
+    assert result is residual
+    assert residual.added == ["routed"]
+
+    for flag in (False, None):
+        reduced.clear()
+        residual, result = run(flag)
+        assert reduced == []
+        assert result is residual
+        assert residual.added == ["routed"]
 
 
 @pytest.mark.requires_runtime
@@ -639,12 +744,12 @@ def test_step5_summary_cache_dtype_follows_fp16_switch(
     )
 
     config = SimpleNamespace(cache_config=SimpleNamespace(block_size=64))
-    get_spec = Step5SparseSummaryCacheLayer.get_kv_cache_spec
+    get_spec = Step5SparseSummaryCacheLayer.get_kv_cache_config
     monkeypatch.delenv("VLLM_STEP5_INDEXER_FP8_AS_FP16", raising=False)
-    byte_spec = get_spec(object(), config)
+    byte_spec = get_spec(object(), config).spec
     assert byte_spec.dtype == torch.uint8
     monkeypatch.setenv("VLLM_STEP5_INDEXER_FP8_AS_FP16", mode)
-    half_spec = get_spec(object(), config)
+    half_spec = get_spec(object(), config).spec
     assert half_spec.dtype == torch.float16
     assert (half_spec.head_size, half_spec.tokens_per_state) == (
         byte_spec.head_size,
@@ -976,7 +1081,6 @@ def test_reapplication_raises(installed_model_patches) -> None:
             "vllm.model_executor.models.llama4",
             "Llama4MoE.custom_routing_function",
             reason="test",
-            affected_versions=">=0.27.0,<0.28.0",
             remove_when="never; test-only",
         )
         def custom_routing_function(*args, **kwargs):
@@ -1022,7 +1126,7 @@ def test_replacements_accept_upstream_keywords(
 
 
 def _marlin_boundary(modules, root, preloaded):
-    """加载真实准入函数及 authored patch；不是完整 upstream 导入或设备证据。"""
+    """Load real gating functions and authored patches; not full upstream import or device evidence."""
     platform = NS(
         ppu=True,
         capability=80,
@@ -1045,10 +1149,14 @@ def _marlin_boundary(modules, root, preloaded):
     )
     modules("vllm.platforms", current_platform=platform)
     envs = modules("vllm_sail.envs", VLLM_SAIL_ENABLE_MOE_MARLIN=False)
+    modules(
+        "vllm.model_executor.layers.quantization.online.requantization",
+        is_requantization_source=lambda: False,
+    )
     utils_path = root / "vllm/model_executor/layers/quantization/utils"
     scalar_types = NS(
         **{
-            name: object()
+            name: type(name, (), {"size_bits": 4 if "4" in name else 8})()
             for name in (
                 "uint4",
                 "uint8",
@@ -1084,7 +1192,7 @@ def _marlin_boundary(modules, root, preloaded):
     nvfp4_consumers = (
         "vllm.model_executor.layers.quantization.compressed_tensors.schemes.compressed_tensors_w4a4_nvfp4",
         "vllm.model_executor.layers.quantization.modelopt",
-        "vllm.model_executor.layers.quantization.online.lm_head",
+        "vllm.model_executor.layers.quantization.online.nvfp4",
         "vllm.model_executor.layers.quantization.quark.schemes.quark_nvfp4",
     )
     if preloaded:
@@ -1119,6 +1227,9 @@ def _marlin_boundary(modules, root, preloaded):
         (),
         {
             "_supports_current_device": staticmethod(device_check),
+            "executed_activation_key": staticmethod(
+                function(experts_path, "MarlinExpertsBase.executed_activation_key", {})
+            ),
             "_supports_quant_scheme": staticmethod(lambda *a: True),
         },
     )
@@ -1215,7 +1326,7 @@ def test_real_marlin_compute_admission_rejects_ppu_but_preserves_layout(
         state.patch._NO_PPU_MARLIN,
     )
     quant_type = state.scalar_types.uint4b8
-    # 公共量化配置校验不能阻断之后的 Triton/Humming 等 MP 内核选择。
+    # Shared quant config validation must not block later MP kernel selection such as Triton/Humming.
     assert state.utils._check_marlin_supported is state.dense_config_check
     assert state.utils.check_marlin_supported(quant_type, 32) is True
     assert state.utils.verify_marlin_supported(quant_type, 32) is None
@@ -1226,10 +1337,7 @@ def test_real_marlin_compute_admission_rejects_ppu_but_preserves_layout(
         assert getattr(sys.modules[consumer], name) is getattr(provider, name)
     records = patch_utils_module.PATCH_REGISTRY
     assert len(records) == (14 if preloaded else 6)
-    assert all(
-        r.affected_versions == ">=0.32.0,<0.33.0" and r.reason and r.remove_when
-        for r in records
-    )
+    assert all(r.reason and r.remove_when for r in records)
     target = "vllm.model_executor.layers.fused_moe.experts.marlin_moe.MarlinExpertsBase._supports_current_device"
     assert (
         patch_utils_module.original_of(state.experts._supports_current_device, target)
@@ -1259,7 +1367,6 @@ def test_real_marlin_compute_admission_rejects_ppu_but_preserves_layout(
             "vllm.model_executor.layers.fused_moe.experts.marlin_moe",
             "MarlinExpertsBase._supports_current_device",
             reason="test",
-            affected_versions=">=0.32.0,<0.33.0",
             remove_when="test-only",
         )(lambda: True)
 
@@ -1323,6 +1430,7 @@ def test_real_mxfp4_oracle_rejects_marlin_compute_and_keeps_auto_fallback(
                 "BATCHED_MARLIN",
                 "EMULATION",
                 "FALLBACK",
+                "NONE",
                 "XPU",
             )
         },
@@ -1393,10 +1501,12 @@ def test_real_mxfp4_oracle_rejects_marlin_compute_and_keeps_auto_fallback(
 
 
 def _linear_selection_boundary(state, root, backend):
-    """真实筛选 helpers；候选列表和可选 Humming 优先级是本测试的外部边界。"""
+    """Real selection helpers; candidate list and optional Humming priority are external boundaries here."""
     linear = state.linear
     linear.envs = NS(VLLM_DISABLED_KERNELS=[], VLLM_BATCH_INVARIANT=False)
     linear.logger = NS(
+        debug=lambda *a, **kw: None,
+        debug_once=lambda *a, **kw: None,
         info=lambda *a, **kw: None,
         info_once=lambda *a, **kw: None,
         warning_once=lambda *a, **kw: None,
@@ -1426,7 +1536,7 @@ def test_real_mp_constructor_and_weight_creation_preserve_non_marlin_selection(
     method_name,
     backend,
 ):
-    """真实 constructor/create_weights/selector/Triton 准入；不执行分配或 GEMM。"""
+    """Real constructor/create_weights/selector/Triton gating; does not run allocation or GEMM."""
     state = _marlin_boundary(modules, upstream_source_root, preloaded)
     linear = _linear_selection_boundary(state, upstream_source_root, backend)
     dtype = state.config.act_type
@@ -1470,6 +1580,14 @@ def test_real_mp_constructor_and_weight_creation_preserve_non_marlin_selection(
     state.dense.get_min_capability = classmethod(
         function(marlin_path, "MarlinLinearKernel.get_min_capability", {})
     )
+    for cls in (state.dense, triton):
+        cls.is_supported = classmethod(
+            function(
+                marlin_path.with_name("MPLinearKernel.py"),
+                "MPLinearKernel.is_supported",
+                {"current_platform": state.platform},
+            )
+        )
     linear._POSSIBLE_KERNELS = {state.platform._enum: [state.dense, triton]}
     linear._LINEAR_BACKEND_KERNEL_MAP = {"marlin": {state.dense}, "triton": {triton}}
     awq = method_name == "AutoAWQMarlinLinearMethod"
@@ -1526,7 +1644,7 @@ def test_real_mp_constructor_and_weight_creation_preserve_non_marlin_selection(
         register_parameter=lambda name, value: parameters.__setitem__(name, value)
     )
     if backend == "marlin":
-        with pytest.raises(ValueError, match="PPU 没有 Marlin"):
+        with pytest.raises(ValueError, match="PPU does not ship Marlin"):
             method.create_weights(layer, 128, [128], 128, 128, dtype)
         assert parameters == {}
     else:
@@ -1580,7 +1698,7 @@ def test_marlin_gate_static_inventory_resolves_all_compute_and_consumer_targets(
 
 
 def _nvfp4_selection_boundary(state, modules, root, backend, has_humming):
-    """真实 Marlin/Humming 准入，第三方可用性和实例构造是外部边界。"""
+    """Real Marlin/Humming gating; third-party availability and instance construction are external boundaries."""
     linear = _linear_selection_boundary(state, root, backend)
 
     def initialize(self, config):
@@ -1632,11 +1750,21 @@ def _nvfp4_selection_boundary(state, modules, root, backend, has_humming):
                 {
                     "__init__": initialize,
                     "is_supported": classmethod(
-                        lambda cls, *a: (False, "测试边界：该后端不可用")
+                        lambda cls, *a: (False, "test boundary: backend unavailable")
                     ),
                 },
             ),
         )
+    linear.LinearKernelOracle = NS(maybe_skip_for_requantization_source=lambda: False)
+    linear._first_usable_kernel = function(
+        root / "vllm/model_executor/kernels/linear/__init__.py",
+        "_first_usable_kernel",
+        linear.__dict__,
+    )
+    linear._check_activation_fallback = (
+        lambda cls, key: None
+    )  # Activation policy is outside the hardware-admission test.
+    linear.kNvfp4Dynamic = object()
     linear.NvFp4LinearLayerConfig = NS
     linear.prefers_humming = lambda *a: False
     linear._POSSIBLE_NVFP4_KERNELS = {
@@ -1689,7 +1817,7 @@ def test_real_nvfp4_auto_fallback_and_explicit_marlin_rejection(
     else:
         result = linear.init_nvfp4_linear_kernel(use_a16=True)
         assert isinstance(result, linear.HummingNvFp4LinearKernel)
-        # 模拟预加载和后加载的消费者别名使用同一 selector 和活跃 registry。
+        # Simulate preloaded and late-loaded consumer aliases sharing the same selector and live registry.
         for consumer in state.nvfp4_consumers:
             result = sys.modules[consumer].init_nvfp4_linear_kernel(use_a16=True)
             assert isinstance(result, linear.HummingNvFp4LinearKernel)
@@ -1719,7 +1847,7 @@ def test_nvfp4_non_ppu_selector_delegates_and_preserves_exception_identity(
 
 
 def _nvfp4_cutlass_bias_boundary(root, capability, padded_rows, padded_k, fail_at=None):
-    """真实 class、padding/slice helpers；tensor、native 量化/GEMM 与支持查询是替身。"""
+    """Real class and padding/slice helpers; tensors, native quant/GEMM, and support probes are doubles."""
     events = []
     error = RuntimeError("NVFP4 native boundary failed")
     dtype = object()
@@ -1772,7 +1900,7 @@ def _nvfp4_cutlass_bias_boundary(root, capability, padded_rows, padded_k, fail_a
 
     kernel_root = root / "vllm/model_executor/kernels/linear/nvfp4"
     utils = root / "vllm/model_executor/layers/quantization/utils/nvfp4_utils.py"
-    base_init = function(kernel_root / "base.py", "NvFp4LinearKernel.__init__", {})
+    base_init = function(kernel_root.parent / "base.py", "LinearKernel.__init__", {})
     base = type("NvFp4LinearKernel", (), {"__init__": base_init})
     namespace = {
         "NvFp4LinearKernel": base,
@@ -1785,6 +1913,17 @@ def _nvfp4_cutlass_bias_boundary(root, capability, padded_rows, padded_k, fail_a
         "nvfp4_weight_padding_bytes": function(utils, "nvfp4_weight_padding_bytes", {}),
         "slice_nvfp4_output": function(utils, "slice_nvfp4_output", {}),
     }
+    namespace.update(
+        torch=NS(Tensor=Tensor),
+        kNvfp4Dynamic="nvfp4",
+        as_quantized_activation=lambda value, key: None,
+        QuantizedActivation=lambda data, scale, dtype, shape, key: NS(
+            data=data, scale=scale, orig_dtype=dtype, orig_shape=shape
+        ),
+    )
+    base.prepare_input = function(
+        kernel_root / "base.py", "NvFp4LinearKernel.prepare_input", namespace
+    )
     cls = function(kernel_root / "cutlass.py", "CutlassNvFp4LinearKernel", namespace)
     config = object()
     kernel = cls(config)
@@ -1811,7 +1950,7 @@ def _nvfp4_cutlass_bias_boundary(root, capability, padded_rows, padded_k, fail_a
 def test_nvfp4_cutlass_bias_applies_once_after_padding_or_in_epilogue(
     upstream_source_root, capability, padded_rows, padded_k, with_bias
 ):
-    """仅验证真实 provider 的调用契约；模拟支持查询不代表该设备支持 CUTLASS FP4。"""
+    """Verifies only the real provider's call contract; mocked support probes do not imply CUTLASS FP4 device support."""
     f = _nvfp4_cutlass_bias_boundary(
         upstream_source_root, capability, padded_rows, padded_k
     )
@@ -1825,7 +1964,6 @@ def test_nvfp4_cutlass_bias_applies_once_after_padding_or_in_epilogue(
         f.layer.input_global_scale_inv,
         dict(
             is_sf_swizzled_layout=True,
-            backend="cutlass",
             padded_n=96 if padded_k else 64,
         ),
     )
@@ -1886,7 +2024,7 @@ def test_real_nvfp4_selector_observes_optional_provider_gate_before_compute(
     backend,
     batch_invariant,
 ):
-    """真实 selector、准入与安装重绑；包探测是边界，不提供第三方或设备运行证据。"""
+    """Real selector, gating, and install rebinding; package probing is a boundary and gives no third-party or device evidence."""
     state = _marlin_boundary(modules, upstream_source_root, preloaded)
     state.platform.capability = capability
     package_reads = []
@@ -1909,7 +2047,7 @@ def test_real_nvfp4_selector_observes_optional_provider_gate_before_compute(
         state, modules, upstream_source_root, backend, installed
     )
     humming = sys.modules["vllm.model_executor.kernels.linear.nvfp4.humming"]
-    # 模拟真实模块级 from-import；旧测试中的假定可用 provider 边界保持不变。
+    # Simulate real module-level from-import while preserving the existing available-provider boundary.
     humming.has_humming = import_utils.has_humming
     if preloaded:
         load_patch("vllm_sail/patch/enhancement/import_gates.py")
@@ -1919,7 +2057,7 @@ def test_real_nvfp4_selector_observes_optional_provider_gate_before_compute(
     assert package_reads == ["humming"]
 
     def forbidden_provider():
-        pytest.fail("80/89 的准入必须在查询 FlashInfer provider 前拒绝")
+        pytest.fail("80/89 gating must reject before probing the FlashInfer provider")
 
     flashinfer_path = (
         upstream_source_root / "vllm/model_executor/kernels/linear/nvfp4/flashinfer.py"
@@ -1942,7 +2080,7 @@ def test_real_nvfp4_selector_observes_optional_provider_gate_before_compute(
         )
     linear._POSSIBLE_NVFP4_KERNELS[state.platform._enum].insert(0, cute)
     linear.envs.VLLM_BATCH_INVARIANT = batch_invariant
-    # 无可用 W4A16 时应给出诊断，不能进入被排除的 Marlin/Humming 计算路径。
+    # Report a diagnostic when no W4A16 backend is available without entering excluded Marlin/Humming compute paths.
     for select in (
         linear.init_nvfp4_linear_kernel,
         *(sys.modules[name].init_nvfp4_linear_kernel for name in state.nvfp4_consumers),
@@ -1961,7 +2099,7 @@ def test_real_nvfp4_selector_observes_optional_provider_gate_before_compute(
 
 
 def _real_nvfp4_consumer_call(state, root, consumer, use_a16):
-    """真实入口 body；模块、基类、分配、量化和 kernel post-load 是测试边界。"""
+    """Real entrypoint body; modules, base classes, allocations, quantization, and kernel post-load are test boundaries."""
     linear = state.linear
     selected, processed, exposed = [], [], []
     for kernel_cls in (linear.HummingNvFp4LinearKernel, linear.MarlinNvFp4LinearKernel):
@@ -1973,7 +2111,7 @@ def _real_nvfp4_consumer_call(state, root, consumer, use_a16):
         selected.append((args, kwargs))
         return linear.init_nvfp4_linear_kernel(*args, **kwargs)
 
-    # 复用 fixture 中的消费者 module 与活跃 globals；不是 installed module 导入证据。
+    # Reuse the fixture's consumer module and live globals; not installed-module import evidence.
     provider = sys.modules[consumer]
     assert provider.init_nvfp4_linear_kernel is linear.init_nvfp4_linear_kernel
     provider.init_nvfp4_linear_kernel = select
@@ -1985,6 +2123,7 @@ def _real_nvfp4_consumer_call(state, root, consumer, use_a16):
         key_type = type("QuantKey", (), {})
         key = key_type()
         key.dtype = object()
+        provider.kInt8Static = object()
         provider.QuantKey, provider.FP4_DTYPE = key_type, key.dtype
         function(path, "select_linear_kernel", provider.__dict__)
         provider.Shapes = lambda *args: args
@@ -2025,7 +2164,7 @@ def _real_nvfp4_consumer_call(state, root, consumer, use_a16):
         elif consumer.endswith("quark_nvfp4"):
             path = base / "quark/schemes/quark_nvfp4.py"
             class_name = "QuarkNVFP4"
-            # 保留真实 class 编译产生的 __class__ closure，使零参数 super 正常工作。
+            # Preserve the real class's __class__ closure so zero-arg super() works normally.
             provider.QuarkScheme = type(
                 "QuarkScheme", (), {"__init__": lambda self, *args: None}
             )
@@ -2034,14 +2173,14 @@ def _real_nvfp4_consumer_call(state, root, consumer, use_a16):
             invoke_args = {"activation_quant_key": provider.kNvfp4Dynamic}
             expected_call = ((), {})
         else:
-            path = base / "online/lm_head.py"
-            class_name = "_LMHeadNvfp4Method"
-            provider.OnlineLinearBase = object
-            packed, scales, global_scale = object(), object(), object()
-            provider._quantize_nvfp4 = lambda weight: (packed, scales, global_scale)
-            provider.replace_parameter = setattr
-            invoke_args = {}
-            expected_call = ((), {"use_a16": True})
+            path = base / "online/nvfp4.py"
+            class_name = "Nvfp4WeightOnlyOnlineLinearMethod"
+            provider.OnlineLinearBase = type(
+                "Base", (), {"create_weights": lambda self, *a, **kw: None}
+            )
+            provider.NVFP4_BLOCK_SIZE = 16
+            params_dtype = object()
+            expected_call = ((), {"use_a16": True, "act_dtype": params_dtype})
         tree = ast.Module(
             body=[
                 ast.ImportFrom(
@@ -2056,11 +2195,12 @@ def _real_nvfp4_consumer_call(state, root, consumer, use_a16):
             provider.__dict__,
         )
         cls = getattr(provider, class_name)
-        if consumer.endswith("lm_head"):
+        if consumer.endswith("online.nvfp4"):
             method = cls()
 
             def invoke():
-                return method.process_weights_after_loading(layer)
+                method.create_weights(layer, 128, [128], 128, 128, params_dtype)
+                return method
         else:
 
             def invoke():
@@ -2109,8 +2249,8 @@ def test_real_nvfp4_consumers_keep_actual_call_shapes_and_ppu_selection(
             assert len(call.exposed) == 1
             assert isinstance(call.exposed[0], linear.HummingNvFp4LinearKernel)
         else:
-            assert call.processed == [call.layer]
-            assert not hasattr(call.layer, "input_global_scale")
+            assert isinstance(result.kernel, linear.HummingNvFp4LinearKernel)
+            assert result.kernel.config.act_dtype is call.expected_call[1]["act_dtype"]
     assert call.selected == [call.expected_call]
 
 
@@ -2148,7 +2288,7 @@ def test_real_nvfp4_w4a4_preserves_emulation_fallback_but_never_uses_it_for_a16(
 
 
 def _glm_mtp_quant_boundary(modules, patch_utils_module, root, torch):
-    """真实 MTP/MRO/mapper 源码；模块导入、配置构造和预测器分配是边界。"""
+    """Real MTP/MRO/mapper source; module imports, config construction, and predictor allocation are boundaries."""
     from dataclasses import dataclass, field, replace
     from typing import Protocol
 
@@ -2166,7 +2306,7 @@ def _glm_mtp_quant_boundary(modules, patch_utils_module, root, torch):
     mapper_module = modules(
         "vllm.model_executor.models.utils", field=field, replace=replace, logger=logger
     )
-    mapper = dataclass(
+    mapper = dataclass(slots=True)(
         function(model_dir / "utils.py", "WeightsMapper", mapper_module.__dict__)
     )
     mapper_module.WeightsMapper = mapper
@@ -2265,7 +2405,7 @@ def test_glm_mtp_real_mro_applies_rename_only_mapping_before_predictor(
     preloaded,
     prefix,
 ):
-    """真实 Torch Module、Protocol 和 __new__；不是完整模型导入或权重数值证据。"""
+    """Real Torch Module, Protocol, and __new__; not full model import or numerical weight evidence."""
     from types import MappingProxyType
 
     torch = pytest.importorskip("torch")
@@ -2287,9 +2427,13 @@ def test_glm_mtp_real_mro_applies_rename_only_mapping_before_predictor(
     patch_module._enable_supports_quant()
     patch_module._enable_packed_modules_mapping()
     assert patch_utils_module.PATCH_REGISTRY == records
-    assert all(r.affected_versions == ">=0.32.0,<0.33.0" for r in records)
+    assert all(r.reason and r.remove_when for r in records)
     mapper = captured.hf_to_vllm_mapper
-    # 加载专用丢弃/堆叠/变换不能流入量化层列表；保留原 mapper 以独立比较。
+    assert not hasattr(mapper, "__dict__")
+    assert f"{state.module.__name__}.Glm5NextMTP.hf_to_vllm_mapper" in getattr(
+        mapper, patch_utils_module.PATCH_MARKER
+    )
+    # Load-only drops, stacks, and transforms must stay out of quantized layer lists.
     mapper.orig_to_new_substr = {"load_only": None}
     mapper.orig_to_new_stacked = {"gate_proj": ("wrong_fused", 0)}
     mapper.weights_transforms = [lambda weights: iter(())]
@@ -2353,7 +2497,7 @@ def test_glm_real_decoder_keeps_mtp_topk_layout_and_unsummed_residual(
     is_mtp,
     sequence_parallel,
 ):
-    """完整真实 decoder constructor/forward；注意力、MLP、norm 是显式数值边界。"""
+    """Full real decoder constructor/forward; attention, MLP, and norm are explicit numerical boundaries."""
     torch = pytest.importorskip("torch")
     attention_calls, mlp_calls, kda_calls = [], [], []
 
@@ -2393,6 +2537,11 @@ def test_glm_real_decoder_keeps_mtp_topk_layout_and_unsummed_residual(
             "torch": torch,
             "_is_moe": lambda config: False,
             "_is_kda_layer": is_kda,
+            "_mla_dequantized_at_load": function(
+                upstream_source_root / "vllm/models/glm5next/common/model.py",
+                "_mla_dequantized_at_load",
+                {},
+            ),
             "Glm5NextMLAAttention": Attention,
             "Glm5NextMLP": MLP,
             "Glm5NextMoE": type("MoE", (), {}),
@@ -2435,7 +2584,7 @@ def test_glm_real_decoder_keeps_mtp_topk_layout_and_unsummed_residual(
     assert owner.layer_kind == "mla" and len(attention_calls) == len(mlp_calls) == 1
     assert attention_calls[0]["shardq_eligible"] is (not is_mtp)
     assert attention_calls[0]["topk_indices_buffer"] is topk
-    assert attention_calls[0]["quant_config"] is None
+    assert attention_calls[0]["quant_config"] is quant
     assert attention_calls[0]["cache_config"] is cache
     assert mlp_calls[0]["quant_config"] is quant
     assert owner.self_attn.o_proj.reduce_results is (is_mtp or not sequence_parallel)

@@ -14,7 +14,6 @@ from vllm_sail.patch.utils import patch
 from vllm_sail.registry.moe_backends._extend import extend_enum
 
 _MODULE = "vllm.model_executor.layers.fused_moe.oracle.fp8"
-_AFFECTED = ">=0.32.0,<0.33.0"
 _REMOVE_WHEN = (
     "upstream gains a register_moe_backend() extension point mirroring "
     "register_linear_kernel(), which would delete this patch."
@@ -34,7 +33,6 @@ _upstream_select_fp8_moe_backend = oracle.select_fp8_moe_backend
     _MODULE,
     "_get_priority_backends",
     reason="The FP8 oracle candidate list has no PPU DeepGEMM backends.",
-    affected_versions=_AFFECTED,
     remove_when=_REMOVE_WHEN,
 )
 def _get_priority_backends(
@@ -68,7 +66,6 @@ def _get_priority_backends(
     _MODULE,
     "backend_to_kernel_cls",
     reason="The FP8 oracle cannot resolve plugin-owned PPU expert classes.",
-    affected_versions=_AFFECTED,
     remove_when=_REMOVE_WHEN,
 )
 def backend_to_kernel_cls(
@@ -93,7 +90,6 @@ def backend_to_kernel_cls(
     _MODULE,
     "map_fp8_backend",
     reason="The public ppu_deep_gemm string has no upstream FP8 member mapping.",
-    affected_versions=_AFFECTED,
     remove_when=_REMOVE_WHEN,
 )
 def map_fp8_backend(runner_backend: MoEBackend) -> Fp8MoeBackend:
@@ -103,6 +99,9 @@ def map_fp8_backend(runner_backend: MoEBackend) -> Fp8MoeBackend:
 
 
 def _select_ppu_backend(config, weight_key, activation_key, backend):
+    source = oracle.Fp8MoEKernelOracle.maybe_skip_for_requantization_source()
+    if source is not None:
+        return source
     activation_format = config.activation_format
     if (
         activation_format == mk.FusedMoEActivationFormat.BatchedExperts
@@ -125,7 +124,6 @@ def _select_ppu_backend(config, weight_key, activation_key, backend):
         "Explicit PPU FP8 selection must choose the batched PPU expert when "
         "needed and honor the plugin-specific DeepGEMM environment override."
     ),
-    affected_versions=_AFFECTED,
     remove_when=_REMOVE_WHEN,
 )
 def select_fp8_moe_backend(
@@ -162,7 +160,6 @@ _upstream_quant_config = oracle.make_fp8_moe_quant_config
     _MODULE,
     "convert_to_fp8_moe_kernel_format",
     reason="PPU FP8 experts require block weight preparation or unchanged channelwise tensors.",
-    affected_versions=_AFFECTED,
     remove_when=_REMOVE_WHEN,
 )
 def convert_to_fp8_moe_kernel_format(
@@ -198,7 +195,6 @@ def convert_to_fp8_moe_kernel_format(
     _MODULE,
     "make_fp8_moe_quant_config",
     reason="FP8 channelwise quantization must preserve SwiGLU alpha and beta.",
-    affected_versions=_AFFECTED,
     remove_when=_REMOVE_WHEN,
 )
 def make_fp8_moe_quant_config(*args, **kwargs):

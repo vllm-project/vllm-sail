@@ -121,7 +121,7 @@ def test_prefill_passes_window_bound_and_masks_relative_columns(
 @pytest.mark.parametrize("policy", ["int8", "fp8", "mxfp4", "kpool"])
 @pytest.mark.parametrize("shard", [False, True])
 def test_compact_queries_preserve_cache_stream_and_chunk_output(policy, shard):
-    """完整 PPU op 的查询行序；张量与 native kernel 仅作为严格边界替身。"""
+    """Query row ordering for the full PPU op; tensors and native kernels are strict boundary doubles."""
     calls = []
 
     class Rows:
@@ -327,7 +327,7 @@ def test_kpool_real_chunk_metadata_keeps_full_cache_and_compact_tail_coordinates
     shard,
     pool_size,
 ):
-    """真实 split、chunk builder、dataclass 与展开；缓存写入及 native 评分是边界。"""
+    """Real split, chunk builder, dataclass, and expansion; cache writes and native scoring are boundaries."""
     from dataclasses import dataclass
     from typing import NamedTuple
 
@@ -392,7 +392,7 @@ def test_kpool_real_chunk_metadata_keeps_full_cache_and_compact_tail_coordinates
         interleave,
         **kwargs,
     ):
-        # 严格 launcher 边界：只提供预定的输出，不执行或证明 Triton kernel 数值。
+        # Strict launcher boundary: supplies fixed outputs without executing or proving Triton kernel numerics.
         assert qloc.tolist() == ([0, 4, 6] if shard else [0, 8, 12])
         assert lengths.tolist() == [17, 12]
         assert local_cu is cu and (rank, world, interleave) == (0, 1, 1)
@@ -594,7 +594,7 @@ def test_kpool_real_chunk_metadata_keeps_full_cache_and_compact_tail_coordinates
 def test_real_pcp_slot_producer_and_cache_gather_align_rank_local_inputs(
     upstream_source_root, decode_tokens, shard_decode
 ):
-    """真实 PCP slot producer 和输入 gather；collective 是严格边界，不证明 Kpool PCP 支持。"""
+    """Real PCP slot producer and input gather; collectives are a strict boundary and do not prove Kpool PCP support."""
     torch = pytest.importorskip("torch")
     source = upstream_source_root / "vllm"
     local_ids = [0, 1, 6, 7]

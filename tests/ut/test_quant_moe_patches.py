@@ -26,7 +26,7 @@ from vllm_sail.patch.utils import PATCH_REGISTRY
 
 ENHANCEMENT_DIR = Path(__file__).parents[2] / "vllm_sail" / "patch" / "enhancement"
 MODULE_NAMES = ("compressed_tensors_ppu", "fused_moe_ppu")
-REQUIRED_METADATA = ("reason", "affected_versions", "remove_when")
+REQUIRED_METADATA = ("reason", "remove_when")
 
 
 @pytest.fixture()
@@ -122,11 +122,10 @@ def test_module_imports_on_bare_cpu(leaf_module) -> None:
 def test_metadata_shape(leaf_module) -> None:
     metadata = leaf_module.METADATA
     assert metadata
-    for target, reason, affected, remove_when in metadata:
+    for target, reason, remove_when in metadata:
         assert target.startswith("vllm."), target
-        for value in (reason, affected, remove_when):
+        for value in (reason, remove_when):
             assert isinstance(value, str) and value.strip(), target
-        assert ">=" in affected and "<" in affected, target
         assert remove_when.strip().lower() != "todo", target
 
 

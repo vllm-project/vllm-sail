@@ -44,7 +44,6 @@ from vllm.v1.attention.ops import flashmla as _flashmla_ops
 import vllm_sail.envs as ppu_envs
 from vllm_sail.patch.utils import PATCH_MARKER, patch
 
-_AFFECTED = ">=0.32.0,<0.33.0"
 _MODULE = "vllm.v1.attention.ops.flashmla"
 
 try:  # torch.cuda.nvtx is absent on CPU-only torch builds.
@@ -79,6 +78,7 @@ _FLASHMLA_ALIAS_CONSUMERS = {
     ),
     "flash_mla_with_kvcache_fp8": ("vllm.v1.attention.backends.mla.flashmla",),
     "get_mla_metadata": (
+        "vllm.models.hy_v4.nvidia.flashmla_sparse",
         "vllm.v1.attention.backends.mla.flashmla",
         "vllm.v1.attention.backends.mla.flashmla_sparse",
         "vllm.v1.attention.backends.mla.sparse_swa",
@@ -171,7 +171,6 @@ def _fm_fmha_nvtx_push(call_kwargs: dict) -> bool:
         "FlashMLA unavailable unless those extensions imported, so on PPU the "
         "check must look for flash_mla instead."
     ),
-    affected_versions=_AFFECTED,
     remove_when="PPU builds vLLM's FlashMLA extensions, or upstream grows a pluggable FlashMLA provider.",
 )
 def _is_flashmla_available() -> tuple[bool, str | None]:
@@ -193,7 +192,6 @@ def _is_flashmla_available() -> tuple[bool, str | None]:
         "it to Hopper (family 90). The fork returns (True, None) on PPU once "
         "flash_mla is available."
     ),
-    affected_versions=_AFFECTED,
     remove_when="upstream's capability check accepts PPU for dense FlashMLA.",
 )
 def is_flashmla_dense_supported() -> tuple[bool, str | None]:
@@ -213,7 +211,6 @@ def is_flashmla_dense_supported() -> tuple[bool, str | None]:
         "it to Hopper and Blackwell datacenter devices. The fork returns "
         "(True, None) on PPU once flash_mla is available."
     ),
-    affected_versions=_AFFECTED,
     remove_when="upstream's capability check accepts PPU for sparse FlashMLA.",
 )
 def is_flashmla_sparse_supported() -> tuple[bool, str | None]:
@@ -234,7 +231,6 @@ def is_flashmla_sparse_supported() -> tuple[bool, str | None]:
         "compiled CUDA extensions PPU does not build). Lazy import keeps non-PPU "
         "hosts and hosts without flash_mla unaffected."
     ),
-    affected_versions=_AFFECTED,
     remove_when="PPU builds vLLM's FlashMLA extensions, or upstream grows a pluggable FlashMLA provider.",
 )
 def flash_mla_sparse_fwd(*args, **kwargs):
@@ -255,7 +251,6 @@ def flash_mla_sparse_fwd(*args, **kwargs):
         "NVTX range when VLLM_SAIL_NVTX_PROFILE is set; the fork pushes it in "
         "FlashMLAImpl.forward_mqa around this very call."
     ),
-    affected_versions=_AFFECTED,
     remove_when="PPU builds vLLM's FlashMLA extensions, or upstream grows a pluggable FlashMLA provider.",
 )
 def flash_mla_with_kvcache(*args, **kwargs):
@@ -279,7 +274,6 @@ def flash_mla_with_kvcache(*args, **kwargs):
         "rather than vllm.third_party.flashmla. Same reasoning as "
         "flash_mla_sparse_fwd."
     ),
-    affected_versions=_AFFECTED,
     remove_when="PPU builds vLLM's FlashMLA extensions, or upstream grows a pluggable FlashMLA provider.",
 )
 def get_mla_metadata(*args, **kwargs):
@@ -303,7 +297,6 @@ def get_mla_metadata(*args, **kwargs):
         "(flashmla_backend) attaches this sched meta to the field forward_mqa's "
         "FP8 branch reads, keeping upstream's tensor/CUDA-graph copies off PPU."
     ),
-    affected_versions=_AFFECTED,
     remove_when="PPU builds the FP8 dense FlashMLA metadata extension natively.",
 )
 def get_mla_metadata_dense_fp8(*args, **kwargs):
@@ -359,7 +352,6 @@ def _ppu_dense_fp8_folded_scale(softmax_scale, descale_q, descale_k) -> float:
         "folds q_scale*k_scale into softmax_scale (QK part) and rescales the "
         "output by k_scale (V part). Validated by tools/validate_ppu_dense_fp8.py."
     ),
-    affected_versions=_AFFECTED,
     remove_when="PPU builds the FP8 dense FlashMLA decode extension natively.",
 )
 def flash_mla_with_kvcache_fp8(
@@ -457,7 +449,6 @@ def _rebind_loaded_flashmla_aliases() -> None:
                 consumer_name,
                 alias_name,
                 reason=_ALIAS_REASON,
-                affected_versions=_AFFECTED,
                 remove_when=_ALIAS_REMOVE_WHEN,
             )(replacement)
 

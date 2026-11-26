@@ -32,7 +32,7 @@ def runtime():
         (17, 256, 6),
         (33, 384, 6),
         (17, 256, 8),
-        # 空行覆盖 FP32 hash 快路径，以及各 dtype 的通用 hash/non-hash launch。
+        # Empty rows cover the FP32 hash fast path as well as generic hash/non-hash launches per dtype.
         (0, 256, 6),
         (0, 384, 6),
         (0, 256, 8),
@@ -116,7 +116,7 @@ def test_topk_softplus_sqrt(runtime, dtype_name, shape, routing, renormalize):
 def test_topk_split_instances_preserve_image_padding_and_stream_contract(
     runtime, dtype_name, index_name, hash_index_name, experts, hash_routing, renormalize
 ):
-    """实际 op 覆盖九个 TU、hash-index 类型、五个 image sentinel 和普通 stream。"""
+    """Real op covers all nine TUs, hash-index types, five image sentinels, and ordinary streams."""
     torch = runtime
     topk, sentinel = 6, 5
     ids_cpu = torch.tensor([4, 5, 6, 7, 8, 9, 10, 11, 0, 1, 2, 3, 4])
@@ -174,7 +174,7 @@ def test_topk_split_instances_preserve_image_padding_and_stream_contract(
         expected /= expected.sum(-1, keepdim=True)
     expected *= 1.5
     expected[padding_cpu] = 0
-    # uint32 的 -1 哨兵是 2**32-1；在 CPU 上转为 int64 后独立比较。
+    # The uint32 -1 sentinel is 2**32-1; cast to int64 on CPU for independent comparison.
     expected_ids[padding_cpu] = (2**32 - 1) if index_name == "uint32" else -1
     torch.testing.assert_close(indices.cpu().long(), expected_ids, rtol=0, atol=0)
     torch.testing.assert_close(weights.cpu(), expected, rtol=2e-5, atol=2e-6)
