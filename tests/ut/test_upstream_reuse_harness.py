@@ -389,6 +389,43 @@ def test_the_guard_lets_a_cached_checkpoint_run(
     assert offline_hub_gap(entry, "offline") is None
 
 
+def test_model_config_fixtures_redirect_offline_without_using_the_hub_cache(
+    upstream: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    shared = tmp_path / "shared-hub"
+    monkeypatch.setenv("HF_HUB_CACHE", str(shared))
+    monkeypatch.setenv("HF_HUB_OFFLINE", "0")
+    monkeypatch.setenv("TRANSFORMERS_OFFLINE", "0")
+
+    def refuse_probe():
+        pytest.fail("config fixtures should bypass the network probe")
+
+    monkeypatch.setattr(harness, "hub_reachable", refuse_probe)
+    path = "tests/test_model_config_fixture.py"
+    (upstream / path).write_text(
+        "import json\n"
+        "import os\n"
+        "from pathlib import Path\n\n"
+        "def test_resolve_config():\n"
+        "    assert os.environ['HF_HUB_OFFLINE'] == '1'\n"
+        "    assert os.environ['TRANSFORMERS_OFFLINE'] == '1'\n"
+        "    redirect = Path(os.environ['VLLM_MODEL_REDIRECT_PATH'])\n"
+        "    mapping = json.loads(redirect.read_text())\n"
+        "    config = Path(mapping['facebook/opt-125m']) / 'config.json'\n"
+        "    assert json.loads(config.read_text())['model_type'] == 'opt'\n",
+        encoding="utf-8",
+    )
+    entry = make_entry(path, hub_repos=(), config_fixtures=("facebook/opt-125m",))
+    runner = UpstreamRunner(upstream)
+    try:
+        result = runner.run(entry)
+        assert result.returncode == 0, result.tail
+        assert result.passed == 1
+        assert not shared.exists()
+    finally:
+        runner.close()
+
+
 def test_the_guard_does_not_excuse_a_missing_upstream_file(
     upstream: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -465,6 +502,72 @@ def test_strict_collection_minimum_is_retained():
         make_entry("tests/test_example.py", min_tests=3), passing_result()
     )
     assert error is not None and "expected at least 3" in error
+
+
+@pytest.mark.parametrize(
+    ("extra", "message"),
+    [
+        ('nodeids = ["tests/test_other.py::test_case"]', "invalid or duplicate"),
+        ("nodeids = []", "invalid or duplicate"),
+        (
+            'nodeids = ["tests/test_example.py::test_case", '
+            '"tests/test_example.py::test_case"]',
+            "invalid or duplicate",
+        ),
+        (
+            'nodeids = ["tests/test_example.py::test_case"]\nkeywords = "case"',
+            "without other selectors",
+        ),
+    ],
+)
+def test_manifest_rejects_invalid_exact_selection(tmp_path, extra, message):
+    manifest = tmp_path / "manifest.toml"
+    manifest.write_text(
+        '[meta]\nschema = 1\n[[entry]]\nid = "example"\n'
+        'path = "tests/test_example.py"\nmode = "adapted"\nchips = ["cpu"]\n'
+        + extra
+        + "\n"
+    )
+    with pytest.raises(AssertionError, match=message):
+        harness.load_manifest(manifest)
+
+
+@pytest.mark.parametrize(
+    ("selector", "expected_error"),
+    [
+        ("TestSelection::test_parameter[only]", None),
+        ("TestSelection::test_parameter", "did not match passing tests"),
+        ("TestSelection::test_parameter[missing]", "status 4"),
+    ],
+)
+def test_exact_selection_requires_the_requested_cases(
+    upstream, monkeypatch, selector, expected_error
+):
+    path = "tests/test_exact.py"
+    (upstream / path).write_text(
+        "import pytest\n\n"
+        "class TestSelection:\n"
+        "    @pytest.mark.parametrize('value', [pytest.param(1, id='only')])\n"
+        "    def test_parameter(self, value):\n"
+        "        assert value == 1\n\n"
+        "def test_also_selected():\n"
+        "    assert True\n\n"
+        "def test_not_selected():\n"
+        "    assert False\n"
+    )
+    monkeypatch.setenv("HF_HUB_OFFLINE", "1")
+    entry = make_entry(
+        path,
+        mode="adapted",
+        min_tests=2,
+        nodeids=(f"{path}::{selector}", f"{path}::test_also_selected"),
+    )
+    result = UpstreamRunner(upstream).run(entry)
+    error = harness.strict_result_error(entry, result)
+    if expected_error is None:
+        assert error is None and result.passed == 2
+    else:
+        assert error is not None and expected_error in error
 
 
 @pytest.mark.parametrize("declare_no_hub_repos", [True, False])
@@ -605,7 +708,7 @@ def test_junit_preserves_skip_evidence(tmp_path):
         '<testcase classname="tests.example" name="test_fail"><failure/></testcase>'
         "</testsuite></testsuites>"
     )
-    collected, failures, errors, skipped, names, cases = harness._parse_junit(report)
+    collected, failures, errors, skipped, names, cases, _ = harness._parse_junit(report)
     assert (collected, failures, errors, skipped) == (3, 1, 0, 1)
     assert names == ["tests.example::test_fail"]
     assert cases == [
@@ -709,7 +812,7 @@ def test_reviewed_apc_skip_retains_source_location_and_count_limit(tmp_path):
         "/runtime/tests/v1/sample/test_logprobs.py:360: Skipped"
         "</skipped></testcase></testsuite></testsuites>"
     )
-    collected, failures, errors, skipped, names, cases = harness._parse_junit(report)
+    collected, failures, errors, skipped, names, cases, _ = harness._parse_junit(report)
     result = RunResult(
         0,
         collected,

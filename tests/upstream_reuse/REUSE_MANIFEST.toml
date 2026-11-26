@@ -6,14 +6,14 @@
 # from .github/vllm-main-verified.commit at CI time, or $VLLM_SOURCE_ROOT
 # locally). Paths are relative to the upstream repo root (the directory that
 # contains vllm/__init__.py). The whitelist is seeded from
-# outputs/02_可复用测试分析.html -- high-confidence L1 (直接可用) entries first,
-# plus a few L2 (少量适配) entries whose CPU-runnable core is worth gating.
+# outputs/02_reusable_tests_analysis.html -- high-confidence L1 (directly usable) entries first,
+# plus a few L2 (minor adaptation) entries whose CPU-runnable core is worth gating.
 #
 # vllm-sail disguises its PPU platform as CUDA (PPUPlatform._enum =
 # PlatformEnum.CUDA, current_platform.is_cuda() is True), so upstream tests
-# written against the CUDA platform -- but that do not touch concrete kernel
-# numerics -- run unchanged inside the vllm-sail runtime. That is exactly the
-# population whitelisted here.
+# written against the CUDA platform can run inside the SAIL runtime. Device
+# entries select verified nodes that exercise the SAIL backend with synthetic
+# tensors on the declared boards.
 #
 # Field reference (see tests/upstream_reuse/_reuse_harness.py:ReuseEntry):
 #   id          unique short key (used as the pytest parameter id)
@@ -23,7 +23,8 @@
 #                            applied by test_reuse_adapted.py
 #   chips       applicable targets, subset of {"cpu", "810e", "890p"}.
 #               CI runs the "890p" entries on M890; "cpu" entries can also run on
-#               a device-less host. Entries without "cpu" are marked `ppu`.
+#               a device-less host. "810e" can be selected for manual strict runs.
+#               Entries without "cpu" are marked `ppu`.
 #   category    free-form grouping (params / config / core / sample / ...)
 #   reason      why this entry is direct|adapted (audited on every bump)
 #   min_tests   minimum number of upstream test cases that must be collected;
@@ -32,6 +33,8 @@
 #   hub_repos   optional list of Hub repo IDs required by the selected tests;
 #               only declared repos are checked before offline execution
 #   # --- optional adaptation knobs (mode = "adapted" only) ---
+#   nodeids     exact pytest node IDs, including parameter IDs. Every node must
+#               pass. Replaces markers, keywords and deselect.
 #   markers     pytest -m expression narrowing the run
 #   keywords    pytest -k expression narrowing the run
 #   deselect    exact upstream node ids to --deselect
@@ -48,7 +51,7 @@ upstream_pin_file = ".github/vllm-main-verified.commit"
 description = "Whitelist of upstream vLLM tests reused inside the vllm-sail runtime."
 
 # ---------------------------------------------------------------------------
-# L1 直接可用 -- pure data-structure / parameter / config logic. No hardware
+# L1 directly usable -- pure data-structure / parameter / config logic. No hardware
 # SDK, no kernel numerics. Zero edits; run verbatim on CPU and on PPU.
 # ---------------------------------------------------------------------------
 
@@ -85,7 +88,7 @@ path = "tests/test_sampling_params.py"
 mode = "direct"
 chips = ["cpu", "810e", "890p"]
 category = "params"
-reason = "SamplingParams validation/defaults; pure CPU. Fast切分 of sampling-vs-logits regressions."
+reason = "SamplingParams validation/defaults; pure CPU. Fast isolation of sampling-vs-logits regressions."
 min_tests = 1
 
 [[entry]]
@@ -123,6 +126,24 @@ chips = ["cpu", "810e", "890p"]
 category = "config"
 reason = "CacheConfig/SchedulerConfig hash-factor and utils logic; pure CPU config layer."
 min_tests = 1
+
+[[entry]]
+id = "hf_overrides_model_type"
+path = "tests/transformers_utils/test_hf_overrides_model_type.py"
+mode = "direct"
+chips = ["cpu", "810e", "890p"]
+category = "config"
+reason = "Checks custom config-class resolution and registration using a temporary config.json."
+min_tests = 1
+
+[[entry]]
+id = "renderer_executor_replace"
+path = "tests/renderers/test_executor_replace.py"
+mode = "direct"
+chips = ["cpu", "810e", "890p"]
+category = "renderer"
+reason = "Checks that replacing the renderer executor preserves async tokenization and decode using a dummy tokenizer."
+min_tests = 2
 
 [[entry]]
 id = "multimodal_config"
@@ -198,12 +219,137 @@ category = "sample"
 reason = "Construct the active V2 sampler and verify per-request top-k, top-p, penalties, custom processor and slot reuse behavior on device."
 min_tests = 16
 
+[[entry]]
+id = "openai_tool_calls_serialization"
+path = "tests/entrypoints/openai/test_tool_calls_serialization.py"
+mode = "direct"
+chips = ["cpu", "810e", "890p"]
+category = "protocol"
+reason = "OpenAI tool calls preserve list and generator inputs through request serialization."
+min_tests = 6
+
+[[entry]]
+id = "watchdog_config"
+path = "tests/config/test_watchdog_config.py"
+mode = "direct"
+chips = ["cpu", "810e", "890p"]
+category = "config"
+reason = "Watchdog defaults and interval validation run without an engine or device."
+min_tests = 8
+
+[[entry]]
+id = "observability_config"
+path = "tests/config/test_observability.py"
+mode = "direct"
+chips = ["cpu", "810e", "890p"]
+category = "config"
+reason = "Observability histogram bucket validation exercises configuration without an engine."
+min_tests = 13
+
+[[entry]]
+id = "v1_request"
+path = "tests/v1/test_request.py"
+mode = "direct"
+chips = ["cpu", "810e", "890p"]
+category = "core"
+reason = "Request token buffers and serialization use local inputs without starting an engine."
+min_tests = 24
+
+[[entry]]
+id = "repetition_detection"
+path = "tests/v1/core/test_repetition_detection.py"
+mode = "direct"
+chips = ["cpu", "810e", "890p"]
+category = "core"
+reason = "Exercises repetition detection and stop decisions on synthetic request tokens."
+min_tests = 19
+
+[[entry]]
+id = "encoder_cache_manager"
+path = "tests/v1/core/test_encoder_cache_manager.py"
+mode = "direct"
+chips = ["cpu", "810e", "890p"]
+category = "core"
+reason = "Encoder cache allocation, references and eviction use synthetic multimodal inputs."
+min_tests = 22
+
+[[entry]]
+id = "structured_output_request"
+path = "tests/v1/structured_output/test_request.py"
+mode = "direct"
+chips = ["cpu", "810e", "890p"]
+category = "core"
+reason = "Tests readiness and failure of grammar futures without model initialization."
+min_tests = 2
+
 # ---------------------------------------------------------------------------
-# L2 少量适配 -- skeleton reusable, but the file mixes CPU logic with
+# L2 minor adaptation -- skeleton reusable, but the file mixes CPU logic with
 # device / distributed / network nodes. test_reuse_adapted.py narrows the run
 # (markers / -k / deselect / env) and records known xfails. Upstream source is
 # NEVER edited; all adaptation lives in the harness + adapted test module.
 # ---------------------------------------------------------------------------
+
+[[entry]]
+id = "model_arch_config_local"
+path = "tests/config/test_model_arch_config.py"
+mode = "adapted"
+chips = ["cpu", "810e", "890p"]
+category = "config"
+reason = "Checks architecture conversion, heterogeneous layer sizing, and quantization config normalization. Base and draft model integration cases require Hub metadata."
+deselect = [
+    "tests/config/test_model_arch_config.py::test_base_model_arch_config",
+    "tests/config/test_model_arch_config.py::test_draft_model_arch_config",
+]
+min_tests = 37
+
+[[entry]]
+id = "speculative_draft_hf_overrides"
+path = "tests/config/test_speculative_draft_hf_overrides.py"
+mode = "adapted"
+chips = ["cpu", "810e", "890p"]
+category = "config"
+reason = "Checks draft config overrides and DSpark and MTP width with mocked configs. The local model registration cases run separately on the PPU targets."
+deselect = [
+    "tests/config/test_speculative_draft_hf_overrides.py::test_mtp_draft_architecture_follows_target_model_impl",
+]
+min_tests = 20
+
+[[entry]]
+id = "speculative_draft_model_impl"
+path = "tests/config/test_speculative_draft_hf_overrides.py"
+mode = "adapted"
+chips = ["810e", "890p"]
+category = "config"
+reason = "Checks MTP draft architecture selection using local configs. Model registry subprocesses initialize SAIL platform hooks that query device capability."
+keywords = "test_mtp_draft_architecture_follows_target_model_impl"
+min_tests = 3
+
+[[entry]]
+id = "speculative_draft_rope_limits"
+path = "tests/config/test_speculative_draft_max_position_embeddings.py"
+mode = "adapted"
+chips = ["cpu", "810e", "890p"]
+category = "config"
+reason = "Checks the draft position limit for each RoPE type with in-memory configs. The target and draft integration cases require Hub metadata."
+deselect = [
+    "tests/config/test_speculative_draft_max_position_embeddings.py::test_eagle_draft_inherits_target_max_model_len",
+    "tests/config/test_speculative_draft_max_position_embeddings.py::test_mtp_draft_inherits_target_max_model_len",
+    "tests/config/test_speculative_draft_max_position_embeddings.py::test_dflash_draft_inherits_target_max_model_len",
+    "tests/config/test_speculative_draft_max_position_embeddings.py::test_independent_draft_model_keeps_its_own_limit",
+]
+min_tests = 10
+
+[[entry]]
+id = "kv_cache_config_builder"
+path = "tests/v1/core/test_kv_cache_config_builder.py"
+mode = "adapted"
+chips = ["cpu", "810e", "890p"]
+category = "core"
+reason = "Checks KV-cache placement hooks, grouping, and per-block sizing with synthetic specs. The override probe resolves the default Hub model config."
+deselect = [
+    "tests/v1/core/test_kv_cache_config_builder.py::TestBytesPerBlockProbe::test_probe_suppresses_override",
+]
+min_tests = 14
 
 [[entry]]
 id = "pooling_params"
@@ -220,6 +366,18 @@ hub_repos = []
 min_tests = 39
 
 [[entry]]
+id = "pooling_embed_dimensions"
+path = "tests/test_pooling_params.py"
+mode = "adapted"
+chips = ["810e", "890p"]
+category = "params"
+reason = "Checks embedding dimensions for two real model configurations using cached JSON metadata."
+keywords = "test_embed_dimensions[model_info0] or test_embed_dimensions[model_info1]"
+config_fixtures = ["vllm-project/multilingual-e5-small", "Snowflake/snowflake-arctic-embed-m-v1.5"]
+hub_repos = []
+min_tests = 2
+
+[[entry]]
 id = "prefix_caching"
 path = "tests/v1/core/test_prefix_caching.py"
 mode = "adapted"
@@ -227,6 +385,18 @@ chips = ["cpu", "810e", "890p"]
 category = "core"
 reason = "Prefix-cache eviction/hit logic is CPU-runnable, but the module imports KV-transfer connectors, and its two hisparse admission tests go through tests/v1/core/utils.py::create_scheduler(model='facebook/opt-125m'), which resolves the checkpoint on the Hugging Face hub; an offline runner blocks there instead of failing, so deselect connector and hisparse nodes to keep the CPU core green."
 keywords = "not connector and not kv_transfer and not hisparse"
+min_tests = 1
+
+[[entry]]
+id = "opt_scheduler_add_requests"
+path = "tests/v1/core/test_scheduler.py"
+mode = "adapted"
+chips = ["810e", "890p"]
+category = "core"
+reason = "Checks scheduler request admission with cached OPT configuration and synthetic requests."
+keywords = "test_add_requests"
+config_fixtures = ["facebook/opt-125m"]
+hub_repos = []
 min_tests = 1
 
 [[entry]]
@@ -239,3 +409,115 @@ reason = "Tokenizer registry consistency needs HuggingFace AutoConfig; pinned to
 env = { HF_HUB_OFFLINE = "1", TRANSFORMERS_OFFLINE = "1" }
 skip_reason = "requires a warm offline HF tokenizer cache (HF_HOME) on the runner; enable once the CI cache volume is provisioned"
 min_tests = 1
+
+[[entry]]
+id = "repetition_penalties_kernel"
+path = "tests/kernels/test_apply_repetition_penalties.py"
+mode = "adapted"
+chips = ["810e", "890p"]
+category = "kernel"
+reason = "Compares the registered repetition penalty kernel against Torch for empty and small nonempty batches."
+nodeids = [
+    "tests/kernels/test_apply_repetition_penalties.py::test_apply_repetition_penalties_zero_seqs",
+    "tests/kernels/test_apply_repetition_penalties.py::test_apply_repetition_penalties[0-dtype0-1.05-17-2]",
+]
+min_tests = 2
+
+[[entry]]
+id = "rms_norm_kernel"
+path = "tests/kernels/core/test_layernorm.py"
+mode = "adapted"
+chips = ["810e", "890p"]
+category = "kernel"
+reason = "Checks weighted and weightless RMSNorm, residuals, and strided input on small BF16 tensors."
+nodeids = [
+    "tests/kernels/core/test_layernorm.py::test_rms_norm[False-cuda:0-0-dtype1-False-768-7]",
+    "tests/kernels/core/test_layernorm.py::test_rms_norm[False-cuda:0-0-dtype1-True-768-7]",
+    "tests/kernels/core/test_layernorm.py::test_rms_norm[True-cuda:0-0-dtype1-False-768-7]",
+    "tests/kernels/core/test_layernorm.py::test_rms_norm[True-cuda:0-0-dtype1-True-768-7]",
+    "tests/kernels/core/test_layernorm.py::test_rms_norm_weightless[cuda:0-0-dtype1-False-768-7]",
+    "tests/kernels/core/test_layernorm.py::test_rms_norm_weightless[cuda:0-0-dtype1-True-768-7]",
+]
+min_tests = 6
+
+[[entry]]
+id = "int8_quant_kernel"
+path = "tests/kernels/quantization/test_int8_quant.py"
+mode = "adapted"
+chips = ["810e", "890p"]
+category = "kernel"
+reason = "Checks quantized values and scales for small symmetric dynamic and static INT8 inputs."
+nodeids = [
+    "tests/kernels/quantization/test_int8_quant.py::test_dynamic_scaled_int8_quant[0-dtype0-17-7]",
+    "tests/kernels/quantization/test_int8_quant.py::test_static_scaled_int8_quant[2.1-0-dtype0-17-7]",
+]
+min_tests = 2
+
+[[entry]]
+id = "kv_cache_asymmetric_tiny_head"
+path = "tests/kernels/attention/test_cache.py"
+mode = "adapted"
+chips = ["810e", "890p"]
+category = "kernel"
+reason = "Checks BF16 cache writes with unequal key and value widths and a head smaller than a warp."
+nodeids = [
+    "tests/kernels/attention/test_cache.py::test_reshape_and_cache_flash_asymmetric_tiny_head",
+]
+min_tests = 1
+
+[[entry]]
+id = "rotary_embedding_opcheck"
+path = "tests/kernels/core/test_rotary_embedding.py"
+mode = "adapted"
+chips = ["810e"]
+category = "kernel"
+reason = "Checks optional keys and head-stride variants with single-rank initialization on 810E."
+nodeids = [
+    "tests/kernels/core/test_rotary_embedding.py::test_rotary_embedding_opcheck[dtype1-True-True-11-32-32-True-11-cuda]",
+    "tests/kernels/core/test_rotary_embedding.py::test_rotary_embedding_opcheck[dtype1-True-False-11-32-32-True-11-cuda]",
+    "tests/kernels/core/test_rotary_embedding.py::test_rotary_embedding_opcheck[dtype1-False-True-11-32-32-True-11-cuda]",
+    "tests/kernels/core/test_rotary_embedding.py::test_rotary_embedding_opcheck[dtype1-False-False-11-32-32-True-11-cuda]",
+]
+min_tests = 4
+
+[[entry]]
+id = "triton_topk_topp"
+path = "tests/v1/sample/test_topk_topp_sampler.py"
+mode = "adapted"
+chips = ["810e", "890p"]
+category = "sample"
+reason = "Checks Triton sampling with noncontiguous logits and fully masked rows."
+nodeids = [
+    "tests/v1/sample/test_topk_topp_sampler.py::TestTritonTopkTopp::test_noncontiguous_logits_match_contiguous[topk_only]",
+    "tests/v1/sample/test_topk_topp_sampler.py::TestTritonTopkTopp::test_noncontiguous_logits_match_contiguous[topp_only]",
+    "tests/v1/sample/test_topk_topp_sampler.py::TestTritonTopkTopp::test_noncontiguous_logits_match_contiguous[topk_and_topp]",
+    "tests/v1/sample/test_topk_topp_sampler.py::TestTritonTopkTopp::test_all_neginf_logits",
+]
+min_tests = 4
+
+[[entry]]
+id = "flash_attention_paged_varlen"
+path = "tests/kernels/attention/test_flash_attn.py"
+mode = "adapted"
+chips = ["810e", "890p"]
+category = "kernel"
+reason = "Checks the SAIL FA3 BF16 paged KV cache path with mixed query lengths and optional output."
+nodeids = [
+    "tests/kernels/attention/test_flash_attn.py::test_varlen_with_paged_kv[None-3-2048-None-dtype0-None-16-128-num_heads0-seq_lens0-True]",
+    "tests/kernels/attention/test_flash_attn.py::test_varlen_with_paged_kv[None-3-2048-None-dtype0-None-16-128-num_heads0-seq_lens0-False]",
+]
+min_tests = 2
+
+[[entry]]
+id = "fp8_quant_kernel"
+path = "tests/kernels/quantization/test_fp8_quant.py"
+mode = "adapted"
+chips = ["890p"]
+category = "kernel"
+reason = "Checks FP8 conversion with strided rows and all-zero input on M890."
+nodeids = [
+    "tests/kernels/quantization/test_fp8_quant.py::test_dynamic_per_tensor_fp8_quant_strided_input[0-dtype0-8]",
+    "tests/kernels/quantization/test_fp8_quant.py::test_dynamic_per_tensor_fp8_quant_strided_input[0-dtype0-16]",
+    "tests/kernels/quantization/test_fp8_quant.py::test_dynamic_per_tensor_fp8_quant_all_zero[dtype0]",
+]
+min_tests = 3

@@ -63,7 +63,6 @@ def install() -> bool:
             _TARGET,
             "Step5RMSNorm.forward",
             reason="Opt-in Step5 Norm metadata ranges for reproducible cross-platform cases.",
-            affected_versions=">=0.32.0,<0.33.0",
             remove_when="Upstream emits versioned Step5 Norm input metadata ranges.",
         )
         @functools.wraps(original)

@@ -42,7 +42,6 @@ from vllm_sail.utils.deep_gemm import (
     is_ppu_15,
 )
 
-_AFFECTED = ">=0.32.0,<0.33.0"
 _MODULE = "vllm.model_executor.layers.activation"
 
 logger = init_logger(__name__)
@@ -139,7 +138,6 @@ def _fused_act_bf16(
         "through the custom_op_dispatch patch; every unsupported dtype/shape/device "
         "falls back to forward_cuda."
     ),
-    affected_versions=_AFFECTED,
     remove_when="upstream adds a forward_ppu hook for SiluAndMul, or PPU stops shipping DeepGEMM's standalone activation kernels.",
 )
 def silu_and_mul_forward_ppu(self, x: torch.Tensor) -> torch.Tensor:
@@ -166,7 +164,6 @@ def silu_and_mul_forward_ppu(self, x: torch.Tensor) -> torch.Tensor:
         "additively and reached through the custom_op_dispatch patch; every "
         "unsupported dtype/shape/device falls back to forward_cuda."
     ),
-    affected_versions=_AFFECTED,
     remove_when="upstream adds a forward_ppu hook for SituAndMul, or PPU stops shipping DeepGEMM's standalone activation kernels.",
 )
 def situ_and_mul_forward_ppu(self, x: torch.Tensor) -> torch.Tensor:

@@ -21,7 +21,6 @@ import torch
 
 from vllm_sail.patch.utils import patch
 
-_AFFECTED = ">=0.32.0,<0.33.0"
 _MODULE = "vllm.model_executor.layers.mhc"
 _REASON = (
     "Fork's PPU CustomOp surface: MHC ops get an explicit forward_ppu that "
@@ -38,7 +37,6 @@ _REMOVE_WHEN = (
     "MHCPreOp.forward_ppu",
     allow_missing=True,
     reason=_REASON,
-    affected_versions=_AFFECTED,
     remove_when=_REMOVE_WHEN,
 )
 def mhc_pre_op_forward_ppu(
@@ -70,7 +68,6 @@ def mhc_pre_op_forward_ppu(
     "MHCPostOp.forward_ppu",
     allow_missing=True,
     reason=_REASON,
-    affected_versions=_AFFECTED,
     remove_when=_REMOVE_WHEN,
 )
 def mhc_post_op_forward_ppu(
@@ -88,7 +85,6 @@ def mhc_post_op_forward_ppu(
     "HCHeadOp.forward_ppu",
     allow_missing=True,
     reason=_REASON,
-    affected_versions=_AFFECTED,
     remove_when=_REMOVE_WHEN,
 )
 def hc_head_op_forward_ppu(
@@ -115,7 +111,6 @@ def hc_head_op_forward_ppu(
     "MHCFusedPostPreOp.forward_ppu",
     allow_missing=True,
     reason=_REASON,
-    affected_versions=_AFFECTED,
     remove_when=_REMOVE_WHEN,
 )
 def mhc_fused_post_pre_op_forward_ppu(

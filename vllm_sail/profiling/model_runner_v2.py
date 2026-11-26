@@ -41,8 +41,6 @@ from vllm.v1.worker.gpu.model_runner import GPUModelRunner
 from vllm_sail.patch.utils import patch
 from vllm_sail.profiling import nvtx
 
-_AFFECTED = ">=0.32.0,<0.33.0"
-
 _UPSTREAM_MODULE = "vllm.v1.worker.gpu.model_runner"
 
 _REMOVE_WHEN = (
@@ -64,7 +62,6 @@ _upstream_execute_model = GPUModelRunner.execute_model
         "the counterpart of the V1 `_prepare_inputs` annotation. The wrapper "
         "delegates to upstream unchanged."
     ),
-    affected_versions=_AFFECTED,
     remove_when=_REMOVE_WHEN,
 )
 @nvtx.annotate("prepare_inputs")
@@ -81,7 +78,6 @@ def prepare_inputs(self, *args, **kwargs):
         "`_sample` wrapper. V2 does not expose the logits tensor, so the label "
         "carries the hidden-state shape instead."
     ),
-    affected_versions=_AFFECTED,
     remove_when=_REMOVE_WHEN,
 )
 def sample(self, hidden_states, *args, **kwargs):
@@ -103,7 +99,6 @@ def sample(self, hidden_states, *args, **kwargs):
         "prof_iter hook and sche_mark. Without it, V2 runs (the 0.31 default) "
         "emit no worker NVTX at all. Dummy runs are forwarded untouched."
     ),
-    affected_versions=_AFFECTED,
     remove_when=_REMOVE_WHEN,
 )
 @functools.wraps(_upstream_execute_model)

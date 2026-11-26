@@ -17,7 +17,6 @@ from vllm.platforms import current_platform
 
 from vllm_sail.patch.utils import patch
 
-_AFFECTED = "upstream main e83d82a"
 _upstream_init = upstream.init_indexer_wk_weights_proj
 _upstream_finish = upstream.Indexer.process_weights_after_loading
 _upstream_indexer_init = upstream.Indexer.__init__
@@ -27,7 +26,6 @@ _upstream_indexer_init = upstream.Indexer.__init__
     "vllm.model_executor.models.deepseek_v2",
     "init_indexer_wk_weights_proj",
     reason="PPU channelwise wk must load into its own quantized parameter without a derived BF16 weight.",
-    affected_versions=_AFFECTED,
     remove_when="The upstream projection helper supports separate PPU quantized wk and BF16 scoring.",
 )
 def init_projections(indexer, hidden_size, quant_config, prefix, **kwargs):
@@ -48,7 +46,6 @@ def init_projections(indexer, hidden_size, quant_config, prefix, **kwargs):
     "vllm.model_executor.models.deepseek_v2",
     "Indexer.process_weights_after_loading",
     reason="The PPU split projection executes checkpoint weights directly and has no derived fused storage to refresh.",
-    affected_versions=_AFFECTED,
     remove_when="Upstream refreshes derived weights only for fused indexer projections.",
 )
 def process_weights_after_loading(self):
@@ -60,7 +57,6 @@ def process_weights_after_loading(self):
     "vllm.model_executor.models.deepseek_v2",
     "Indexer.__init__",
     reason="Select unfused q and INT8 quantization on PPU indexers without the matching FP8 projection path.",
-    affected_versions=_AFFECTED,
     remove_when="Upstream dispatches indexer query quantization using platform and projection capabilities.",
 )
 def indexer_init(self, *args, **kwargs):
@@ -80,7 +76,6 @@ def indexer_init(self, *args, **kwargs):
         "FP8 support. Verbatim upstream body with two marked branches; the "
         "changes sit mid-body with no delegation seam."
     ),
-    affected_versions=_AFFECTED,
     remove_when=(
         "upstream parameterises the Indexer wk projection on quant_config "
         "and exposes a platform hook for the q-quant format."

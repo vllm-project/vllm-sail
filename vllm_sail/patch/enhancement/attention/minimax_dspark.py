@@ -15,7 +15,6 @@ _original_normalize_context_k = _dspark.MiniMaxM3DSparkModel._normalize_context_
     "vllm.models.minimax_m3.common.ops.dspark_context_kv",
     "DSparkContextKVWriter.supported",
     reason="PPU advertises CUDA identity and compute stubs, which do not implement the fused DSpark context writer.",
-    affected_versions=">=0.32.0,<0.33.0",
     remove_when="The context writer checks a real platform implementation or PPU implements and verifies this operator.",
 )
 def supported(attn_layers: list) -> bool:
@@ -28,7 +27,6 @@ def supported(attn_layers: list) -> bool:
     "vllm.models.minimax_m3.common.dspark",
     "MiniMaxM3DSparkModel._normalize_context_k",
     reason="The PPU context-KV fallback passes three-dimensional K to MiniMAXGemmaRMSNorm, whose non-matrix path calls a two-dimensional-only FlashInfer kernel.",
-    affected_versions=">=0.32.0,<0.33.0",
     remove_when="MiniMax's context-K normalization or Gemma RMSNorm supports the fallback's per-head tensor shape.",
 )
 def normalize_context_k(self, all_k):

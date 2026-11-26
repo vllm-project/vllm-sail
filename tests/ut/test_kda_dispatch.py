@@ -17,6 +17,7 @@ from tests.ut.test_kda_workspace_reservation import kda_constructor as _kda_cons
 
 kda_constructor = _kda_constructor
 
+
 @pytest.mark.parametrize("num_heads", [12, 24])
 def test_pla_prefill_preserves_caller_buffers(monkeypatch, num_heads):
     calls = []
@@ -151,6 +152,18 @@ def test_device_predicate_calls_bind_all_required_arguments(name):
             "is_fused_kda_decode_supported",
             "models/kimi_k3/nvidia/kda",
             "is_fused_kda_decode_supported",
+        ),
+        (
+            "attention/kda",
+            "_recoverssm_verify",
+            "models/kimi_k3/nvidia/kda",
+            "KimiK3DeltaAttention._recoverssm_verify",
+        ),
+        (
+            "attention/kda",
+            "_create_recoverssm_context",
+            "models/kimi_k3/nvidia/ops/recoverssm",
+            "KDARecoverSSMCommitContext.create",
         ),
     ],
 )

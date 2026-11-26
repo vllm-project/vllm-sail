@@ -6,8 +6,8 @@ assertions* are valid for vllm-sail, but which mixes CPU-runnable logic with
 device / distributed / network nodes, or carries a handful of known-failing
 cases. The adaptation is data-driven and **never edits upstream source**:
 
-* node narrowing (``markers`` / ``keywords`` / ``deselect``) and ``env``
-  overrides are declared in ``REUSE_MANIFEST.toml`` and translated into pytest
+* node narrowing (``nodeids`` or ``markers`` / ``keywords`` / ``deselect``) and
+  ``env`` overrides are declared in ``REUSE_MANIFEST.toml`` and translated into pytest
   argv / environment by :class:`~tests.upstream_reuse._reuse_harness.UpstreamRunner`;
 * expected failures (``xfail``) are reconciled here: a declared-xfail node that
   fails is tolerated, any *other* failure is a real regression;
@@ -34,6 +34,7 @@ from tests.upstream_reuse._reuse_harness import (
     conftest_import_error,
     entries_for_mode,
     param_for_entry,
+    strict_result_error,
 )
 
 ADAPTED_ENTRIES = entries_for_mode("adapted")
@@ -87,7 +88,9 @@ def test_adapted_entries_justify_their_adaptation() -> None:
     """
     unjustified = []
     for entry in ADAPTED_ENTRIES:
-        narrows = bool(entry.markers or entry.keywords or entry.deselect)
+        narrows = bool(
+            entry.nodeids or entry.markers or entry.keywords or entry.deselect
+        )
         if not (
             narrows
             or entry.env
@@ -126,6 +129,10 @@ def test_reuse_adapted(entry: ReuseEntry, upstream_runner: UpstreamRunner) -> No
             "upstream's own conftest cannot be imported by this runtime, so no "
             f"upstream test was collected: {environment}"
         )
+    if entry.nodeids:
+        error = strict_result_error(entry, result)
+        assert error is None, f"{entry.id}: {error}"
+        return
 
     assert result.errors == 0, (
         f"adapted upstream {entry.path} failed to import/collect "

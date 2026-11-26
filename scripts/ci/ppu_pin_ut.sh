@@ -55,7 +55,7 @@ import vllm_sail._upstream_C
 from vllm.platforms import current_platform
 from vllm_sail.compat import check_vllm_compatibility
 
-check_vllm_compatibility(force=True)
+check_vllm_compatibility(force=True, strict=True)
 assert current_platform.is_ppu(), current_platform
 assert torch.cuda.is_available(), "the pin UT pod requires a PPU driver/device"
 print("SAIL PyTorch:", torch.__version__, torch.__file__)

@@ -55,7 +55,6 @@ from vllm.utils.torch_utils import _encode_layer_name
 import vllm_sail.ops  # noqa: F401  (registers torch.ops.vllm.ppu_sparse_attn_indexer_kpool)
 from vllm_sail.patch.utils import patch
 
-_AFFECTED = ">=0.32.0,<0.33.0"
 _MODULE = "vllm.models.glm5next.nvidia.sparse_indexer"
 
 if not _unavailable:
@@ -216,8 +215,8 @@ def forward_ppu(
             "PPU INT8 kpool indexer requires decode context parallel size 1; "
             "distributed cache mapping and global top-k merge are not implemented"
         )
-    # PCP 使用 rank-local K/gate，却提供 rank-major 展开的 slot mapping；
-    # INT8 池和 tail 写入尚无对应 gather，不能仅替换 prefill 的 cu_seq_lens。
+    # PCP uses rank-local K/gate while supplying a rank-major expanded slot mapping;
+    # INT8 pool and tail writes lack a matching gather, so prefill cu_seq_lens cannot simply be swapped.
     parallel = getattr(self, "_parallel_config", None)
     if getattr(parallel, "prefill_context_parallel_size", 1) > 1:
         raise NotImplementedError(
@@ -230,7 +229,7 @@ def forward_ppu(
     # top-k kernels exercised by the DSA INT8 path, so the flag is accepted for
     # signature parity with ``forward_cuda`` and ignored.
     del topk_backend
-    # INT8 输出 dtype 随 producer weights，不通过事后转换冒充另一种归约。
+    # INT8 output dtype follows producer weights rather than casting afterward to mimic another reduction.
     if self.logits_dtype != weights.dtype:
         raise ValueError(
             "SAIL GLM INT8 indexer_logits_dtype must match the producer weights dtype"
@@ -335,7 +334,6 @@ if not _unavailable:
                 "unified weighted API accepts only MXFP4, so use legacy FP8 "
                 "with relative prefill columns and per-query decode metadata."
             ),
-            affected_versions=_AFFECTED,
             remove_when="The upstream Kpool indexer selects a platform logits backend.",
         )(_replacement)
     patch(
@@ -343,14 +341,12 @@ if not _unavailable:
         "SparseAttnIndexerKpool.forward_ppu",
         allow_missing=True,
         reason=_FORWARD_PPU_REASON,
-        affected_versions=_AFFECTED,
         remove_when=_FORWARD_PPU_REMOVE_WHEN,
     )(forward_ppu)
     patch(
         _MODULE,
         "SparseAttnIndexerKpool.forward_native",
         reason=_FORWARD_NATIVE_REASON,
-        affected_versions=_AFFECTED,
         remove_when=_FORWARD_NATIVE_REMOVE_WHEN,
     )(forward_native)
     _check_live_consumer()

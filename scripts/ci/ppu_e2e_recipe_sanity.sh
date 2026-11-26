@@ -240,7 +240,7 @@ import vllm_sail
 from vllm.platforms import current_platform
 from vllm_sail.compat import check_vllm_compatibility
 
-check_vllm_compatibility(force=True)
+check_vllm_compatibility(force=True, strict=True)
 assert current_platform.is_ppu(), f"expected PPU platform, got {current_platform}"
 assert torch.cuda.is_available(), "PPU device required"
 

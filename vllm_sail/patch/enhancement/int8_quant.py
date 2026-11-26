@@ -34,8 +34,6 @@ from vllm.triton_utils import tl, triton
 
 from vllm_sail.patch.utils import patch
 
-_AFFECTED = ">=0.32.0,<0.33.0"
-
 
 @patch(
     "vllm.model_executor.layers.quantization.utils.int8_utils",
@@ -46,7 +44,6 @@ _AFFECTED = ">=0.32.0,<0.33.0"
         "tl.constexpr that defaults to False, so every existing caller keeps "
         "upstream behaviour exactly."
     ),
-    affected_versions=_AFFECTED,
     remove_when=(
         "upstream's per-token-group INT8 quantization offers a rounding mode "
         "(e.g. a `rounding=` argument), making this copy unnecessary."
@@ -112,7 +109,6 @@ def _per_token_group_quant_int8(
         "and `use_rounding`, both defaulting to False so existing callers are "
         "unaffected."
     ),
-    affected_versions=_AFFECTED,
     remove_when=(
         "upstream exposes a rounding mode and a way to force the Triton path, or "
         "PPU's compiled INT8 quant kernel gains round-to-nearest."

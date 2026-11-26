@@ -17,6 +17,9 @@ User-facing overview: [README.md](README.md). Contribution workflow:
   corresponding `VLLM_PPU_*` aliases, with SAIL taking precedence. Build variables
   accept only the `VLLM_SAIL_*` names.
 - Declare runtime variables in `vllm_sail/envs.py` and keep their access lazy.
+  Regenerate `docs/user_guide/environment_variables.md` with
+  `python tools/render_env_docs.py` (and verify with `--check`) when changing
+  runtime variables.
 
 ## Verification
 
@@ -42,9 +45,9 @@ making hardware or model-support claims.
   structure and express behavior changes only inside `PPU MODIFICATION:
   begin/end` markers.
 - Runtime patch reports are generated on demand by `tools/patch_manifest.py`;
-  do not commit generated reports. The pilot borrowed bodies in
-  `vllm_sail/patch/_upstream/runtime.py` are maintained source, not generated
-  output. Preserve their attribution and PPU modification markers.
+  do not commit generated reports. Borrowed upstream bodies under
+  `vllm_sail/patch/**` are maintained source, not generated output. Preserve
+  their attribution and PPU modification markers.
 - Never hand-edit `csrc/upstream/**`, except its input `manifest.toml`.
   Edit inputs or transformations and regenerate.
 - `csrc/plugin/` contains authored HGGC sources and host bindings. Edit these
@@ -59,8 +62,8 @@ making hardware or model-support claims.
 - Module and dependency boundaries: [Architecture](docs/developer_guide/architecture.md).
   PPU reuses CUDA paths; use `current_platform.is_ppu()` for PPU-only behavior.
 - Patches: [Runtime patch guide](vllm_sail/patch/README.md). Try registration APIs,
-  platform hooks and attention extensions first. Every patch requires `reason`,
-  `affected_versions` and `remove_when`.
+  platform hooks and attention extensions first. Every patch requires `reason`
+  and `remove_when`.
 - Native code and toolchains: [HGGC kernels](docs/developer_guide/kernels.md).
   Preserve upstream interface identifiers used by SAIL PyTorch.
 - Installation: [Installation guide](docs/getting_started/installation.md).

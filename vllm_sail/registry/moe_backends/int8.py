@@ -18,7 +18,6 @@ from vllm_sail.registry.moe_backends._extend import extend_enum
 logger = init_logger(__name__)
 
 _MODULE = "vllm.model_executor.layers.fused_moe.oracle.int8"
-_AFFECTED = ">=0.32.0,<0.33.0"
 _REMOVE_WHEN = (
     "upstream gains a register_moe_backend() extension point mirroring "
     "register_linear_kernel(), which would delete this patch."
@@ -43,7 +42,6 @@ _upstream_select_int8_moe_backend = oracle.select_int8_moe_backend
         "The INT8 oracle has no registration API for PPU DeepGEMM and Acext "
         "experts, so PPU needs its own ordered candidate list."
     ),
-    affected_versions=_AFFECTED,
     remove_when=_REMOVE_WHEN,
 )
 def _get_priority_backends(moe_config: FusedMoEConfig) -> list[Int8MoeBackend]:
@@ -99,7 +97,6 @@ def _get_priority_backends(moe_config: FusedMoEConfig) -> list[Int8MoeBackend]:
     _MODULE,
     "backend_to_kernel_cls",
     reason="The INT8 oracle cannot resolve plugin-owned PPU expert classes.",
-    affected_versions=_AFFECTED,
     remove_when=_REMOVE_WHEN,
 )
 def backend_to_kernel_cls(
@@ -132,7 +129,6 @@ def backend_to_kernel_cls(
         "but upstream rejects their plugin-added backend enum members during "
         "process_weights_after_loading."
     ),
-    affected_versions=_AFFECTED,
     remove_when=(
         "upstream accepts out-of-tree INT8 backends in its weight-conversion "
         "hook, or exposes a backend-specific conversion registry."
@@ -164,7 +160,6 @@ def convert_to_int8_moe_kernel_format(
     _MODULE,
     "map_int8_backend",
     reason="The public PPU backend strings have no upstream INT8 member mapping.",
-    affected_versions=_AFFECTED,
     remove_when=_REMOVE_WHEN,
 )
 def map_int8_backend(runner_backend: MoEBackend) -> Int8MoeBackend:
@@ -184,7 +179,6 @@ def map_int8_backend(runner_backend: MoEBackend) -> Int8MoeBackend:
         "Batched INT8 activations require the batched PPU DeepGEMM expert and "
         "must reject standard-only Triton and Acext selections."
     ),
-    affected_versions=_AFFECTED,
     remove_when=_REMOVE_WHEN,
 )
 def select_int8_moe_backend(

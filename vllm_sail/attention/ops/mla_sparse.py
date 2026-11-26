@@ -272,7 +272,7 @@ def ppu_sparse_attn_indexer(
         prefill_metadata = attn_metadata_narrowed.prefill
         assert prefill_metadata is not None
 
-        # ShardQ 的 chunk 行号对应紧凑查询；cache 写入和 decode 保留原始行序。
+        # ShardQ chunk row indices map compact queries; cache writes and decode keep the original row order.
         prefill_q, prefill_q_scale, prefill_weights = q_quant, q_scale, weights
         if (indices := prefill_metadata.shardq_gather_indices) is not None:
             assert candidate_blocks is None
@@ -328,10 +328,13 @@ def ppu_sparse_attn_indexer(
 
             if is_deep_gemm_supported():
                 if use_fp4_cache:
+                    chunk_weights = prefill_weights[chunk.token_start : chunk.token_end]
+                    if chunk_weights.dtype != torch.bfloat16:
+                        chunk_weights = chunk_weights.to(torch.bfloat16)
                     logits = fp8_fp4_mqa_logits(
                         (q_slice_cast, q_scale_slice),
                         (k_quant_cast, k_scale_cast),
-                        prefill_weights[chunk.token_start : chunk.token_end],
+                        chunk_weights,
                         chunk.cu_seqlen_ks,
                         chunk.cu_seqlen_ke,
                         clean_logits=False,
@@ -468,6 +471,8 @@ def ppu_sparse_attn_indexer(
             # All paged DSA policies in 4869f1e use next_n=1. Q, weights,
             # contexts and page tables must share the same query row order.
             decode_weights = weights[:num_decode_tokens]
+            if use_fp4_cache and decode_weights.dtype != torch.bfloat16:
+                decode_weights = decode_weights.to(torch.bfloat16)
             if decode_metadata.requires_padding:
                 decode_weights = pack_seq_triton(
                     decode_weights, decode_lens, pad_value=0

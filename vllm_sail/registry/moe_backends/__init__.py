@@ -8,7 +8,6 @@ from vllm_sail.registry.moe_backends._extend import extend_enum
 __all__ = ["extend_enum", "register"]
 
 _registered = False
-_AFFECTED = ">=0.32.0,<0.33.0"
 _REMOVE_WHEN = (
     "vLLM imports MoE selectors through a registration API instead of "
     "capturing module-level aliases before plugin registration."
@@ -176,7 +175,6 @@ def _rebind_loaded_oracle_aliases(backend_modules: dict[str, object]) -> None:
                         "PPU registration, so the consumer would bypass PPU "
                         "DeepGEMM selection or preparation."
                     ),
-                    affected_versions=_AFFECTED,
                     remove_when=_REMOVE_WHEN,
                 )(replacement)
 

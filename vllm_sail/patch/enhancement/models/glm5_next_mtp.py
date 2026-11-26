@@ -34,7 +34,6 @@ import re
 from vllm_sail.patch.utils import PATCH_MARKER, PATCH_REGISTRY, PatchRecord, patch
 
 _MTP_MODULE = "vllm.models.glm5next.common.mtp"
-_AFFECTED = ">=0.32.0,<0.33.0; upstream main e83d82a"
 
 #: Fused -> checkpoint projection names, as on ``Glm5NextForConditionalGeneration``.
 _PACKED_MODULES_MAPPING = {"gate_up_proj": ["gate_proj", "up_proj"]}
@@ -115,7 +114,6 @@ def _enable_supports_quant() -> None:
         PatchRecord(
             target=f"{_MTP_MODULE}.Glm5NextMTP",
             reason=_BASES_REASON,
-            affected_versions=_AFFECTED,
             remove_when=_BASES_REMOVE_WHEN,
             kind="value",
             was_missing=False,
@@ -141,7 +139,6 @@ def _enable_packed_modules_mapping() -> None:
         PatchRecord(
             target=f"{_MTP_MODULE}.Glm5NextMTP.packed_modules_mapping",
             reason=_PACKED_REASON,
-            affected_versions=_AFFECTED,
             remove_when=_PACKED_REMOVE_WHEN,
             kind="value",
             was_missing=True,
@@ -166,7 +163,6 @@ try:
         _MTP_MODULE,
         "Glm5NextMTP.hf_to_vllm_mapper",
         reason=_MAPPER_REASON,
-        affected_versions=_AFFECTED,
         remove_when=_MAPPER_REMOVE_WHEN,
         allow_missing=True,
     )(

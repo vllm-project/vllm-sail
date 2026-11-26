@@ -13,14 +13,12 @@ from vllm.triton_utils import tl, triton
 from vllm_sail.models.deepseek_v41.config import int8_w8a8_enabled
 from vllm_sail.patch.utils import PATCH_MARKER, patch
 
-_AFFECTED = ">=0.32.0,<0.33.0"
 _FACTORY = "vllm.models.deepseek_v41.common.engram"
 
 
 @patch(
     "vllm.models.deepseek_v41.common.engram",
     reason="PPU channelwise Engram exports carry FP32 row scales rather than E8M0 block scales.",
-    affected_versions=_AFFECTED,
     remove_when="Upstream Engram lookup supports FP32 scales alongside E8M0 scales.",
 )
 @triton.jit(
@@ -187,7 +185,6 @@ def _engram_lookup_kernel(
     _FACTORY,
     "Engram._create_embedding",
     reason="Select FP32 row-scale storage for channelwise Engram while reusing CUDA offload and prefetch.",
-    affected_versions=_AFFECTED,
     remove_when="The Engram embedding factory exposes quantization-aware backend registration.",
 )
 def _create_embedding(self, layout, layer_hash_index):
@@ -245,7 +242,6 @@ def _checkpoint_table_dtype(model_config, name):
 @patch(
     "vllm.models.deepseek_v41.common.engram", "ParallelEngramEmbedding.lookup",
     reason="PPU Engram uses INT8/FP32 lookup or software E4M3 decoding without changing upstream offload and prefetch.",
-    affected_versions=_AFFECTED,
     remove_when="Upstream Engram lookup supports PPU software E4M3 and INT8 per-row scales.",
 )
 def lookup(self, indices, out, background=False):

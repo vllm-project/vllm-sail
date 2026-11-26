@@ -15,7 +15,6 @@ from types import SimpleNamespace as NS
 import pytest
 
 from tests.support.source import function
-from tests.support.upstream import SUPPORTED_RANGE
 from vllm_sail.patch.utils import PATCH_REGISTRY, original_of, patch
 
 MODULE_PATH = Path(__file__).parents[2] / "vllm_sail/patch/bugfix/async_llm_shutdown.py"
@@ -134,7 +133,6 @@ def test_install_records_real_target_and_reapplication_guard(
     assert original_of(replacement, TARGET) is original
     assert PATCH_REGISTRY[-1].target == TARGET
     assert PATCH_REGISTRY[-1].reason and PATCH_REGISTRY[-1].remove_when
-    assert PATCH_REGISTRY[-1].affected_versions == SUPPORTED_RANGE
     count = len(PATCH_REGISTRY)
     shutdown_module.install()
     assert len(PATCH_REGISTRY) == count
@@ -143,7 +141,6 @@ def test_install_records_real_target_and_reapplication_guard(
             "vllm.v1.engine.async_llm",
             "AsyncLLM.shutdown",
             reason="test",
-            affected_versions="test",
             remove_when="test",
         )(shutdown_module._wrap_shutdown(replacement))
 

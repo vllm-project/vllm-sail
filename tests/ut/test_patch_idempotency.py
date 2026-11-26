@@ -47,7 +47,6 @@ PACKAGE_INIT = REPO_ROOT / "vllm_sail" / "__init__.py"
 def _metadata() -> dict[str, str]:
     return {
         "reason": "exercise the idempotency guards",
-        "affected_versions": ">=0.31.0,<0.32.0",
         "remove_when": "the guards are removed",
     }
 

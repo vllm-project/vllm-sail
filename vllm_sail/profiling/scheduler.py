@@ -25,8 +25,6 @@ from vllm.v1.core.sched.scheduler import Scheduler
 from vllm_sail.patch.utils import patch
 from vllm_sail.profiling import nvtx
 
-_AFFECTED = ">=0.32.0,<0.33.0"
-
 _upstream_schedule = Scheduler.schedule
 _upstream_update_after_schedule = Scheduler._update_after_schedule
 
@@ -39,7 +37,6 @@ _upstream_update_after_schedule = Scheduler._update_after_schedule
         "(fork scheduler.py hunk @@ -436). Installed only when "
         "VLLM_SAIL_NVTX_PROFILE is set; the wrapper delegates to upstream."
     ),
-    affected_versions=_AFFECTED,
     remove_when=(
         "the opt-in NVTX subpackage (docs/developer_guide/architecture.md) "
         "is retired, or upstream adds native NVTX/tracing hooks to the v1 "
@@ -60,7 +57,6 @@ def schedule(self, *args, **kwargs):
         "output. Centralised here because schedule() calls this method on "
         "every path, replacing the fork's three duplicated call sites."
     ),
-    affected_versions=_AFFECTED,
     remove_when=(
         "the opt-in NVTX subpackage (docs/developer_guide/architecture.md) "
         "is retired, or upstream adds native NVTX/tracing hooks to the v1 "

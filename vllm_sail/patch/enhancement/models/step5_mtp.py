@@ -28,7 +28,6 @@ from vllm.models.step5.nvidia import mtp as _mtp
 from vllm_sail.patch.utils import patch
 
 _TARGET = "vllm.models.step5.nvidia.mtp"
-_AFFECTED = ">=0.32.0,<0.33.0"
 
 # Spec-layer modules that live beside, not inside, the draft block
 # (Step5MTP._rewrite_spec_layer_name).
@@ -64,7 +63,6 @@ def mtp_quant_mapper(start_layer: int, num_layers: int) -> WeightsMapper:
         "layers miss the mtp_block./shared_head.head module paths, so those "
         "layers are allocated quantized and the load fails on missing scales."
     ),
-    affected_versions=_AFFECTED,
     remove_when=(
         "Step5MTP remaps the quantization config to the mtp_block / "
         "shared_head.head module names itself."

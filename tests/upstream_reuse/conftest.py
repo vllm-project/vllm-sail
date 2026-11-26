@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 
 from tests.upstream_reuse._reuse_harness import (
+    VALID_CHIPS,
     UpstreamRunner,
     load_manifest,
     resolve_source_root,
@@ -21,7 +22,7 @@ HERE = Path(__file__).resolve().parent
 def pytest_addoption(parser: pytest.Parser) -> None:
     group = parser.getgroup("upstream reuse")
     group.addoption("--strict-upstream-reuse", action="store_true", default=False)
-    group.addoption("--upstream-reuse-target", choices=("cpu", "890p"))
+    group.addoption("--upstream-reuse-target", choices=VALID_CHIPS)
     group.addoption("--upstream-reuse-report-dir", type=Path)
 
 

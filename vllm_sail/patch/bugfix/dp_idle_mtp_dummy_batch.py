@@ -180,7 +180,6 @@ def _install_make_dummy() -> None:
             "Idle DP replicas build dummy batches; the agreed uniform_token_count "
             "must not be repartitioned by varlen graph capacity."
         ),
-        affected_versions=">=0.32.0,<0.33.0",
         remove_when="upstream vLLM 0.33.x backports the DP dummy-batch geometry fix",
     )(make_dummy)
 
@@ -252,7 +251,6 @@ def _install_set_dummy_context() -> None:
             "Profiling context belongs only to real dummy rows, never graph "
             "padding rows."
         ),
-        affected_versions=">=0.32.0,<0.33.0",
         remove_when="upstream vLLM 0.33.x backports the DP dummy-batch geometry fix",
     )
     patch("vllm.v1.worker.gpu.input_batch", "set_dummy_context", **metadata)(
@@ -302,7 +300,6 @@ def _install_prepare_dummy_attn() -> None:
             "Dummy attention metadata must cover the full padded capacity, while "
             "state slots only belong to active rows."
         ),
-        affected_versions=">=0.32.0,<0.33.0",
         remove_when="upstream vLLM 0.33.x backports the DP dummy-batch geometry fix",
     )(prepare_dummy_attn)
 
@@ -334,7 +331,6 @@ def _install_dispatch_wrapper() -> None:
             "uniform_token_count to InputBatch.make_dummy; record it from the "
             "DP sync for dummy runs, but only when dp_size > 1."
         ),
-        affected_versions=">=0.32.0,<0.33.0",
         remove_when="upstream vLLM 0.33.x backports the DP dummy-batch geometry fix",
     )(dispatch_cg_and_sync_dp)
 
@@ -363,7 +359,6 @@ def _install_execute_model_scope() -> None:
             "Scope the DP-agreed uniform_token_count to the execute_model dummy "
             "batch; it must not leak into the profile sampler's own dummy batch."
         ),
-        affected_versions=">=0.32.0,<0.33.0",
         remove_when="upstream vLLM 0.33.x backports the DP dummy-batch geometry fix",
     )(execute_model)
 

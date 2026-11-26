@@ -27,7 +27,6 @@ def test_explicit_wrapper_preserves_patch_chain(
     attribute = "Target.operation" if class_method else "operation"
     metadata = dict(
         reason="exercise explicit patch composition",
-        affected_versions=">=0.33.0,<0.34.0",
         remove_when="upstream provides instrumentation hooks",
     )
 

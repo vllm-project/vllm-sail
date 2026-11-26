@@ -229,7 +229,6 @@ def test_v4_model_uses_the_operator_weights_dtype_for_ppu_mxfp4(
             f"{BASE}.attention",
             "DeepseekV4Indexer._q_rope_quant",
             reason="Duplicate dtype selection.",
-            affected_versions=">=0.33.0,<0.34.0",
             remove_when="The model selects the PPU weights dtype.",
         )(lambda *args: None)
 
@@ -266,7 +265,6 @@ def test_fp4_warmup_includes_dense_ppu_weights_dtype(
             Q_PROVIDER,
             "_indexer_weights_out_dtypes",
             reason="Duplicate warmup selection.",
-            affected_versions=">=0.33.0,<0.34.0",
             remove_when="The model selects the PPU weights dtype.",
         )(lambda *args: None)
 

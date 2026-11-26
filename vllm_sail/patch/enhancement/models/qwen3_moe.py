@@ -34,8 +34,6 @@ from vllm.model_executor.models.utils import extract_layer_index
 
 from vllm_sail.patch.utils import patch
 
-_AFFECTED = ">=0.32.0,<0.33.0"
-
 #: Sentinel distinguishing "argument not passed" (keep upstream behaviour)
 #: from ``None`` ("force this layer unquantized", the fork's mix_layer case).
 _UNSET = object()
@@ -77,7 +75,6 @@ def _mix_layers(hf_config) -> list[int]:
         "per layer. Delegates to upstream with a shallow VllmConfig copy "
         "carrying the requested quant config."
     ),
-    affected_versions=_AFFECTED,
     remove_when=(
         "upstream threads a per-layer quant_config through "
         "Qwen3MoeSparseMoeBlock itself."
@@ -108,7 +105,6 @@ def sparse_moe_block_init(
         "MLP for mix_layer checkpoints. Delegates to upstream with a "
         "shallow VllmConfig copy carrying the requested quant config."
     ),
-    affected_versions=_AFFECTED,
     remove_when=(
         "upstream threads a per-layer quant_config through Qwen3MoeDecoderLayer itself."
     ),
@@ -141,7 +137,6 @@ def decoder_layer_init(
         "layer factory that applies the per-layer override only when "
         "mix_layer is non-empty."
     ),
-    affected_versions=_AFFECTED,
     remove_when=(
         "upstream Qwen3MoeModel honours quantization_config.mix_layer itself."
     ),

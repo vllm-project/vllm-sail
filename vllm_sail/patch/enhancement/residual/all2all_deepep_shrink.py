@@ -24,16 +24,15 @@ REASON = (
     "the DeepEP low-latency buffer kwargs must not carry it. Upstream passes "
     "enable_shrink=self.support_fault_tolerance unconditionally."
 )
-AFFECTED_VERSIONS = ">=0.32.0,<0.33.0"
 REMOVE_WHEN = (
     "the PPU deep_ep build implements enable_shrink (shrinkable buffers for "
     "fault tolerance), at which point the upstream kwarg can flow through "
     "unchanged."
 )
 
-#: (target, reason, affected_versions, remove_when) for every patch installed
+#: (target, reason, remove_when) for every patch installed
 #: by this module. Read by the metadata-shape unit tests.
-METADATA = ((f"{_MODULE}.{_TARGET}", REASON, AFFECTED_VERSIONS, REMOVE_WHEN),)
+METADATA = ((f"{_MODULE}.{_TARGET}", REASON, REMOVE_WHEN),)
 
 _upstream_make_all2all_kwargs = None
 _installed = False
@@ -56,7 +55,6 @@ def install() -> None:
         _MODULE,
         _TARGET,
         reason=REASON,
-        affected_versions=AFFECTED_VERSIONS,
         remove_when=REMOVE_WHEN,
     )
     def _make_all2all_kwargs(

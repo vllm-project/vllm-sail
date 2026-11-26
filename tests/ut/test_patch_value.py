@@ -23,7 +23,6 @@ from vllm_sail.patch.utils import PATCH_REGISTRY, patch_value
 
 META = {
     "reason": "test",
-    "affected_versions": ">=0.27.0,<0.28.0",
     "remove_when": "never, this is a test",
 }
 
@@ -100,7 +99,7 @@ def test_conflicting_existing_value_raises(target_module: types.ModuleType) -> N
         patch_value(target_module.__name__, "EXISTING", "different", **META)
 
 
-@pytest.mark.parametrize("field", ["reason", "affected_versions", "remove_when"])
+@pytest.mark.parametrize("field", ["reason", "remove_when"])
 def test_metadata_is_mandatory(target_module: types.ModuleType, field: str) -> None:
     meta = dict(META) | {field: "   "}
     with pytest.raises(ValueError, match=field):

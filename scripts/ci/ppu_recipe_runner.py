@@ -459,13 +459,13 @@ def assess_per_question_baseline(
     correct_sum = sum(item["correct"] is True for item in records)
     reasons = []
     if len(ids) != count:
-        reasons.append("缺少稳定题目 ID")
+        reasons.append("missing stable question ID")
     if unique_ids != len(ids):
-        reasons.append("重复 ID")
+        reasons.append("duplicate ID")
     if count != expected_count:
-        reasons.append(f"数量不符：预期 {expected_count}，实际 {count}")
+        reasons.append(f"count mismatch: expected {expected_count}, got {count}")
     if unscored:
-        reasons.append(f"存在未评分题：{unscored}")
+        reasons.append(f"unscored items present: {unscored}")
     if (
         not count
         or aggregate_num != count
@@ -474,7 +474,7 @@ def assess_per_question_baseline(
         or correct_sum != round(aggregate_score * aggregate_num)
         or abs(correct_sum / count - aggregate_score) > 1 / count
     ):
-        reasons.append("与汇总不一致")
+        reasons.append("inconsistent with aggregate summary")
     return {
         "status": "baseline_incomplete" if reasons else "baseline_established",
         "reasons": reasons,
@@ -506,13 +506,15 @@ def _extract_per_question_evalscope(
     )
     source = candidates[0] if len(candidates) == 1 else None
     if source is None:
-        source_reasons.append(f"评分文件数量不符：预期 1，实际 {len(candidates)}")
+        source_reasons.append(
+            f"review file count mismatch: expected 1, got {len(candidates)}"
+        )
     else:
         try:
             lines = source.read_text(encoding="utf-8").split("\n")
         except (OSError, UnicodeError):
             lines = []
-            source_reasons.append("评分文件读取失败")
+            source_reasons.append("failed to read review file")
         for line in lines:
             if not line.strip():
                 continue
@@ -572,7 +574,7 @@ def _extract_per_question_evalscope(
         unscored=unscored,
     )
     if missing_ids:
-        source_reasons.append(f"缺少稳定题目 ID：{missing_ids}")
+        source_reasons.append(f"missing stable question ID: {missing_ids}")
     if source_reasons:
         baseline["status"] = "baseline_incomplete"
         baseline["reasons"].extend(source_reasons)

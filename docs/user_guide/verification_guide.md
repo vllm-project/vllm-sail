@@ -374,8 +374,9 @@ finish reason. Truncation at the output limit fails; the default budget is
 4096 output tokens per request (`--max-tokens` overrides it). DP16 uses a
 16-request burst after the first request; this does not establish per-rank
 routing. Requests use seed 0. Most presets use temperature 0; Qwen3.5-35B uses
-temperature 1.0, matching its checkpoint's sampled-generation default and
-[official model guidance](https://huggingface.co/Qwen/Qwen3.5-35B-A3B).
+temperature 1.0 (matching its checkpoint's sampled-generation default and
+[official model guidance](https://huggingface.co/Qwen/Qwen3.5-35B-A3B)) and
+Qwen3.5-397B uses temperature 0.6.
 Responses with reasoning but empty content fail. The runner records exact commands,
 package paths and versions, device capabilities, startup logs, requests,
 responses and JSON results. It terminates its own server process group after

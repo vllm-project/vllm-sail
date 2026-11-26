@@ -22,7 +22,6 @@ _original = _ct.find_matched_target
         "Honor the literal Linear target through the actual base class after "
         "upstream's explicit name, regex and type matching."
     ),
-    affected_versions=">=0.32.0,<0.33.0",
     remove_when="Compressed-tensors Linear target matching recognizes LinearBase subclasses.",
 )
 def find_matched_target(layer_name, module, targets, fused_mapping=None):

@@ -39,7 +39,6 @@ _INT8_MOE_MODULE = (
     "vllm.model_executor.layers.quantization.compressed_tensors."
     "compressed_tensors_moe.compressed_tensors_moe_w8a8_int8"
 )
-AFFECTED_VERSIONS = ">=0.32.0,<0.33.0"
 
 REASON_CHANNELWISE = (
     "The fork adds fp8_channelwise_layers to CompressedTensorsConfig: dense "
@@ -80,44 +79,37 @@ METADATA = (
     (
         f"{_MODULE}.CompressedTensorsConfig.__init__",
         REASON_CHANNELWISE,
-        AFFECTED_VERSIONS,
         REMOVE_WHEN_CHANNELWISE,
     ),
     (
         f"{_MODULE}.CompressedTensorsConfig.from_config",
         REASON_CHANNELWISE,
-        AFFECTED_VERSIONS,
         REMOVE_WHEN_CHANNELWISE,
     ),
     (
         f"{_MODULE}.CompressedTensorsConfig._is_fp8_channelwise_layer",
         REASON_CHANNELWISE,
-        AFFECTED_VERSIONS,
         REMOVE_WHEN_CHANNELWISE,
     ),
     (
         f"{_MODULE}.CompressedTensorsConfig.get_scheme",
         REASON_CHANNELWISE,
-        AFFECTED_VERSIONS,
         REMOVE_WHEN_CHANNELWISE,
     ),
     (
         f"{_MODULE}.CompressedTensorsKVCacheMethod.create_weights",
         REASON_KV_REQUIRES_GRAD,
-        AFFECTED_VERSIONS,
         REMOVE_WHEN_KV,
     ),
     (
         f"{_MOE_MODULE}.CompressedTensorsMoEMethod.get_moe_method",
         REASON_MOE_REDIRECT,
-        AFFECTED_VERSIONS,
         REMOVE_WHEN_MOE_REDIRECT,
     ),
     (
         f"{_INT8_MOE_MODULE}.CompressedTensorsW8A8Int8MoEMethod."
         "get_fused_moe_quant_config",
         REASON_SWIGLU,
-        AFFECTED_VERSIONS,
         REMOVE_WHEN_SWIGLU,
     ),
 )
@@ -127,7 +119,6 @@ METADATA += (
         "vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe."
         "compressed_tensors_moe_w8a8_fp8.CompressedTensorsW8A8Fp8MoEMethod.get_fused_moe_quant_config",
         REASON_SWIGLU,
-        AFFECTED_VERSIONS,
         REMOVE_WHEN_SWIGLU,
     ),
 )
@@ -169,7 +160,6 @@ def install() -> None:
         _MODULE,
         "CompressedTensorsConfig.__init__",
         reason=REASON_CHANNELWISE,
-        affected_versions=AFFECTED_VERSIONS,
         remove_when=REMOVE_WHEN_CHANNELWISE,
     )
     def _config_init(self, *args: Any, fp8_channelwise_layers=None, **kwargs: Any):
@@ -180,7 +170,6 @@ def install() -> None:
         _MODULE,
         "CompressedTensorsConfig.from_config",
         reason=REASON_CHANNELWISE,
-        affected_versions=AFFECTED_VERSIONS,
         remove_when=REMOVE_WHEN_CHANNELWISE,
     )
     def _from_config(cls, config):
@@ -194,7 +183,6 @@ def install() -> None:
         "CompressedTensorsConfig._is_fp8_channelwise_layer",
         allow_missing=True,
         reason=REASON_CHANNELWISE,
-        affected_versions=AFFECTED_VERSIONS,
         remove_when=REMOVE_WHEN_CHANNELWISE,
     )
     def _is_fp8_channelwise_layer(self, layer_name: str) -> bool:
@@ -212,7 +200,6 @@ def install() -> None:
         _MODULE,
         "CompressedTensorsConfig.get_scheme",
         reason=REASON_CHANNELWISE,
-        affected_versions=AFFECTED_VERSIONS,
         remove_when=REMOVE_WHEN_CHANNELWISE,
     )
     def _get_scheme(self, layer, layer_name: str | None = None):
@@ -249,7 +236,6 @@ def install() -> None:
         _MODULE,
         "CompressedTensorsKVCacheMethod.create_weights",
         reason=REASON_KV_REQUIRES_GRAD,
-        affected_versions=AFFECTED_VERSIONS,
         remove_when=REMOVE_WHEN_KV,
     )
     def _kv_create_weights(self, layer, *args: Any, **kwargs: Any):
@@ -263,7 +249,6 @@ def install() -> None:
         _MOE_MODULE,
         "CompressedTensorsMoEMethod.get_moe_method",
         reason=REASON_MOE_REDIRECT,
-        affected_versions=AFFECTED_VERSIONS,
         remove_when=REMOVE_WHEN_MOE_REDIRECT,
     )
     def _get_moe_method(quant_config, layer, layer_name: str):
@@ -288,7 +273,6 @@ def install() -> None:
         _INT8_MOE_MODULE,
         "CompressedTensorsW8A8Int8MoEMethod.get_fused_moe_quant_config",
         reason=REASON_SWIGLU,
-        affected_versions=AFFECTED_VERSIONS,
         remove_when=REMOVE_WHEN_SWIGLU,
     )
     def _int8_get_fused_moe_quant_config(self, layer: torch.nn.Module):
@@ -313,7 +297,6 @@ def install() -> None:
         _ct_fp8.__name__,
         "CompressedTensorsW8A8Fp8MoEMethod.get_fused_moe_quant_config",
         reason="PPU FP8 experts need the model's SwiGLU alpha and beta parameters.",
-        affected_versions=AFFECTED_VERSIONS,
         remove_when=REMOVE_WHEN_SWIGLU,
     )
     def _fp8_get_fused_moe_quant_config(self, layer):
