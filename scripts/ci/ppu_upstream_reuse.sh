@@ -55,8 +55,7 @@ trap 'exit 143' TERM
 python -m pip install --no-index --no-deps --force-reinstall \
     "${WHEELS_DIR}"/vllm/*.whl "${WHEELS_DIR}"/vllm-sail/*.whl
 PIP_INDEX_URL=https://mirrors.aliyun.com/pypi/simple/ \
-    ppu_ci_install_if_missing --no-cache-dir \
-        -r "${ROOT_DIR}/requirements/ci-runtime.txt" \
+    ppu_ci_install_wheel_dependency transformers '' --no-cache-dir \
         'pytest==9.1.0' 'tblib==3.1.0' 'numba>=0.65'
 python "${ROOT_DIR}/scripts/ci/ppu_image_stack.py" verify \
     --sdk /usr/local/PPU_SDK --output "${REUSE_RESULTS_DIR}/image-stack.json"
