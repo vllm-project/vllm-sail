@@ -1890,7 +1890,6 @@ def test_wheel_metadata_changes_block_full_reuse(path, github_output):
         ("CONTRIBUTING.md", "full"),
         ("requirements/dev.txt", "none"),
         ("requirements/ppu.txt", "none"),
-        ("requirements/profiling.txt", "none"),
         ("scripts/ci/build_ppu_wheels.sh", "none"),
         ("scripts/ci/ppu_image_stack.py", "none"),
         ("scripts/ci/ppu_wheel_manifest.py", "none"),
