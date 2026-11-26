@@ -46,6 +46,7 @@ if TYPE_CHECKING:
     VLLM_SAIL_DISABLE_MOE_WNA16_CUDA: bool = False
     VLLM_SAIL_FORCE_MOE_WNA16_CUDA: bool = False
     VLLM_SAIL_ENABLE_MOE_MARLIN: bool = False
+    VLLM_SAIL_KIMI_K3_MOE_SEQUENCE_PARALLEL: bool = True
     VLLM_SAIL_MEGA_MOE_MMA_TYPE: str = "fp8xfp4"
     VLLM_SAIL_DISABLE_MEGA_MHC: bool = False
     VLLM_SAIL_USE_TRITON_INT8_QUANT: bool = True
@@ -383,6 +384,20 @@ ENVIRONMENT_SPECS: tuple[EnvSpec, ...] = (
         description=(
             "Allow the SAIL DeepSelect top-k backend for sparse indexers on "
             "Zhenwu M890."
+        ),
+    ),
+    # MoE-local sequence sharding for eligible Kimi K3 MegaMoE TP/PP
+    # configurations by default; set to 0 to restore the replicated-token
+    # path. The decoder and pipeline boundaries still operate on the full
+    # sequence.
+    _bool_spec(
+        "VLLM_SAIL_KIMI_K3_MOE_SEQUENCE_PARALLEL",
+        section="Backend selection",
+        default=True,
+        description=(
+            "Shard MoE input tokens across TP ranks for Kimi K3 MegaMoE "
+            "PP>1 configurations instead of replicating the full sequence "
+            "on every rank; `0` restores the replicated-token path."
         ),
     ),
     # Shared upstream name; PPU extends the choices through its general plugin.

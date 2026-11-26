@@ -315,6 +315,7 @@ _EXPECTED_TARGETS = {
     ("vllm.models.kimi_k3.nvidia.latent_moe_runner.LatentMoERunner._select_tail_tier"),
     "vllm.models.kimi_k3.nvidia.latent_moe_runner.LatentMoERunner.__init__",
     "vllm.models.kimi_k3.nvidia.model.KimiMoE.__init__",
+    "vllm.models.kimi_k3.nvidia.model.KimiMoE.forward",
     "vllm.models.kimi_k3.nvidia.model.KimiRoutedOutputTransform.forward",
     "vllm.models.kimi_k3.nvidia.ops.dsa_indexer.indexer_k_norm_quant_insert",
     "vllm.models.kimi_k3.nvidia.ops.dsa_indexer.indexer_q_quant_fold_weights",
@@ -479,6 +480,174 @@ def test_kimi_k3_megamoe_owes_shared_reduction_only_without_sequence_parallel(
     assert flag(tp_size=1) is False
     # Every other backend runs the shared expert through a MoERunner tail.
     assert flag(use_mega_moe=False) is None
+
+
+@pytest.mark.requires_runtime
+def test_kimi_k3_moe_sequence_parallel_default_on_preserves_shared_contract(
+    installed_model_patches, monkeypatch
+) -> None:
+    """Default-on MoE-local SP preserves the upstream shared-expert contract."""
+    from types import SimpleNamespace
+
+    from vllm.platforms import current_platform
+
+    from vllm_sail.patch.enhancement.models import kimi_k3 as patch_module
+
+    monkeypatch.setattr(type(current_platform), "is_ppu", lambda self=None: True)
+    monkeypatch.delenv("VLLM_SAIL_KIMI_K3_MOE_SEQUENCE_PARALLEL", raising=False)
+    # No environment override: the default must enable eligible PP>1 MoE-local SP.
+    calls = []
+
+    def fake_init(self, *args, **kwargs):
+        use_sp = args[5] if len(args) > 5 else kwargs.get(
+            "use_sequence_parallel", False
+        )
+        calls.append((args, kwargs))
+        self.use_mega_moe = True
+        self.tp_size = 8
+        self.use_sequence_parallel = use_sp
+        self.routed_output_transform = SimpleNamespace()
+
+    monkeypatch.setattr(patch_module, "_upstream_moe_init", fake_init)
+    config = SimpleNamespace(
+        parallel_config=SimpleNamespace(
+            pipeline_parallel_size=2,
+            enable_expert_parallel=True,
+            tensor_parallel_size=8,
+        ),
+        kernel_config=SimpleNamespace(moe_backend="deep_gemm_mega_moe"),
+    )
+
+    keyword_moe = SimpleNamespace()
+    patch_module.moe_init(
+        keyword_moe,
+        vllm_config=config,
+        use_sequence_parallel=False,
+        run_gemm_rs_ar=True,
+    )
+    assert keyword_moe._moe_sequence_parallel is True
+    assert calls[-1][1]["use_sequence_parallel"] is True
+    assert calls[-1][1]["run_gemm_rs_ar"] is False
+    # Replicated (or internally AG/RS-sharded) SP shared experts need no AR of
+    # partials belonging to different token shards.
+    assert keyword_moe.routed_output_transform._mega_shared_partial is False
+
+    positional_moe = SimpleNamespace()
+    patch_module.moe_init(
+        positional_moe, object(), config, None, "", 0, False, True
+    )
+    assert positional_moe._moe_sequence_parallel is True
+    assert calls[-1][0][5] is True
+    assert calls[-1][0][6] is False
+    assert "use_sequence_parallel" not in calls[-1][1]
+    assert "run_gemm_rs_ar" not in calls[-1][1]
+
+    # Existing model-level SP already owns sharding; do not wrap it twice.
+    config.parallel_config.pipeline_parallel_size = 1
+    model_sp_moe = SimpleNamespace()
+    patch_module.moe_init(
+        model_sp_moe,
+        vllm_config=config,
+        use_sequence_parallel=True,
+        run_gemm_rs_ar=True,
+    )
+    assert model_sp_moe._moe_sequence_parallel is False
+    assert calls[-1][1]["use_sequence_parallel"] is True
+    assert calls[-1][1]["run_gemm_rs_ar"] is True
+
+    # Explicit opt-out preserves the original initializer and shared-partial repair.
+    monkeypatch.setenv("VLLM_SAIL_KIMI_K3_MOE_SEQUENCE_PARALLEL", "0")
+    config.parallel_config.pipeline_parallel_size = 2
+    baseline_moe = SimpleNamespace()
+    patch_module.moe_init(
+        baseline_moe,
+        vllm_config=config,
+        use_sequence_parallel=False,
+        run_gemm_rs_ar=True,
+    )
+    assert baseline_moe._moe_sequence_parallel is False
+    assert calls[-1][1]["use_sequence_parallel"] is False
+    assert calls[-1][1]["run_gemm_rs_ar"] is True
+    assert baseline_moe.routed_output_transform._mega_shared_partial is True
+
+
+@pytest.mark.requires_runtime
+def test_kimi_k3_moe_forward_shards_gathers_and_restores_padding(
+    installed_model_patches, monkeypatch
+) -> None:
+    """The wrapper crops SP padding and restores the full padding mask."""
+    from types import SimpleNamespace
+
+    import torch
+    from vllm.models.common.ops import sequence_parallel as sp_ops
+    from vllm.models.kimi_k3.nvidia.model import KimiMoE
+
+    from vllm_sail.patch.enhancement.models import kimi_k3 as patch_module
+
+    hidden_states = torch.arange(10).reshape(5, 2)
+    local_states = hidden_states[:3]
+    local_output = local_states + 100
+    gathered = torch.arange(12).reshape(6, 2)
+    full_padding = torch.tensor([False, False, True, False, True])
+    local_padding = torch.tensor([False, False, True])
+    context = SimpleNamespace(is_padding=full_padding)
+    seen = {}
+
+    def fake_upstream(self, value):
+        seen["input"] = value
+        seen["padding"] = context.is_padding
+        return local_output
+
+    def fake_all_gather(value):
+        assert value is local_output
+        return gathered
+
+    monkeypatch.setenv("VLLM_MOE_SKIP_PADDING", "1")
+    monkeypatch.setattr(patch_module, "_upstream_moe_forward", fake_upstream)
+    monkeypatch.setattr(sp_ops, "get_tensor_model_parallel_world_size", lambda: 2)
+    monkeypatch.setattr(sp_ops, "get_tensor_model_parallel_rank", lambda: 0)
+    monkeypatch.setattr(patch_module, "sp_all_gather", fake_all_gather)
+    monkeypatch.setattr(patch_module, "is_forward_context_available", lambda: True)
+    monkeypatch.setattr(patch_module, "get_forward_context", lambda: context)
+
+    moe = SimpleNamespace(_moe_sequence_parallel=True)
+    output = KimiMoE.forward(moe, hidden_states)
+    assert torch.equal(seen["input"], local_states)
+    assert torch.equal(seen["padding"], local_padding)
+    assert context.is_padding is full_padding
+    assert torch.equal(output, gathered[:5])
+
+    def fail_upstream(self, value):
+        raise RuntimeError("stop after local mask installation")
+
+    monkeypatch.setattr(patch_module, "_upstream_moe_forward", fail_upstream)
+    with pytest.raises(RuntimeError, match="stop after"):
+        KimiMoE.forward(moe, hidden_states)
+    assert context.is_padding is full_padding
+
+
+@pytest.mark.requires_runtime
+def test_kimi_k3_moe_forward_disabled_delegates_without_collectives(
+    installed_model_patches, monkeypatch
+) -> None:
+    from types import SimpleNamespace
+
+    from vllm.models.kimi_k3.nvidia.model import KimiMoE
+
+    from vllm_sail.patch.enhancement.models import kimi_k3 as patch_module
+
+    expected = object()
+    monkeypatch.setattr(
+        patch_module, "_upstream_moe_forward", lambda self, value: expected
+    )
+
+    def fail_if_called(*args):
+        raise AssertionError("baseline must not enter the SP path")
+
+    for name in ("sp_shard", "sp_all_gather", "is_forward_context_available"):
+        monkeypatch.setattr(patch_module, name, fail_if_called)
+    moe = SimpleNamespace(_moe_sequence_parallel=False)
+    assert KimiMoE.forward(moe, object()) is expected
 
 
 @pytest.mark.requires_runtime
