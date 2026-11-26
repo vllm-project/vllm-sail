@@ -658,10 +658,7 @@ def has_int8_mqa_logits() -> bool:
     older DeepGEMM builds export neither.
     """
     _lazy_init()
-    return (
-        _int8_mqa_logits_impl is not None
-        and _int8_paged_mqa_logits_impl is not None
-    )
+    return _int8_mqa_logits_impl is not None and _int8_paged_mqa_logits_impl is not None
 
 
 def get_activation_mode() -> Any:
@@ -1308,6 +1305,27 @@ def is_ppu_15() -> bool:
     return current_platform.is_ppu() and current_platform.is_device_capability((8, 9))
 
 
+# Process-level invariants for the BF16 dense dispatch, resolved once at
+# import time. should_use_deepgemm_for_bf16_linear() runs inside the
+# torch.compile fullgraph capture of the model forward: has_deep_gemm()
+# performs a trial importlib.import_module(), which Dynamo refuses to trace
+# (importlib is a skip directory), and a cold capability probe is equally
+# untraceable. A first evaluation inside the capture region therefore aborts
+# serving with "Attempted to call function marked as skipped" (Aone 89448383).
+# Plain bool constants keep the traced predicate free of graph breaks; both
+# probes fail closed so an early import (platform not yet PPU-aware, no
+# device) only disables the DeepGEMM path, never breaks eager execution.
+try:
+    _BF16_DENSE_DEEPGEMM_AVAILABLE = bool(current_platform.is_ppu() and has_deep_gemm())
+except Exception:
+    _BF16_DENSE_DEEPGEMM_AVAILABLE = False
+
+try:
+    _BF16_DENSE_ANY_N = bool(current_platform.has_device_capability((8, 9)))
+except Exception:
+    _BF16_DENSE_ANY_N = False
+
+
 def should_use_deepgemm_for_bf16_linear(
     x: torch.Tensor,
     weight: torch.Tensor,
@@ -1328,6 +1346,13 @@ def should_use_deepgemm_for_bf16_linear(
     be even, with the sole exception of the N=1 GEMV path (K % 8 == 0,
     16-byte-aligned operands). Anything else falls back to acblas instead of
     failing inside the JIT kernel.
+
+    Compile-safe by construction: apart from the lazy env read, every check
+    reads either a module-level constant resolved at import time or plain
+    tensor attributes, so fullgraph capture never traces importlib or NVML
+    probes. The odd-N alignment branch is dead code under fullgraph on
+    M890+ (_BF16_DENSE_ANY_N is True); data_ptr() arithmetic is untraceable,
+    so chips without any-N support must stay eager for odd-N GEMV.
     """
     if bias is not None:
         return False
@@ -1335,7 +1360,7 @@ def should_use_deepgemm_for_bf16_linear(
     if not ppu_envs.VLLM_SAIL_DENSE_BF16_DEEPGEMM:
         return False
 
-    if not (current_platform.is_ppu() and has_deep_gemm()):
+    if not _BF16_DENSE_DEEPGEMM_AVAILABLE:
         return False
 
     if weight.dim() != 2:
@@ -1344,8 +1369,7 @@ def should_use_deepgemm_for_bf16_linear(
     # 890P+ runs any N; everything else needs even N, or the N=1 GEMV path
     # (K % 8 == 0, 16-byte-aligned x/w).
     n, k = weight.shape
-    odd_n_ok = current_platform.has_device_capability((8, 9))
-    if n % 2 != 0 and not odd_n_ok:
+    if n % 2 != 0 and not _BF16_DENSE_ANY_N:
         if n != 1 or k % 8 != 0:
             return False
         if x.data_ptr() % 16 != 0 or weight.data_ptr() % 16 != 0:

@@ -247,9 +247,8 @@ def _should_use_bf16_linear(chip: str, *, bias: bool, n: int = 64) -> bool:
         {
             "ppu_envs": ppu_envs,
             "torch": _TORCH,
-            "current_platform": platform,
-            "has_deep_gemm": lambda: True,
-            "is_ppu_15": lambda: platform.is_device_capability((8, 9)),
+            "_BF16_DENSE_DEEPGEMM_AVAILABLE": True,
+            "_BF16_DENSE_ANY_N": platform.has_device_capability((8, 9)),
         },
     )
     return bool(fn(x, weight, object() if bias else None))

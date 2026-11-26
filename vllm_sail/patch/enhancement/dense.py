@@ -33,7 +33,6 @@ def ppu_unquantized_gemm(
     from vllm_sail.utils.deep_gemm import should_use_deepgemm_for_bf16_linear
 
     if should_use_deepgemm_for_bf16_linear(x, weight, bias):
-        logger.info_once("Using PPU DeepGEMM for unquantized BF16 dense GEMM")
         return torch.ops.vllm.ppu_bf16_deepgemm_linear(x, weight, bias)
     return torch.nn.functional.linear(x, weight, bias)
 
@@ -43,6 +42,10 @@ def ppu_bf16_deepgemm_linear_impl(
 ) -> torch.Tensor:
     from vllm_sail.utils.deep_gemm import bf16_dense_linear
 
+    # Log here, not in the dispatch: the dispatch runs inside the fullgraph
+    # capture region, where Dynamo rejects logging.Logger calls (non-export).
+    # The custom-op impl is opaque to Dynamo and executes eagerly.
+    logger.info_once("Using PPU DeepGEMM for unquantized BF16 dense GEMM")
     return bf16_dense_linear(x, weight, bias)
 
 

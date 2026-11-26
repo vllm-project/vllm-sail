@@ -230,8 +230,8 @@ def _should_use_bf16_linear(
         {
             "ppu_envs": ppu_envs,
             "torch": _TORCH,
-            "current_platform": platform,
-            "has_deep_gemm": lambda: True,
+            "_BF16_DENSE_DEEPGEMM_AVAILABLE": True,
+            "_BF16_DENSE_ANY_N": platform.has_device_capability((8, 9)),
         },
     )
     return bool(fn(x, weight, object() if bias else None))
@@ -247,8 +247,7 @@ def _host_deepgemm_hw_default() -> bool:
         from vllm.platforms import current_platform
 
         return bool(
-            current_platform.is_ppu()
-            and current_platform.has_device_capability((8, 9))
+            current_platform.is_ppu() and current_platform.has_device_capability((8, 9))
         )
     except Exception:
         return False
