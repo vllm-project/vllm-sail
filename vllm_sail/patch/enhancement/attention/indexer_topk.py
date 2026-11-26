@@ -23,6 +23,7 @@ _original_stride = _topk.get_deep_select_stride_requirement
 _original_supported = _topk.is_deep_select_supported
 _original_topk = _topk.deep_select_topk
 _original_resolve = _topk.SparseIndexerTopk.resolve_backend
+_original_takes_bf16 = _topk.SparseIndexerTopk.takes_bf16_logits
 
 
 @patch(
@@ -94,6 +95,33 @@ def deep_select_topk(
 
 @patch(
     _MODULE,
+    "SparseIndexerTopk.takes_bf16_logits",
+    reason=_REASON,
+    remove_when=_REMOVE_WHEN,
+)
+def takes_bf16_logits(self, logits, topk_tokens, num_rows) -> bool:
+    # The upstream flags (self._has_deep_select, _HAS_DEEP_SELECT_C) describe
+    # the CUDA C extension and are cached at construction, so on PPU they are
+    # always False: the caller then upcasts the BF16 logits to FP32, which the
+    # SAIL wheel rejects in resolve_backend. Resolve at call time instead.
+    # "auto" is included so PPU prefers DeepSelect without an explicit
+    # --kernel-config. The stride(1) check mirrors upstream's own guard, and
+    # when DeepSelect does not qualify (disabled wheel, unsupported shape, or
+    # non-contiguous logits) the decision falls through to upstream — its
+    # cooperative BF16 path must stay reachable instead of being cut off by
+    # an unconditional False from the SAIL check.
+    if (
+        current_platform.is_ppu()
+        and self._backend in ("auto", "deep_select")
+        and logits.stride(1) == 1
+        and _sail.can_use_deep_select(logits, topk_tokens)
+    ):
+        return True
+    return _original_takes_bf16(self, logits, topk_tokens, num_rows)
+
+
+@patch(
+    _MODULE,
     "SparseIndexerTopk.resolve_backend",
     reason=_REASON,
     remove_when=_REMOVE_WHEN,
@@ -119,6 +147,7 @@ def _rebind_consumers():
         (
             (
                 "vllm.model_executor.kernels.attention.dsa.candidate_blocks",
+                "vllm.model_executor.layers.sparse_attn_indexer",
                 "vllm.model_executor.layers.sparse_mqa_indexer",
                 "vllm.v1.attention.backends.mla.sparse_indexer",
             ),
@@ -136,6 +165,7 @@ def _rebind_consumers():
         (
             (
                 "vllm.model_executor.kernels.attention.dsa.candidate_blocks",
+                "vllm.model_executor.layers.sparse_attn_indexer",
                 "vllm.models.step5.common.ops.sparse_indexer",
             ),
             _original_supported,
@@ -144,6 +174,8 @@ def _rebind_consumers():
         (
             (
                 "vllm.model_executor.kernels.attention.dsa.candidate_blocks",
+                "vllm.model_executor.layers.sparse_attn_indexer",
+                "vllm.v1.attention.backends.mla.sparse_indexer",
                 _SPARSE_MODULE,
             ),
             _original_topk,

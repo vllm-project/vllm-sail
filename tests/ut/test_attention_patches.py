@@ -126,6 +126,18 @@ _ATTENTION_TARGETS = (
         "_hc_prenorm_gemm_outputs",
     ),
     ("vllm.v1.kv_cache_interface", "MLAAttentionSpec.__init__"),
+    (
+        "vllm.v1.worker.gpu.attn_utils",
+        "build_slot_mappings_by_layer",
+    ),
+    (
+        "vllm.v1.worker.utils",
+        "AttentionGroup._with_kernel_block_table",
+    ),
+    (
+        "vllm.v1.worker.utils",
+        "AttentionGroup.map_kv_cache_to_kernel_blocks",
+    ),
 )
 
 #: The fork's five forward_ppu overrides (mhc x4 + sparse attn indexer).
@@ -492,6 +504,7 @@ def test_phase4_metadata_shape(installed) -> None:
     phase4_prefixes = (
         "vllm.v1.attention.",
         "vllm.v1.kv_cache_interface.",
+        "vllm.v1.worker.utils.",
         "vllm.model_executor.layers.attention.",
         "vllm.model_executor.layers.mhc.",
         "vllm.model_executor.layers.sparse_attn_indexer.",
@@ -534,6 +547,7 @@ def test_phase4_plugin_modules_import_without_hardware(installed) -> None:
         "vllm_sail.patch.enhancement.attention.mhc",
         "vllm_sail.patch.enhancement.attention.mhc_tilelang",
         "vllm_sail.patch.enhancement.attention.kv_cache_interface",
+        "vllm_sail.patch.enhancement.attention.packed_token_cache_split",
         "vllm_sail.patch.performance.fla",
         "vllm_sail.patch.performance.fla.autotune_cache",
     ):

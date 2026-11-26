@@ -11,17 +11,29 @@ These patches record whether the projection is quantized, force every batch
 onto tier 1 when it is, and route both the tier-1 GEMM and
 ``KimiRoutedOutputTransform``'s residual epilogue through the layer. An
 unquantized up-projection keeps delegating to upstream unchanged.
+
+They also restore the missing tensor-parallel reduction on the eager MegaMoE
+path: ``KimiMoE.forward`` calls the shared expert directly there, and sequence
+parallelism -- the only reason the shared expert is replicated -- is disabled
+whenever pipeline parallelism is on, so nothing summed the TP-sharded
+shared-expert partial. ``KimiMoE.__init__`` records when that sum is owed and
+``KimiRoutedOutputTransform`` is where the shared output re-enters the residual
+stream, so the collective lives there.
 """
 
 from __future__ import annotations
 
+import inspect
+from dataclasses import fields as dataclass_fields
+
 from vllm.distributed import tensor_model_parallel_all_reduce
 from vllm.model_executor.layers.linear import UnquantizedLinearMethod
+from vllm.models.kimi_k3.common.dsa_cache import SelfAddressedMLASpec
 from vllm.models.kimi_k3.nvidia.latent_moe_runner import (
     LatentMoERunner,
     LatentTailTier,
 )
-from vllm.models.kimi_k3.nvidia.model import KimiRoutedOutputTransform
+from vllm.models.kimi_k3.nvidia.model import KimiMoE, KimiRoutedOutputTransform
 from vllm.platforms import current_platform
 from vllm.utils.multi_stream_utils import maybe_execute_in_parallel
 from vllm.utils.torch_utils import aux_stream
@@ -33,6 +45,40 @@ _upstream_runner_init = LatentMoERunner.__init__
 _upstream_select_tail_tier = LatentMoERunner._select_tail_tier
 _upstream_overlap_allreduce_tail = LatentMoERunner._overlap_allreduce_tail
 _upstream_transform_forward = KimiRoutedOutputTransform.forward
+_upstream_moe_init = KimiMoE.__init__
+
+
+@patch(
+    "vllm.models.kimi_k3.nvidia.model",
+    "KimiMoE.__init__",
+    reason=(
+        "KimiMoE.forward calls the shared expert directly on the eager MegaMoE "
+        "path, so no MoERunner tail all-reduces the TP-sharded shared-expert "
+        "partial. Record on the output transform when that sum is owed; "
+        "delegates to upstream elsewhere."
+    ),
+    remove_when=(
+        "the eager MegaMoE path reduces the shared-expert output itself, the "
+        "way MoERunner and LatentMoERunner do."
+    ),
+)
+def moe_init(self, *args, **kwargs) -> None:
+    _upstream_moe_init(self, *args, **kwargs)
+    if not current_platform.is_ppu():
+        return
+    # PPU MODIFICATION: begin — sequence parallelism keeps the shared expert
+    # replicated (both projections are disable_tp), which is why the eager
+    # MegaMoE path needs no collective at all. It turns off whenever pipeline
+    # parallelism is enabled, and then the shared expert falls back to a
+    # TP-sharded down_proj whose partial output nobody sums: the routed branch
+    # is already complete after the kernel's combine, so the missing rows
+    # corrupt every following layer.
+    transform = self.routed_output_transform
+    if self.use_mega_moe and transform is not None:
+        transform._mega_shared_partial = (
+            self.tp_size > 1 and not self.use_sequence_parallel
+        )
+    # PPU MODIFICATION: end
 
 
 @patch(
@@ -145,6 +191,13 @@ def overlap_allreduce_tail(self, fused_output, shared_output, trunc_size):
     ),
 )
 def transform_forward(self, hidden_states, residual=None):
+    # PPU MODIFICATION: begin — sum the TP-sharded shared-expert partial before
+    # the up-projection epilogue folds the routed result into it. Only the eager
+    # MegaMoE path sets the flag (see ``KimiMoE.__init__``): it is the one caller
+    # whose shared output arrives unreduced and un-run through a MoERunner tail.
+    if residual is not None and getattr(self, "_mega_shared_partial", False):
+        residual = tensor_model_parallel_all_reduce(residual)
+    # PPU MODIFICATION: end
     if (
         residual is None
         or not current_platform.is_ppu()
@@ -157,3 +210,35 @@ def transform_forward(self, hidden_states, residual=None):
         hidden_states = self.norm(hidden_states)
     return residual.add_(self.up_proj(hidden_states)[0])
     # PPU MODIFICATION: end
+
+
+@patch(
+    "vllm.models.kimi_k3.common.dsa_cache",
+    "SelfAddressedMLASpec.from_spec",
+    reason=(
+        "The fork extends MLAAttentionSpec with indexer_n_head/indexer_q_head_dim "
+        "field descriptors (attention/kv_cache_interface.py), and a dataclass "
+        "subclass generated after that injection lists them in __dataclass_fields__ "
+        "while its generated __init__ still rejects them. from_spec copies every "
+        "init field of the source spec, so binding Kimi's self-addressed MLA cache "
+        "crashes with an unexpected-keyword TypeError. Keep the geometry out: the "
+        "self-addressed cache is sized by the packed layout itself, and the DSA "
+        "indexer metadata builder reads its geometry from the model config. On "
+        "builds where MLAAttentionSpec natively declares (or lacks) those fields, "
+        "the filter is a no-op against upstream's behavior."
+    ),
+    remove_when=(
+        "upstream MLAAttentionSpec declares the indexer geometry fields itself "
+        "(so no injection happens), or from_spec stops copying unknown fields."
+    ),
+)
+@classmethod
+def from_spec(cls, spec):
+    accepted = set(inspect.signature(cls.__init__).parameters)
+    return cls(
+        **{
+            f.name: getattr(spec, f.name)
+            for f in dataclass_fields(spec)
+            if f.init and f.name in accepted
+        }
+    )
