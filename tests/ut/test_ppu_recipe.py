@@ -1327,7 +1327,7 @@ def test_recipe_workflows_follow_security_and_shell_contracts() -> None:
         if step.get("id") == "recipe"
     )
     assert model_recipe["env"]["TIER"] == (
-        "${{ inputs.forward_perf && 'forward_perf' || 'model_sanity' }}"
+        "${{ inputs.lite_perf && 'lite_perf' || 'model_sanity' }}"
     )
     assert model_recipe["env"]["PRESET"] == "${{ matrix.model.preset || '' }}"
     pr_wf = yaml.safe_load(

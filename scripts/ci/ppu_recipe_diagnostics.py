@@ -12,7 +12,7 @@ PHASES = {
     "platform_check": "platform_check_failed",
     "model_cache_check": "model_cache_check_failed",
     "recipe_validation": "recipe_validation_failed",
-    "forward_measurement": "forward_measurement_failed",
+    "lite_perf_measurement": "lite_perf_measurement_failed",
     "server_startup": "server_startup_failed",
     "server_readiness_timeout": "server_readiness_timeout",
     "chat_probe": "chat_probe_failed",

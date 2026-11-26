@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Run and report recipe-backed offline forward performance measurements."""
+"""Run and report recipe-backed lightweight performance regression tests."""
 
 import argparse
 import hashlib
@@ -154,16 +154,16 @@ def read_measurements(path, expected, rank_count):
 
     data = json.loads(path.read_text())
     if not isinstance(data, list) or len(data) != len(expected):
-        raise ValueError("Expected one forward result per case")
+        raise ValueError("Expected one benchmark result per case")
     metrics = {}
     for row in data:
         name = row["case"]
         if name in metrics or name not in expected or row["requests"] != expected[name]:
-            raise ValueError("Unexpected forward case or request shape")
+            raise ValueError("Unexpected benchmark case or request shape")
         ranks = row["ranks"]
         median = row["median_us"]
         if not positive(median) or len(ranks) != rank_count:
-            raise ValueError("Invalid forward median or rank count")
+            raise ValueError("Invalid benchmark median or rank count")
         for rank in ranks:
             latency = rank["latency_us"]
             if (
@@ -175,7 +175,7 @@ def read_measurements(path, expected, rank_count):
                 or len(latency["samples_us"]) != ITERS * SAMPLES
                 or not all(positive(sample) for sample in latency["samples_us"])
             ):
-                raise ValueError("Invalid forward rank evidence")
+                raise ValueError("Invalid benchmark rank evidence")
         metrics[name] = {
             "median_us": median,
             "cv": compute_cv(ranks[0]["latency_us"]["samples_us"]),
@@ -187,7 +187,7 @@ def assess(current, baseline):
     if baseline["schema_version"] != 1 or baseline["config"] != current["config"]:
         return {
             "status": "fail",
-            "failure_reason": "forward_config_mismatch",
+            "failure_reason": "lite_perf_config_mismatch",
             "cases": [],
             "config_mismatch": [
                 field
@@ -208,7 +208,7 @@ def assess(current, baseline):
             or type(cv) not in (int, float)
             or not 0 <= cv <= MAX_CV
         ):
-            raise ValueError("Invalid forward baseline metric")
+            raise ValueError("Invalid lite perf baseline metric")
         if Decimal(str(median_us)) > Decimal(str(baseline_us)) * REGRESSION_LIMIT:
             status = "FAIL"
         elif metric["cv"] > MAX_CV:
@@ -226,9 +226,9 @@ def assess(current, baseline):
         )
     failed = {row["status"] for row in rows}
     reason = (
-        "forward_regression"
+        "lite_perf_regression"
         if "FAIL" in failed
-        else "forward_measurement_unstable"
+        else "lite_perf_measurement_unstable"
         if "UNSTABLE" in failed
         else "not_applicable"
     )
@@ -251,14 +251,14 @@ def run(args):
     output = args.results_dir
     output.mkdir(parents=True, exist_ok=True)
     policy = _load_yaml(args.policy)
-    resolved = resolve_recipe(args.recipe, policy_path=args.policy, tier="forward_perf")
-    groups = policy["tiers"]["forward_perf"]["groups"]
+    resolved = resolve_recipe(args.recipe, policy_path=args.policy, tier="lite_perf")
+    groups = policy["tiers"]["lite_perf"]["groups"]
     count = resolved["ppu_count"]
     devices = [
         torch.cuda.get_device_name(rank) for rank in range(torch.cuda.device_count())
     ]
     if not current_platform.is_ppu() or devices != ["ZW-M890P"] * count or count != 8:
-        raise ValueError("Forward performance requires eight M890 PPUs")
+        raise ValueError("Lightweight performance regression requires eight M890 PPUs")
     if args.local_checkpoint is not None:
         if not args.capture_baseline or not args.local_checkpoint.is_absolute():
             raise ValueError("Local checkpoint paths require explicit baseline capture")
@@ -308,11 +308,10 @@ def run(args):
         },
         "metrics": {},
     }
+    baseline_name = f"{args.policy.stem}-lite-perf.json"
     baseline = None
     if not args.capture_baseline:
-        path = (
-            ROOT / "tests/e2e/perf/baselines/890p" / f"{args.policy.stem}-forward.json"
-        )
+        path = ROOT / "tests/e2e/perf/baselines/890p" / baseline_name
         baseline = json.loads(path.read_text())
         if baseline["schema_version"] != 1 or baseline["config"] != current["config"]:
             redact_and_verify_public_payload(current)
@@ -332,14 +331,14 @@ def run(args):
                 run_benchmark(argv, env, log)
         except subprocess.TimeoutExpired:
             print(
-                f"Forward benchmark exceeded {BENCHMARK_TIMEOUT_S} seconds",
+                f"Lite perf benchmark exceeded {BENCHMARK_TIMEOUT_S} seconds",
                 file=sys.stderr,
             )
             write_json(
                 output / "summary.json",
                 {
                     "status": "fail",
-                    "failure_reason": "forward_measurement_timeout",
+                    "failure_reason": "lite_perf_measurement_timeout",
                     "cases": [],
                 },
             )
@@ -354,8 +353,8 @@ def run(args):
         summary = assess(current, baseline)
     else:
         if any(metric["cv"] > MAX_CV for metric in current["metrics"].values()):
-            raise ValueError("Cannot capture unstable forward measurements")
-        write_json(output / f"{args.policy.stem}-forward.json", current)
+            raise ValueError("Cannot capture unstable lite perf measurements")
+        write_json(output / baseline_name, current)
         summary = {"status": "pass", "failure_reason": "not_applicable", "cases": []}
     write_json(output / "summary.json", summary)
     return 0 if summary["status"] == "pass" else 1
@@ -370,7 +369,7 @@ def publish():
     private = artifacts / "results"
     public = Path(os.environ["PUBLIC_DIR"])
     status = "fail"
-    reason = failure_reason(artifacts, "forward_perf")
+    reason = failure_reason(artifacts, "lite_perf")
     rows = []
     config_mismatch = []
     try:
@@ -382,13 +381,13 @@ def publish():
             raise ValueError("Expected bounded regular summary")
         report = json.loads(path.read_text())
         if report["status"] == "fail" and report["failure_reason"] in {
-            "forward_config_mismatch",
-            "forward_regression",
-            "forward_measurement_timeout",
-            "forward_measurement_unstable",
+            "lite_perf_config_mismatch",
+            "lite_perf_regression",
+            "lite_perf_measurement_timeout",
+            "lite_perf_measurement_unstable",
         }:
             reason = report["failure_reason"]
-        if reason == "forward_config_mismatch":
+        if reason == "lite_perf_config_mismatch":
             config_mismatch = [
                 field
                 for field in BASELINE_CONFIG_FIELDS
@@ -396,7 +395,7 @@ def publish():
             ]
         cases = report["cases"]
         if not isinstance(cases, list):
-            raise ValueError("Expected a list of forward results")
+            raise ValueError("Expected a list of lite perf results")
         for row in cases:
             if (
                 CASE_NAME.fullmatch(row["case"])
@@ -439,7 +438,7 @@ def publish():
     write_json(public / "summary.json", summary)
     with Path(os.environ["GITHUB_STEP_SUMMARY"]).open("a", encoding="utf-8") as stream:
         stream.write(
-            f"### Forward performance\n\nResult: **{status}** ({reason})\n\n"
+            f"### Lightweight Performance Regression\n\nResult: **{status}** ({reason})\n\n"
             "A case fails when its median latency is more than 5% above baseline.\n\n"
         )
         if config_mismatch:

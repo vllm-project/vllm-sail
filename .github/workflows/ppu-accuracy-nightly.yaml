@@ -49,7 +49,7 @@ on:
   workflow_dispatch:
     inputs:
       models:
-        description: "Comma-separated legacy catalog keys (blank = all legacy when building wheels, or all Recipe model_sanity when skip_wheel_build=true), recipe:<slug1,slug2>, recipe:all, or forward:deepseek-v4.1-flash"
+        description: "Comma-separated legacy catalog keys (blank = all legacy when building wheels, or all Recipe model_sanity when skip_wheel_build=true), recipe:<slug1,slug2>, recipe:all, or lite_perf:deepseek-v4.1-flash"
         required: false
         default: ""
         type: string
@@ -153,7 +153,7 @@ jobs:
       recipe_matrix: ${{ steps.select.outputs.recipe_matrix }}
       run_recipe: ${{ steps.select.outputs.run_recipe }}
       full_run: ${{ steps.select.outputs.full_run }}
-      run_forward: ${{ steps.select.outputs.run_forward }}
+      run_lite_perf: ${{ steps.select.outputs.run_lite_perf }}
       target_sha: ${{ steps.select.outputs.target_sha }}
       version: ${{ steps.version.outputs.version }}
     steps:
@@ -289,7 +289,7 @@ jobs:
           models = os.environ["MODELS"].strip()
           if (
               os.environ["SCHEDULED"] == "true"
-              or models.startswith(("recipe:", "forward:"))
+              or models.startswith(("recipe:", "lite_perf:"))
               or (os.environ["SKIP_WHEEL_BUILD"] == "true" and not models)
           ):
               with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
@@ -311,7 +311,7 @@ jobs:
           MODELS: ${{ inputs.models }}
           RECIPE_PUBLIC_ENABLED: ${{ vars.PPU_RECIPE_PUBLIC_ENABLED }}
           SCHEDULED_RECIPE_ENABLED: ${{ github.event_name == 'schedule' && vars.PPU_RECIPE_PUBLIC_ENABLED == 'true' }}
-          SCHEDULED_FORWARD_PERF_ENABLED: "false"
+          SCHEDULED_LITE_PERF_ENABLED: "false"
           SKIP_WHEEL_BUILD: ${{ inputs.skip_wheel_build }}
           VERIFIED_TARGET_SHA: ${{ steps.verify_target.outputs.target_sha }}
         run: |
@@ -340,33 +340,33 @@ jobs:
           skip_wheel_build = os.environ.get("SKIP_WHEEL_BUILD", "false") == "true"
           target_sha = os.environ["TARGET_SHA"]
           output = Path(os.environ["GITHUB_OUTPUT"])
-          forward_model = "deepseek-v4.1-flash"
+          lite_perf_model = "deepseek-v4.1-flash"
 
-          def validate_forward_policy():
+          def validate_lite_perf_policy():
               try:
-                  select.build_recipe_matrix(forward_model, "forward_perf")
+                  select.build_recipe_matrix(lite_perf_model, "lite_perf")
               except ValueError as error:
-                  sys.exit(f"Forward policy is unavailable for the selected target_ref: {error}")
+                  sys.exit(f"Lite perf policy is unavailable for the selected target_ref: {error}")
 
-          if requested.startswith("forward:"):
-              if requested != f"forward:{forward_model}":
-                  sys.exit("Unknown forward performance policy")
+          if requested.startswith("lite_perf:"):
+              if requested != f"lite_perf:{lite_perf_model}":
+                  sys.exit("Unknown lite perf policy")
               if skip_wheel_build or os.environ["RECIPE_PUBLIC_ENABLED"] != "true":
-                  sys.exit("Forward performance requires Recipe CI and wheels from this run")
-              validate_forward_policy()
+                  sys.exit("Lightweight performance regression requires Recipe CI and wheels from this run")
+              validate_lite_perf_policy()
               with output.open("a", encoding="utf-8") as handle:
                   handle.write(f"target_sha={target_sha}\n")
                   handle.write(f"full_run={full_run}\n")
-                  handle.write("run_forward=true\n")
+                  handle.write("run_lite_perf=true\n")
               sys.exit(0)
 
           if (
               os.environ["SCHEDULED_RECIPE_ENABLED"] == "true"
-              and os.environ.get("SCHEDULED_FORWARD_PERF_ENABLED") == "true"
+              and os.environ.get("SCHEDULED_LITE_PERF_ENABLED") == "true"
           ):
-              validate_forward_policy()
+              validate_lite_perf_policy()
               with output.open("a", encoding="utf-8") as handle:
-                  handle.write("run_forward=true\n")
+                  handle.write("run_lite_perf=true\n")
 
           if requested == "recipe:all" or (skip_wheel_build and requested == ""):
               if os.environ["RECIPE_PUBLIC_ENABLED"] != "true":
@@ -562,11 +562,11 @@ jobs:
       image_digest: ${{ needs.resolve-image.outputs.image_digest || inputs.image_digest }}
       skip_wheel_build: ${{ inputs.skip_wheel_build == true }}
 
-  recipe-forward-perf:
-    name: Recipe forward performance
+  recipe-lite-perf:
+    name: Lightweight Performance Regression
     needs: [build, select, resolve-image, accuracy, recipe-model-sanity]
     if: >-
-      ${{ !cancelled() && needs.select.outputs.run_forward == 'true' &&
+      ${{ !cancelled() && needs.select.outputs.run_lite_perf == 'true' &&
       needs.build.result == 'success' &&
       (needs.resolve-image.result == 'success' || needs.resolve-image.result == 'skipped') }}
     uses: ./.github/workflows/_ppu-recipe-model-sanity.yaml
@@ -575,14 +575,14 @@ jobs:
       wheel_source_sha: ${{ needs.select.outputs.target_sha }}
       build_run_id: ${{ github.run_id }}
       models: deepseek-v4.1-flash
-      forward_perf: true
+      lite_perf: true
       runtime_version: ${{ needs.select.outputs.version }}
       image_tag: ${{ inputs.image_tag }}
       image_digest: ${{ needs.resolve-image.outputs.image_digest || inputs.image_digest }}
 
   notify-summary:
     name: Notify Nightly summary
-    needs: [select, build, resolve-image, accuracy, recipe-model-sanity, recipe-forward-perf]
+    needs: [select, build, resolve-image, accuracy, recipe-model-sanity, recipe-lite-perf]
     if: >-
       always() && !cancelled() &&
       ((github.event_name == 'schedule' && vars.PPU_NIGHTLY_SCHEDULE_DISABLED != 'true') ||
@@ -626,12 +626,12 @@ jobs:
           pattern: ppu-nightly-legacy-*-${{ github.run_id }}-*
           path: ${{ runner.temp }}/ppu-notify-artifacts
 
-      - name: Fetch public Forward performance summary
-        if: steps.configured.outputs.enabled == 'true' && needs.select.outputs.run_forward == 'true'
+      - name: Fetch public lite perf summary
+        if: steps.configured.outputs.enabled == 'true' && needs.select.outputs.run_lite_perf == 'true'
         continue-on-error: true
         uses: actions/download-artifact@v4
         with:
-          pattern: ppu-recipe-forward_perf-*-${{ github.run_id }}-*
+          pattern: ppu-recipe-lite_perf-*-${{ github.run_id }}-*
           path: ${{ runner.temp }}/ppu-notify-artifacts
 
       - name: Send one Markdown notification
@@ -646,7 +646,7 @@ jobs:
           NOTIFY_IMAGE_RESULT: ${{ needs.resolve-image.result }}
           NOTIFY_LEGACY_RESULT: ${{ needs.accuracy.result }}
           NOTIFY_RECIPE_RESULT: ${{ needs.recipe-model-sanity.result }}
-          NOTIFY_FORWARD_SELECTED: ${{ needs.select.outputs.run_forward }}
+          NOTIFY_LITE_PERF_SELECTED: ${{ needs.select.outputs.run_lite_perf }}
           NOTIFY_LEGACY_MATRIX: ${{ needs.select.outputs.matrix }}
           NOTIFY_RECIPE_MATRIX: ${{ needs.select.outputs.recipe_matrix }}
           PPU_CI_NOTIFY_WEBHOOK_URL: ${{ secrets.PPU_CI_NOTIFY_WEBHOOK_URL }}

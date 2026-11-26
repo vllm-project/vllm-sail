@@ -8,7 +8,7 @@ accuracy_gate:
   golden_source: framework_repo
   save_per_question: true
 tiers:
-  forward_perf:
+  lite_perf:
     groups:
       prefill:
         max_model_len: 102528

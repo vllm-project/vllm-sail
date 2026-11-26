@@ -30,7 +30,7 @@ SERVING_SCHEMA = "ppu-serving/v1"
 DATASET_SCHEMA = "ppu-dataset/v1"
 POLICY_SCHEMA = "ppu-test-policy/v1"
 POLICY_TIERS = frozenset(
-    {"fast_sanity", "model_sanity", "forward_perf", "nightly", "release"}
+    {"fast_sanity", "model_sanity", "lite_perf", "nightly", "release"}
 )
 _UNSET: Any = object()
 
@@ -1098,7 +1098,7 @@ def resolve_recipe(
         if policy.get("hardware") and hardware == "zhenwu_m890":
             hardware = policy["hardware"]
 
-    if tier == "forward_perf":
+    if tier == "lite_perf":
         eff_cache = "disabled"
         eff_dummy = True
         eff_layers = None
@@ -1229,10 +1229,10 @@ def resolve_recipe(
 
     dp_raw = _flag_value(ordered, "--data-parallel-size")
     tp_raw = _flag_value(ordered, "--tensor-parallel-size")
-    if tier == "forward_perf" and (
+    if tier == "lite_perf" and (
         tp_raw is None or int(tp_raw) < 2 or dp_raw not in (None, "1")
     ):
-        raise ValidationError("The forward prefill policy requires a TP recipe")
+        raise ValidationError("The lite_perf prefill policy requires a TP recipe")
     if dp_raw is not None:
         ppu_count = int(dp_raw) * (int(tp_raw) if tp_raw is not None else 1)
     elif tp_raw is not None:
@@ -1724,7 +1724,7 @@ def _validate_stage_cache_rules(
                 )
 
 
-def _validate_forward_groups(groups: Any, *, context: str) -> None:
+def _validate_lite_perf_groups(groups: Any, *, context: str) -> None:
     fields = {"max_model_len", "max_num_batched_tokens", "max_num_seqs", "cases"}
     _check_keys(
         groups,
@@ -1834,20 +1834,20 @@ def validate_policy_structure(
                 f"{context}.replaces_legacy_cases requires tiers.model_sanity"
             )
     if tiers:
-        if "forward_perf" in tiers:
-            forward_context = f"{context}.tiers.forward_perf"
-            forward = _check_keys(
-                tiers["forward_perf"],
+        if "lite_perf" in tiers:
+            lite_perf_context = f"{context}.tiers.lite_perf"
+            lite_perf = _check_keys(
+                tiers["lite_perf"],
                 allowed={"groups"},
                 required={"groups"},
-                context=forward_context,
+                context=lite_perf_context,
             )
             if recipe_path is None:
-                raise ValidationError(f"{forward_context} requires a recipe")
-            _validate_forward_groups(forward["groups"], context=forward_context)
+                raise ValidationError(f"{lite_perf_context} requires a recipe")
+            _validate_lite_perf_groups(lite_perf["groups"], context=lite_perf_context)
             resolve_recipe(
                 recipe_path,
-                tier="forward_perf",
+                tier="lite_perf",
                 variant=policy_variant,
                 hardware=policy["hardware"],
             )
@@ -2488,7 +2488,7 @@ def main(argv: list[str] | None = None) -> int:
     res.add_argument("--recipe", type=Path, required=True)
     res.add_argument("--policy", type=Path, default=None)
     res.add_argument(
-        "--tier", choices=["fast_sanity", "model_sanity", "forward_perf"], default=None
+        "--tier", choices=["fast_sanity", "model_sanity", "lite_perf"], default=None
     )
     res.add_argument("--variant", default=None)
     res.add_argument("--hardware", default="zhenwu_m890")
