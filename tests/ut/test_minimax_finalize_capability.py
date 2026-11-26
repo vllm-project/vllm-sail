@@ -25,6 +25,7 @@ def test_registered_finalize_retains_ordinary_ppu_path(modules, ppu):
 
     modules(
         "vllm.models.minimax_m3.nvidia.model",
+        GateLinear=unavailable,
         MiniMaxM3Model=Model,
         MiniMaxM3MLP=type("MLP", (), {}),
         MiniMAXGemmaRMSNorm=type("Norm", (), {"forward": unavailable}),

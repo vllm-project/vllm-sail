@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Retain ordinary MiniMax MoE finalize on PPU."""
+"""Adapt MiniMax M3 initialization, norm and router selection for PPU."""
 
 from vllm.models.minimax_m3.nvidia import model as _model
 from vllm.models.minimax_m3.nvidia.model import MiniMaxM3Model
@@ -10,12 +10,36 @@ from vllm_sail.patch.bodies import bind_body
 from vllm_sail.patch.utils import patch
 
 _original_init = MiniMaxM3Model._init_fused_moe_finalize
+_original_gate_linear = _model.GateLinear
 _original_mlp_init = _model.MiniMaxM3MLP.__init__
 _original_supports_qkv_fused_epilogue = _model._supports_qkv_fused_epilogue
 _original_maybe_init_gemm_rs = _model._maybe_init_gemm_rs
 _original_bind_gemm_rs = _model._bind_gemm_rs
 _original_norm_forward = _model.MiniMAXGemmaRMSNorm.forward
 _ppu_mlp_init = bind_body(_mlp_body, _model)
+
+
+@patch(
+    "vllm.models.minimax_m3.nvidia.model",
+    "GateLinear",
+    reason="MiniMax fixes the gate weight to FP32. BF16 weights let the upstream unquantized router GEMM consume BF16 activations and return FP32 logits on PPU.",
+    affected_versions=">=0.32.0,<0.33.0",
+    remove_when="MiniMax exposes a router weight dtype choice independently of the FP32 logits dtype.",
+)
+def make_gate_linear(*args, **kwargs):
+    if (
+        current_platform.is_ppu()
+        and not _model.envs.VLLM_BATCH_INVARIANT
+        and _model.torch.get_default_dtype() == _model.torch.bfloat16
+        and len(args) <= 2
+        and not kwargs.get("bias", False)
+        and kwargs.get("quant_config") is None
+        and not kwargs.get("force_fp32_compute", False)
+        and kwargs.get("params_dtype") == _model.torch.float32
+        and kwargs.get("out_dtype") == _model.torch.float32
+    ):
+        kwargs["params_dtype"] = _model.torch.bfloat16
+    return _original_gate_linear(*args, **kwargs)
 
 
 @patch(
