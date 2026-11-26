@@ -9,7 +9,7 @@ from tests.support.source import definition, function
 
 
 def _source_classes(modules, name, path, names, **globals_):
-    """保留真实 class body/decorators；模块导入和未触达的依赖不由此验证。"""
+    """Preserves real class body/decorators; module imports and unreached dependencies are not verified here."""
     import ast
 
     provider = modules(name, **globals_)
@@ -36,7 +36,7 @@ def _token_buffer_provider(modules, root):
 
 
 def _token_request_boundary(modules, root):
-    """真实存储/请求/输出/worker body；结构化输出、事件和 GC C API 是边界。"""
+    """Real storage/request/output/worker bodies; structured outputs, events, and GC C API are boundaries."""
     import enum
     import time
     from collections.abc import Sequence
@@ -288,7 +288,7 @@ def test_real_new_request_pickle_keeps_prefill_alias_and_worker_token_boundaries
         **({"buffer_callback": buffers.append} if protocol == 5 else {}),
     )
     if protocol == 5:
-        # ndarray embedding 也可能出带外 buffer；这里只核查 token payload 及 prompt/prefill 去重。
+        # ndarray embeddings may also emit out-of-band buffers; only check token payloads and prompt/prefill dedup here.
         token_payloads = [data.prefill_token_ids.tobytes()]
         if data.prompt_token_ids is not None and not alias:
             token_payloads.append(data.prompt_token_ids.tobytes())
@@ -347,7 +347,7 @@ def test_real_new_request_pickle_keeps_prefill_alias_and_worker_token_boundaries
 
 
 def _request_block_hasher(state, root, lookahead=0):
-    """真实 hash/helper 链；摘要算法和初始 seed 固定为测试边界。"""
+    """Real hash/helper chain; digest algorithm and initial seed are fixed as test boundaries."""
     import bisect
     import hashlib
     from typing import NewType

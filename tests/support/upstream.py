@@ -14,7 +14,6 @@ from vllm_sail import envs
 ROOT = Path(envs.__file__).resolve().parents[1]
 PATCH_ROOT = ROOT / "vllm_sail/patch"
 SKIP_DIRS = frozenset({"template", "__pycache__"})
-SUPPORTED_RANGE = ">=0.32.0,<0.33.0"
 FUNC_NODES = (ast.FunctionDef, ast.AsyncFunctionDef)
 DEF_NODES = (*FUNC_NODES, ast.ClassDef)
 BLOCK_NODES = (ast.If, ast.Try, ast.ExceptHandler, ast.For, ast.While, ast.With)

@@ -257,7 +257,7 @@ def test_complete_mlp_constructor_preserves_upstream_body(upstream_source_root):
         "MiniMaxM3MLP.__init__",
     )
     local.name = upstream.name
-    # 显式 super 是独立绑定 body 的要求，其余只还原两个 PPU 导入门控。
+    # Explicit super() is required for standalone bound bodies; the rest reverts only the two PPU import gates.
     assert ast.unparse(local.body[0]) == "super(MiniMaxM3MLP, self).__init__()"
     local.body[0] = ast.parse("super().__init__()").body[0]
     regions = [node for node in local.body if isinstance(node, ast.If)]
@@ -429,7 +429,7 @@ def test_real_decoder_input_norm_checks_live_consumer_but_not_under_sp(
     layer.fuse_input_allreduce = False
     layer.self_attn = NS(qkv_proj=linear)
     layer.input_layernorm = norm
-    # 每次调用重新解析 consumer key；SP 时不得调用量化 consumer 探针。
+    # Re-resolve consumer keys on every call; must not invoke the quant consumer probe under SP.
     for key in (provider.kMxfp8Dynamic, None):
         linear.key = key
         skip = residual if residual_present else None
@@ -540,7 +540,7 @@ def test_real_indexed_qkv_constructor_retains_storage_and_initializes_load_state
         "weight." + shard for shard in cls.shard_ids[1:]
     ]
     assert after.loaded_shard_ids == {}
-    # 真实父类为新一轮初始化重置 bookkeeping，旧加载记录不应跨轮混入。
+    # Real base class resets bookkeeping on a new init; prior load records must not leak across rounds.
     after.validate_shard_id("index_q", param)
     existing = after.loaded_shard_ids
     cls.__init__(after, **kwargs)
@@ -592,7 +592,7 @@ def test_real_minimax_pp_transport_restores_residual_aux_and_token_extent(
     sequence_parallel,
     with_aux,
 ):
-    """执行完整真实 forward 和 Eagle 打包方法，外部 collective 用严格边界替身。"""
+    """Execute full real forward and Eagle packing methods with strict boundary doubles for external collectives."""
     provider = load_model(modules, monkeypatch, upstream_source_root, True)
     load_patch("vllm_sail/patch/enhancement/models/minimax_m3.py")
     events = []

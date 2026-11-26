@@ -21,7 +21,6 @@ from vllm_sail.patch.utils import patch
     # "Outer.Inner.method".
     "TargetClass.forward",
     reason="TODO",
-    affected_versions="TODO",
     remove_when="TODO",
 )
 def forward(self, hidden_states):

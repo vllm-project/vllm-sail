@@ -46,7 +46,6 @@ from vllm_sail.patch.enhancement.dsa_indexer_gate import int8_indexer_active
 from vllm_sail.patch.utils import PATCH_MARKER, patch
 from vllm_sail.utils.deep_gemm import is_deep_gemm_supported
 
-_AFFECTED = ">=0.32.0,<0.33.0"
 _MODULE = "vllm.model_executor.layers.sparse_attn_indexer"
 
 logger = init_logger(__name__)
@@ -67,7 +66,6 @@ def _with_target_globals(fn):
         "DeepGEMM. The PPU op also publishes its required producer weights "
         "dtype, following SparseMQAIndexer's contract."
     ),
-    affected_versions=_AFFECTED,
     remove_when="upstream downgrades the missing-DeepGEMM error to a warning, or PPU always ships DeepGEMM.",
 )
 @_with_target_globals
@@ -144,7 +142,7 @@ def sparse_attn_indexer_init(
     ]
     # PPU MODIFICATION: begin
     if current_platform.is_ppu():
-        # SAIL 默认保留 MXFP4 的 BF16 与 FP8/INT8 的 FP32 原生归约。
+        # SAIL defaults to native BF16 reduction for MXFP4 and native FP32 reduction for FP8/INT8.
         default = "bfloat16" if use_fp4_cache else "float32"
         self.logits_dtype = STR_DTYPE_TO_TORCH_DTYPE[
             vllm_config.attention_config.resolve_indexer_logits_dtype(default)
@@ -429,7 +427,6 @@ _install_logits_dtype_pin()
         "before the CUDA branch, so the disabled-custom-op path also uses the "
         "PPU kernel; other platforms delegate to the upstream implementation."
     ),
-    affected_versions=_AFFECTED,
     remove_when="upstream's forward_native grows a platform hook, or PPU stops overriding this op.",
 )
 def sparse_attn_indexer_forward_native(
@@ -455,7 +452,6 @@ def sparse_attn_indexer_forward_native(
         "custom_op_dispatch patch (enabled path) or the forward_native redirect "
         "(disabled path)."
     ),
-    affected_versions=_AFFECTED,
     remove_when="upstream adds a forward_ppu hook and the PPU op moves into the dispatch ladder.",
 )
 def sparse_attn_indexer_forward_ppu(

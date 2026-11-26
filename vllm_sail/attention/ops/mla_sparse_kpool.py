@@ -827,7 +827,7 @@ def ppu_sparse_attn_indexer_kpool(
                 positions[num_decode_tokens:num_tokens].to(torch.int32),
             )
 
-        # ShardQ 只压缩评分查询；池写入、tail 更新和 decode 使用完整 token 流。
+        # ShardQ compresses only scoring queries; pool writes, tail updates, and decode use the full token stream.
         prefill_q, prefill_weights, prefill_positions = q_quant, weights, positions
         if (indices := prefill_metadata.shardq_gather_indices) is not None:
             prefill_q, prefill_weights = q_quant[indices], weights[indices]

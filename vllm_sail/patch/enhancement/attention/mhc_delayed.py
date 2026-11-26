@@ -12,7 +12,6 @@ from vllm.platforms import current_platform
 from vllm_sail.patch.utils import PATCH_MARKER, patch
 
 _MODULE = "vllm.model_executor.kernels.mhc.tilelang"
-_AFFECTED = ">=0.32.0,<0.33.0"
 _REASON = "Delayed mHC bypasses the PPU prenorm helper and its zeroed single-split SAIL accumulators."
 _REMOVE_WHEN = (
     "Upstream delayed mHC launchers call a platform-dispatched prenorm helper."
@@ -22,7 +21,6 @@ _REMOVE_WHEN = (
 @patch(
     _MODULE,
     reason=_REASON,
-    affected_versions=_AFFECTED,
     remove_when=_REMOVE_WHEN,
 )
 def mhc_pre_delayed_tilelang(
@@ -205,7 +203,6 @@ def mhc_pre_delayed_tilelang(
 @patch(
     _MODULE,
     reason=_REASON,
-    affected_versions=_AFFECTED,
     remove_when=_REMOVE_WHEN,
 )
 def mhc_fused_post_pre_delayed_tilelang(
@@ -484,7 +481,6 @@ def _rebind_delayed_aliases():
                     consumer,
                     name,
                     reason=_REASON,
-                    affected_versions=_AFFECTED,
                     remove_when=_REMOVE_WHEN,
                 )(replacement)
 

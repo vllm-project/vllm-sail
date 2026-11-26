@@ -21,8 +21,6 @@ from vllm.utils import import_utils
 
 from vllm_sail.patch.utils import PATCH_MARKER, patch
 
-_AFFECTED = ">=0.32.0,<0.33.0"
-
 _upstream_has_cutedsl = import_utils.has_cutedsl
 _upstream_has_humming = import_utils.has_humming
 
@@ -36,7 +34,6 @@ _upstream_has_humming = import_utils.has_humming
         "declares PlatformEnum.CUDA, so vLLM would select CuTeDSL kernels that "
         "fail at launch."
     ),
-    affected_versions=_AFFECTED,
     remove_when="PPU gains CuTeDSL support, or upstream gates this on a real device capability.",
 )
 def has_cutedsl() -> bool:
@@ -49,7 +46,6 @@ def has_cutedsl() -> bool:
     "vllm.utils.import_utils",
     "has_humming",
     reason=("Humming kernels do not run on PPU; same reasoning as has_cutedsl above."),
-    affected_versions=_AFFECTED,
     remove_when="PPU gains Humming support, or upstream gates this on a real device capability.",
 )
 def has_humming() -> bool:
@@ -95,7 +91,6 @@ def _rebind_loaded_consumers():
                 consumer,
                 name,
                 reason="A preloaded consumer must observe the PPU optional-kernel gate.",
-                affected_versions=_AFFECTED,
                 remove_when="vLLM resolves optional-kernel probes through their provider module.",
             )(replacement)
 

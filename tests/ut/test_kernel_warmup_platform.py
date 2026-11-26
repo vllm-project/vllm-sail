@@ -94,7 +94,7 @@ def test_real_replayssm_lifecycle_bounds_scratch_and_cleans_after_failure(
     align,
     fail,
 ):
-    """完整生命周期和 temporary helper；仅替换外部 runner/model/native 边界。"""
+    """Full lifecycle and temporary helper; replaces only external runner/model/native boundaries."""
     torch = pytest.importorskip("torch")
     calls = []
     error = RuntimeError("postprocess failed")
@@ -444,7 +444,7 @@ def test_real_warmup_keeps_applicable_work_and_guards_msa(
 def test_flashinfer_warmup_coordinates_all_pp_ranks(
     modules, upstream_source_root, backends, remote_eligible, pooling
 ):
-    """使用真实 helper 验证 任一 PP rank 有 FlashInfer 工作时所有 rank 一起预热。"""
+    """Use real helpers to verify all PP ranks warm up when any rank has FlashInfer work."""
     calls = []
     collective_inputs = []
 
@@ -502,7 +502,7 @@ def test_real_aiter_warmup_keeps_buckets_and_propagates_failures(
     enabled,
     fail,
 ):
-    """运行真实桶生成与 warmup；仅替换 dummy runner 和计时/日志边界。"""
+    """Run real bucket generation and warmup; replaces only dummy runner and timing/logging boundaries."""
     path = upstream_source_root / "vllm/model_executor/warmup/kernel_warmup.py"
     calls, logs = [], []
     error = RuntimeError("AITER dummy run failed")
@@ -571,7 +571,7 @@ def test_real_replayssm_lifecycle_skips_without_committable_eligible_state(
     v2,
     ineligible,
 ):
-    """不合格路径不得触碰 scratch、模型状态或 native context。"""
+    """Ineligible paths must not touch scratch buffers, model state, or native context."""
     calls = []
 
     def forbidden(*args, **kwargs):
@@ -690,7 +690,7 @@ def test_real_replayssm_temporary_state_cleans_overlaid_views_not_padding(
 
 
 def _glm_kda_warmup_boundary(modules, monkeypatch, root, torch, capability):
-    """真实 registry/dispatcher/l2norm；Triton 编译、GDN 分配和线性层是边界。"""
+    """Real registry/dispatcher/l2norm; Triton compilation, GDN allocation, and linear layers are boundaries."""
     import inspect
     import textwrap
 
@@ -779,7 +779,7 @@ def test_glm_real_kda_constructor_registers_l2norm_and_preserves_quant_config(
     backend,
     failure,
 ):
-    """完整真实 constructor/class 与真实注册；不验证 KDA 数值或真实编译 key。"""
+    """Full real constructor/class and real registration; does not verify KDA numerics or real compile keys."""
     torch = pytest.importorskip("torch")
     state = _glm_kda_warmup_boundary(
         modules, monkeypatch, upstream_source_root, torch, capability
@@ -948,7 +948,7 @@ def test_glm_real_kda_constructor_registers_l2norm_and_preserves_quant_config(
         for grid, kwargs in state.launches:
             assert grid == (1,) and kwargs["N"] == kwargs["BD"] == 128
             assert kwargs["MBLOCK"] == 32 and kwargs["M"] in (1, 16, 2)
-        # 自动/显式 Triton 路径不会碰 NVIDIA workspace；显式 FlashKDA 必须拒绝。
+        # Auto/explicit Triton paths do not touch NVIDIA workspace; explicit FlashKDA must be rejected.
         with pytest.raises(RuntimeError, match="FlashKDA requires CUDA"):
             namespace["_resolve_kda_prefill_backend"](
                 "flashkda", 128, torch.bfloat16, -5.0

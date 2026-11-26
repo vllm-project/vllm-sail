@@ -34,7 +34,7 @@ def gdn_provider(modules, monkeypatch, upstream_source_root):
     logger = NS(
         info_once=lambda *a: None,
         warning_once=lambda *a: None,
-        warning=lambda *a: pytest.fail(f"意外的环境因子警告：{a}"),
+        warning=lambda *a: pytest.fail(f"Unexpected env-factor warning: {a}"),
     )
     modules("vllm.logger", init_logger=lambda _: logger)
     torch = NS(
@@ -60,7 +60,9 @@ def gdn_provider(modules, monkeypatch, upstream_source_root):
         return value
 
     def ignored_getter():
-        pytest.fail("上游忽略的缓存路径及凭据 getter 不应求值")
+        pytest.fail(
+            "Upstream-ignored cache path and credential getters must not be evaluated"
+        )
 
     env_module = modules(
         "vllm.envs",
@@ -74,7 +76,7 @@ def gdn_provider(modules, monkeypatch, upstream_source_root):
         logger=logger,
     )
     env_module.__getattr__ = lambda name: env_module.environment_variables[name]()
-    # 真实 normalize_value 的 primitive 分支；不导入 Torch/config 全模块。
+    # Real primitive branch of normalize_value; does not import full Torch/config modules.
     modules(
         "vllm.config.utils",
         normalize_value=function(
@@ -196,7 +198,6 @@ def test_decode_patches_record_originals_and_reject_reapplication(
             module,
             target,
             reason="GDN lifecycle regression",
-            affected_versions=">=0.31.0,<0.32.0",
             remove_when="upstream registers platform GDN backends",
         )(lambda *a, **kw: None)
 
@@ -367,7 +368,7 @@ def test_auto_native_selection_updates_the_spec_decode_flag(
 
 
 def _real_compile_cache_helpers(f, upstream_source_root, mega):
-    # Config 和 Inductor 是明确边界替身；执行真实共享 helper 和 AOT 调用者。
+    # Config and Inductor are explicit boundary doubles; runs real shared helper and AOT caller.
     hash_factors = function(
         upstream_source_root / "vllm/config/utils.py",
         "hash_factors",
@@ -404,7 +405,7 @@ def test_real_jit_aot_factors_track_decode_and_resolved_pla_preference(
             assert f.env.environment_variables[key] is getter
     assert f.original_compile_factors.__globals__ is f.env.__dict__
     hashes = {}
-    # 规范名、legacy alias 以及显式 false/空值覆盖 alias 的优先级。
+    # Precedence across canonical name, legacy alias, and explicit false/empty overrides.
     for canonical, legacy, use_pla in (
         ("1", None, True),
         (None, "1", True),
@@ -472,7 +473,7 @@ def test_non_ppu_jit_aot_factors_preserve_upstream_values_and_result_ownership(
         if mega:
             expected.append("test-inductor-boundary")
         assert aot(config) == expected
-    # 非 PPU wrapper 必须直接返回 provider 的对象，不复制或追加因子。
+    # Non-PPU wrapper must return the provider's object directly without copying or appending factors.
     original = f.original_compile_factors()
     monkeypatch.setitem(
         f.env.compile_factors.__globals__, "_upstream_compile_factors", lambda: original

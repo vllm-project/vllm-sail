@@ -272,7 +272,7 @@ def ppu_sparse_attn_indexer(
         prefill_metadata = attn_metadata_narrowed.prefill
         assert prefill_metadata is not None
 
-        # ShardQ 的 chunk 行号对应紧凑查询；cache 写入和 decode 保留原始行序。
+        # ShardQ chunk row indices map compact queries; cache writes and decode keep the original row order.
         prefill_q, prefill_q_scale, prefill_weights = q_quant, q_scale, weights
         if (indices := prefill_metadata.shardq_gather_indices) is not None:
             assert candidate_blocks is None

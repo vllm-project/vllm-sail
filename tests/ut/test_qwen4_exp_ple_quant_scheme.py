@@ -28,7 +28,6 @@ import pytest
 
 from tests.support.patch_inventory import scan_patch_file
 from tests.support.source import function
-from tests.support.upstream import SUPPORTED_RANGE
 from vllm_sail.patch.utils import PATCH_REGISTRY, original_of, patch
 
 MODULE_PATH = (
@@ -45,7 +44,7 @@ NGRAM_TARGET = (
     "vllm.models.qwen4_exp.common.ngram_embedding."
     "Qwen4ExpPLEEmbeddingMethod.from_quant_config"
 )
-REQUIRED_METADATA = ("reason", "affected_versions", "remove_when")
+REQUIRED_METADATA = ("reason", "remove_when")
 
 
 def _load_leaf(path: Path, name: str) -> types.ModuleType:
@@ -171,15 +170,13 @@ def test_metadata_shape(ple_module) -> None:
         (
             NGRAM_TARGET,
             ple_module.REASON_DISPATCH,
-            SUPPORTED_RANGE,
             ple_module.REMOVE_WHEN,
         ),
     )
-    for target, reason, affected, remove_when in ple_module.METADATA:
+    for target, reason, remove_when in ple_module.METADATA:
         assert target.startswith("vllm."), target
-        for value in (reason, affected, remove_when):
+        for value in (reason, remove_when):
             assert isinstance(value, str) and value.strip(), target
-        assert ">=" in affected and "<" in affected, target
 
 
 def test_no_top_level_vllm_import() -> None:
@@ -238,7 +235,6 @@ def test_install_lands_target_and_reapplication_guard(
     records = PATCH_REGISTRY[registry_before:]
     assert [record.target for record in records] == [NGRAM_TARGET]
     assert all(record.was_missing is False for record in records)
-    assert all(record.affected_versions == SUPPORTED_RANGE for record in records)
     assert all(record.reason and record.remove_when for record in records)
 
     dispatch_replacement = method_cls.from_quant_config
@@ -252,7 +248,6 @@ def test_install_lands_target_and_reapplication_guard(
             "vllm.models.qwen4_exp.common.ngram_embedding",
             "Qwen4ExpPLEEmbeddingMethod.from_quant_config",
             reason="test",
-            affected_versions="test",
             remove_when="test",
         )(method_cls.from_quant_config)
 

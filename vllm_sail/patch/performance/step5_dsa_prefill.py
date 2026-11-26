@@ -31,7 +31,6 @@ _REASON = (
     "VLLM_SAIL_STEP5_DSA_PREFILL_BATCH_ATTENTION explicitly enables chunked "
     "selection with attention batched at the end."
 )
-_AFFECTED = ">=0.32.0,<0.33.0"
 _REMOVE_WHEN = "Upstream prefill attention natively supports PPU BF16/E4M3 paged KV without staging."
 _installed = False
 _PROFILE_REASON = (
@@ -139,7 +138,7 @@ def _install_native_decode(adapter_module):
                for attr, value in list(vars(loaded).items()) if value is original]
     for name, attr in aliases:
         patch(name, attr, reason="Explicit native tries the new precompiled BF16 decode; unsupported inputs fall back before launch.",
-              affected_versions=_AFFECTED, remove_when=_REMOVE_WHEN)(replacement)
+              remove_when=_REMOVE_WHEN)(replacement)
 
 
 def install():
@@ -303,12 +302,10 @@ def install():
     ):
         forward_entry = name.endswith("._forward_prefill")
         patch(module, name, reason=_REASON + (" " + _PROFILE_REASON if forward_entry else ""),
-              affected_versions=_AFFECTED,
               remove_when=_REMOVE_WHEN + (" " + _PROFILE_REMOVE if forward_entry else ""))(replacement)
     _install_native_decode(adapter_module)
     patch(_ATTENTION, "Step5DSAAttentionImpl._forward_decode",
-          reason=_PROFILE_REASON, affected_versions=_AFFECTED,
-          remove_when=_PROFILE_REMOVE)(_profile_forward(original_decode, "decode"))
+          reason=_PROFILE_REASON,           remove_when=_PROFILE_REMOVE)(_profile_forward(original_decode, "decode"))
     _installed = True
 
 

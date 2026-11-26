@@ -21,7 +21,6 @@ from vllm_sail.attention.ops import sparse_mqa as _sail
 from vllm_sail.patch.bodies import bind_body
 from vllm_sail.patch.utils import patch
 
-_AFFECTED = ">=0.32.0,<0.33.0"
 _REASON = "PPU M890 uses SAIL sparse MXFP4 logits and DeepSelect through the upstream interface."
 _REMOVE_WHEN = "The sparse indexer exposes platform capability and DeepGEMM provider hooks."
 _LAYER = "vllm.model_executor.layers.sparse_mqa_indexer"
@@ -40,7 +39,6 @@ def _metadata_body(fn):
     _LAYER,
     "SparseMQAIndexer.__init__",
     reason=_REASON,
-    affected_versions=_AFFECTED,
     remove_when=_REMOVE_WHEN,
 )
 @_layer_body
@@ -88,7 +86,6 @@ def sparse_mqa_indexer_init(
     _METADATA,
     "DeepseekV41SparseIndexerMetadataBuilder.__init__",
     reason=_REASON,
-    affected_versions=_AFFECTED,
     remove_when=_REMOVE_WHEN,
 )
 @_metadata_body
@@ -231,7 +228,6 @@ def _install():
                 module_name,
                 name,
                 reason=_REASON,
-                affected_versions=_AFFECTED,
                 remove_when=_REMOVE_WHEN,
             )(_dispatch(getattr(module, name), getattr(_sail, name)))
 

@@ -15,7 +15,6 @@ from vllm.model_executor.layers.attention import mla_attention as _mla_attention
 from vllm_sail.patch.bodies import bind_body
 from vllm_sail.patch.utils import patch
 
-_AFFECTED = ">=0.32.0,<0.33.0"
 _MODULE = "vllm.model_executor.layers.attention.mla_attention"
 
 
@@ -342,7 +341,6 @@ patch(
         "allocation is mid-method, so this is a verbatim upstream body with "
         "only the fork's change marked."
     ),
-    affected_versions=_AFFECTED,
     remove_when=(
         "the PPU OOM workaround is root-caused upstream-side, or upstream stops "
         "allocating the profile-run scratch buffer."
@@ -357,7 +355,6 @@ _upstream_kv_b_proj_input_dtype = _mla_attention._get_kv_b_proj_input_dtype
     _MODULE,
     "_get_kv_b_proj_input_dtype",
     reason="SAIL ACEXT quantizes floating activations internally for INT8 kv_b_proj weights.",
-    affected_versions=_AFFECTED,
     remove_when="The upstream input-dtype helper recognizes SAIL INT8 linear kernels.",
 )
 def _get_kv_b_proj_input_dtype(kv_b_proj, use_fp8_prefill):

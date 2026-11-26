@@ -97,7 +97,7 @@ def kernel_warmup(worker: Worker, *, process_local_only: bool = False):
         # to the shared JIT warmup infrastructure.
         # https://github.com/vllm-project/vllm/pull/47451
         # PPU MODIFICATION: begin
-        # PPU 继承 CUDA 身份，但不能导入 NVIDIA skinny GEMM 的 CuTeDSL 实现。
+        # PPU inherits CUDA identity, but must not import NVIDIA's CuTeDSL skinny GEMM implementation.
         if not current_platform.is_ppu():
             _warmup_skinny_gemm(worker.get_model())
         # PPU MODIFICATION: end

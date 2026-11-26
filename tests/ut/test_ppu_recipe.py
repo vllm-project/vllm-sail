@@ -1543,7 +1543,7 @@ def test_extract_unscored_rows_are_excluded(tmp_path: Path, case: str) -> None:
     result, records = _extract_review(tmp_path)
     assert result["status"] == "baseline_incomplete"
     assert result["unscored"] == 1
-    assert any("存在未评分题" in reason for reason in result["reasons"])
+    assert any("unscored items present" in reason for reason in result["reasons"])
     assert len(records) == (12 if case == "malformed" else 11)
     assert all(item["correct"] is not None for item in records)
 
@@ -1555,7 +1555,7 @@ def test_review_source_must_be_unique(tmp_path: Path, candidates: int) -> None:
     result, records = _extract_review(tmp_path)
     assert result["status"] == "baseline_incomplete"
     assert result["source_file"] is None
-    assert any("评分文件" in reason for reason in result["reasons"])
+    assert any("review file" in reason for reason in result["reasons"])
     assert records == []
 
 
@@ -1583,7 +1583,9 @@ def test_review_uses_dataset_index_not_line_number(
     result, records = _extract_review(tmp_path)
     if missing:
         assert result["status"] == "baseline_incomplete"
-        assert any("缺少稳定题目 ID" in reason for reason in result["reasons"])
+        assert any(
+            "missing stable question ID" in reason for reason in result["reasons"]
+        )
         assert len(records) == 11
     else:
         assert result["status"] == "baseline_established"
@@ -1629,15 +1631,15 @@ def test_per_question_baseline_established() -> None:
 @pytest.mark.parametrize(
     ("case", "reason"),
     [
-        ("duplicate", "重复 ID"),
-        ("missing_id", "缺少稳定题目 ID"),
-        ("empty_id", "缺少稳定题目 ID"),
-        ("count", "数量不符"),
-        ("unscored", "存在未评分题"),
-        ("null", "存在未评分题"),
-        ("aggregate_count", "与汇总不一致"),
-        ("aggregate_score", "与汇总不一致"),
-        ("nonfinite", "与汇总不一致"),
+        ("duplicate", "duplicate ID"),
+        ("missing_id", "missing stable question ID"),
+        ("empty_id", "missing stable question ID"),
+        ("count", "count mismatch"),
+        ("unscored", "unscored items present"),
+        ("null", "unscored items present"),
+        ("aggregate_count", "inconsistent with aggregate summary"),
+        ("aggregate_score", "inconsistent with aggregate summary"),
+        ("nonfinite", "inconsistent with aggregate summary"),
     ],
 )
 def test_per_question_baseline_incomplete(case: str, reason: str) -> None:
@@ -1692,7 +1694,7 @@ def test_per_question_baseline_reconciles_rounded_full_report() -> None:
     )
     assert abs(1277 / 1319 - 0.9689) < 1 / 1319
     assert result["status"] == "baseline_incomplete"
-    assert "与汇总不一致" in result["reasons"]
+    assert "inconsistent with aggregate summary" in result["reasons"]
 
 
 def test_empty_per_question_baseline_is_incomplete() -> None:

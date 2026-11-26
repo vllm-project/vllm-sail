@@ -39,7 +39,7 @@ def assert_topk(torch, logits, indices, lengths):
 def test_softmax_topk_graph_replay_without_programmatic_dependency(
     topk_runtime, experts, renormalize
 ):
-    """PPU SM80/89 的普通 graph launch 保持 top-k 数值和重放输入更新。"""
+    """Ordinary graph launch on PPU SM80/89 preserves top-k numerics and replay input updates."""
     torch = topk_runtime
     logits = torch.linspace(-2, 2, experts, device="cuda").repeat(5, 1)
     weights = torch.empty((5, 8), dtype=torch.float32, device="cuda")
@@ -72,7 +72,7 @@ def test_softmax_topk_graph_replay_without_programmatic_dependency(
 def test_grouped_topk_padding_preserves_unpadded_routing(
     topk_runtime, experts, groups, scoring_func
 ):
-    """新增可选 mask 不改变有效 token 路由，padding 输出 -1 和零权重。"""
+    """Optional mask leaves valid token routing unchanged while padding outputs -1 and zero weights."""
     torch = topk_runtime
     scores = torch.linspace(-1, 1, experts, device="cuda").repeat(4, 1)
     bias = torch.zeros(experts, device="cuda")
@@ -141,7 +141,7 @@ def test_aligned_stride_with_misaligned_base(topk_runtime, top_k, rows, offset):
 @pytest.mark.parametrize("offset", [0, 1, 2])
 @pytest.mark.parametrize("rows", [1, 64, 128])
 def test_bf16_dtype_and_shifted_base_contract(topk_runtime, top_k, offset, rows):
-    """BF16 使用真实两字节输入；共享内存不足时必须显式拒绝。"""
+    """BF16 uses true 2-byte inputs and must explicitly reject insufficient shared memory."""
     torch = topk_runtime
     width = 32769
     storage = torch.empty((rows, width + 8), dtype=torch.bfloat16, device="cuda")

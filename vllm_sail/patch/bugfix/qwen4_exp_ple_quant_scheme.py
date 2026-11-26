@@ -43,7 +43,6 @@ from vllm_sail.patch.utils import patch
 
 _NGRAM_MODULE = "vllm.models.qwen4_exp.common.ngram_embedding"
 _NGRAM_TARGET = "Qwen4ExpPLEEmbeddingMethod.from_quant_config"
-_AFFECTED = ">=0.32.0,<0.33.0"
 
 REASON_DISPATCH = (
     "Qwen4ExpPLEEmbeddingMethod.from_quant_config only honors an explicit "
@@ -64,7 +63,7 @@ REMOVE_WHEN = (
 )
 
 METADATA = (
-    (f"{_NGRAM_MODULE}.{_NGRAM_TARGET}", REASON_DISPATCH, _AFFECTED, REMOVE_WHEN),
+    (f"{_NGRAM_MODULE}.{_NGRAM_TARGET}", REASON_DISPATCH, REMOVE_WHEN),
 )
 
 _installed = False
@@ -104,7 +103,6 @@ def install() -> None:
         _NGRAM_MODULE,
         _NGRAM_TARGET,
         reason=REASON_DISPATCH,
-        affected_versions=_AFFECTED,
         remove_when=REMOVE_WHEN,
     )
     def _from_quant_config(quant_config, prefix, embedding_dtype=None):

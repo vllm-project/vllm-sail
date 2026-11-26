@@ -40,7 +40,7 @@ _MOE_SOURCE_CASES = [
 
 @pytest.fixture
 def moe_source_boundary(modules, upstream_source_root):
-    """读取真实 getter、格式及支持检查；其他准入谓词为边界替身，不证明设备能力。"""
+    """Read real getters, formats, and support checks; other gating predicates are doubles and do not prove device capability."""
     ns = SimpleNamespace
     modules(
         "vllm.model_executor.layers.quantization.online.requantization",
@@ -212,7 +212,7 @@ def test_real_expert_admission_uses_directional_format_relation(
 def test_real_public_moe_selectors_preserve_ppu_format_boundary(
     modules, moe_source_boundary, case, format_name, explicit
 ):
-    """执行真实 adapter、委托 selector 和共享 oracle；优先级及非格式准入单独验证。"""
+    """Execute real adapter, delegated selector, and shared oracle; priority and non-format gating are verified separately."""
     boundary = moe_source_boundary
     module, enum_name, oracle_name, select_name = case
     path = boundary.root / "oracle" / (module + ".py")
@@ -361,7 +361,7 @@ def test_explicit_batched_ppu_requantization_source_never_selects_compute(case):
 
 
 def _real_unquantized_lora_selector(modules, boundary, accelerated):
-    """读取真实 selector/共享 oracle；仅替换设备准入及专家计算边界。"""
+    """Read real selector and shared oracle; replace only device gating and expert compute boundaries."""
     path = boundary.root / "oracle/unquantized.py"
     backend = function(path, "UnquantizedMoeBackend", {"Enum": Enum})
     events, logs = [], []
@@ -513,7 +513,7 @@ def test_real_shared_oracle_observes_live_mapping_and_bf16_override(
 def test_wna16_bound_maker_uses_shared_format_guard_before_expert_construction(
     modules, moe_source_boundary, expert_format, input_format
 ):
-    """绑定真实 copied maker 和共享 helper；不声称完整模块安装或设备计算通过。"""
+    """Bind real copied maker and shared helpers; does not claim full module installation or device compute passes."""
     from vllm_sail.patch.bodies import bind_body
 
     boundary = moe_source_boundary
@@ -624,7 +624,7 @@ def test_wna16_bound_maker_uses_shared_format_guard_before_expert_construction(
 
 @pytest.fixture
 def nvfp4_factory_boundary(moe_source_boundary):
-    """真实 factory 与共享 helper；PF、专家构造和 tensor 计算是明确的外部边界。"""
+    """Real factory and shared helpers; prepare/finalize, expert construction, and tensor compute are explicit boundaries."""
     boundary = moe_source_boundary
     ns = SimpleNamespace
     path = boundary.root / "oracle/nvfp4.py"
@@ -866,7 +866,7 @@ def oracles():
 def test_imported_nvfp4_factory_has_real_shared_provider_and_safe_early_rejection(
     oracles, monkeypatch, backend_name
 ):
-    """真实模块及绑定，PF/计算不执行；在兼容 Torch 环境运行才有 provider 证据。"""
+    """Real modules and bindings without running prepare/finalize or compute; run in compatible Torch for provider evidence."""
     from vllm.model_executor.layers.fused_moe.oracle import base, nvfp4
 
     from vllm_sail.patch.utils import PATCH_MARKER
@@ -884,7 +884,7 @@ def test_imported_nvfp4_factory_has_real_shared_provider_and_safe_early_rejectio
     observed = []
 
     def forbidden_prepare(**kwargs):
-        pytest.fail("不支持的 per-token backend 不得创建 prepare/finalize")
+        pytest.fail("Unsupported per-token backend must not create prepare/finalize")
 
     monkeypatch.setattr(base, "maybe_make_prepare_finalize", forbidden_prepare)
     if backend in nvfp4.PER_TOKEN_NVFP4_MOE_BACKENDS:
@@ -932,7 +932,7 @@ def test_imported_nvfp4_factory_has_real_shared_provider_and_safe_early_rejectio
 
 @pytest.fixture
 def nvfp4_cpu_runtime(oracles):
-    """真实导入与 CPU tensor；不证明 installed wheel 归属、PPU 图或 native 计算。"""
+    """Real imports and CPU tensors; does not prove installed wheel ownership, PPU graphs, or native compute."""
     import torch
     from vllm.model_executor import utils
     from vllm.model_executor.layers.fused_moe import config
@@ -1057,7 +1057,7 @@ def test_imported_nvfp4_incompatible_derived_reload_rebinds_without_changing_old
             dtype=torch.float64 if change == "dtype" else source.dtype,
             device="cpu",
         )
-        # 本例只改变 checkpoint 输入；derived 属性由真实 factory/refill 管理。
+        # Only checkpoint inputs vary here; derived attributes are managed by the real factory/refill.
         setattr(layer, name, torch.nn.Parameter(new, requires_grad=False))
     second = f.make(backend_name)
     for previous, snapshot, current, source, attr in zip(
@@ -1119,7 +1119,7 @@ def test_imported_requantization_scope_restores_context_and_skips_nvfp4_selectio
     from vllm.model_executor.layers.quantization.online import requantization as req
 
     def forbidden(*args, **kwargs):
-        pytest.fail("requantization source 不得进入普通 backend selection")
+        pytest.fail("Requantization source must not enter ordinary backend selection")
 
     monkeypatch.setattr(nvfp4, "prioritize_humming", forbidden)
     error = RuntimeError("requantization source scope failed")
@@ -1514,7 +1514,6 @@ def test_every_oracle_patch_records_original_and_rejects_reapplication(
                 module_name,
                 attribute,
                 reason=record.reason,
-                affected_versions=record.affected_versions,
                 remove_when=record.remove_when,
             )(replacement)
 
@@ -1609,7 +1608,7 @@ def test_select_unquantized_delegates_for_non_ppu_backends(
 def test_installed_unquantized_lora_preserves_real_selector_layout_guard(
     monkeypatch, oracles, format_name, backend_name
 ):
-    """真实安装的 provider/adapter 交界；专家替身不证明 LoRA 设备计算。"""
+    """Real installed provider/adapter boundary; expert doubles do not prove LoRA device compute."""
     plugin = oracles.unquantized
     _set_platform(monkeypatch, oracles, ppu=True)
     platform_type = type(oracles.current_platform)

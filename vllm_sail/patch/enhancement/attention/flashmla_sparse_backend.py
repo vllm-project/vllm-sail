@@ -23,7 +23,6 @@ from vllm.v1.attention.backends.mla import flashmla_sparse as _flashmla_sparse_b
 
 from vllm_sail.patch.utils import patch
 
-_AFFECTED = ">=0.32.0,<0.33.0"
 _MODULE = "vllm.v1.attention.backends.mla.flashmla_sparse"
 
 _upstream_supports_compute_capability = (
@@ -43,7 +42,6 @@ _upstream_builder_init = _flashmla_sparse_backend.FlashMLASparseMetadataBuilder.
         "majors 9 and 10, so without this PPU could never select the sparse "
         "FlashMLA backend."
     ),
-    affected_versions=_AFFECTED,
     remove_when="upstream accepts PPU's capability for sparse FlashMLA natively.",
 )
 def supports_compute_capability(cls, capability: DeviceCapability) -> bool:
@@ -62,7 +60,6 @@ def supports_compute_capability(cls, capability: DeviceCapability) -> bool:
         "rejected for GLM-5.3-Flash before the bf16 NoPE-512 cache can be used. "
         "The kv-cache dtype and qk_rope_head_dim == 0 checks stay in force."
     ),
-    affected_versions=_AFFECTED,
     remove_when=(
         "upstream's head_size == 512 NoPE gate accepts PPU capability major 8, "
         "or the backend exposes a per-platform capability hook for it."
@@ -135,7 +132,6 @@ def supports_combination(
         "sizes tile_scheduler_metadata_buffer, so this delegates to upstream and "
         "re-allocates that buffer on PPU."
     ),
-    affected_versions=_AFFECTED,
     remove_when=(
         "upstream grows a PPU branch in the max_num_sm_parts formula, or the "
         "PPU scheduler stops needing the full SM count."

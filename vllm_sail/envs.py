@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import os
 from collections.abc import Callable
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 # ---------------------------------------------------------------------------
@@ -31,6 +32,7 @@ from typing import TYPE_CHECKING, Any
 # ---------------------------------------------------------------------------
 if TYPE_CHECKING:
     PPU_SDK: str = "/usr/local/PPU_SDK"
+    VLLM_SAIL_STRICT_COMPAT: bool = False
     VLLM_SAIL_FUSED_RMSNORM_QUANT: bool = False
     VLLM_SAIL_USE_OPT_TOKEN_GROUP_QUANT: bool = False
     VLLM_SAIL_DENSE_BF16_DEEPGEMM: bool = False
@@ -73,6 +75,7 @@ if TYPE_CHECKING:
     VLLM_GDN_DECODE_KERNEL: str = "auto"
 
     # Backward-compatible Python attributes; all reads resolve SAIL first.
+    VLLM_PPU_STRICT_COMPAT: bool = False
     VLLM_PPU_FUSED_RMSNORM_QUANT: bool = False
     VLLM_PPU_USE_OPT_TOKEN_GROUP_QUANT: bool = False
     VLLM_PPU_DENSE_BF16_DEEPGEMM: bool = False
@@ -197,20 +200,158 @@ def _positive_int(name: str, default: int) -> Callable[[], int]:
     return _get
 
 
-environment_variables: dict[str, Callable[[], Any]] = {
-    "PPU_SDK": lambda: os.environ.get("PPU_SDK", "/usr/local/PPU_SDK"),
-    # Shared upstream name; PPU extends the choices through its general plugin.
-    "VLLM_GDN_DECODE_KERNEL": _choice(
-        "VLLM_GDN_DECODE_KERNEL", "auto", GDN_DECODE_KERNELS
+@dataclass(frozen=True)
+class EnvSpec:
+    """Declarative metadata for one runtime environment variable."""
+
+    name: str
+    section: str
+    kind: str
+    default: Any
+    description: str
+    getter: Callable[[], Any]
+    choices: tuple[str, ...] = ()
+    extra_aliases: tuple[str, ...] = ()
+    default_display: str | None = None
+
+    @property
+    def aliases(self) -> tuple[str, ...]:
+        """Compatibility aliases in precedence order after the canonical name."""
+        derived = (
+            (self.name.replace("VLLM_SAIL_", "VLLM_PPU_", 1),)
+            if self.name.startswith("VLLM_SAIL_")
+            else ()
+        )
+        return (*derived, *self.extra_aliases)
+
+
+def _str_spec(
+    name: str,
+    *,
+    section: str,
+    default: str,
+    description: str,
+    extra_aliases: tuple[str, ...] = (),
+) -> EnvSpec:
+    return EnvSpec(
+        name=name,
+        section=section,
+        kind="str",
+        default=default,
+        description=description,
+        getter=lambda: os.environ.get(name, default),
+        extra_aliases=extra_aliases,
+    )
+
+
+def _bool_spec(
+    name: str,
+    *,
+    section: str,
+    default: bool,
+    description: str,
+    extra_aliases: tuple[str, ...] = (),
+) -> EnvSpec:
+    return EnvSpec(
+        name=name,
+        section=section,
+        kind="bool",
+        default=default,
+        description=description,
+        getter=_bool(name, default),
+        extra_aliases=extra_aliases,
+    )
+
+
+def _choice_spec(
+    name: str,
+    *,
+    section: str,
+    default: str | None,
+    choices: tuple[str, ...],
+    description: str,
+    extra_aliases: tuple[str, ...] = (),
+) -> EnvSpec:
+    return EnvSpec(
+        name=name,
+        section=section,
+        kind="choice",
+        default=default,
+        description=description,
+        getter=_choice(name, default, choices),
+        choices=choices,
+        extra_aliases=extra_aliases,
+    )
+
+
+def _positive_int_spec(
+    name: str,
+    *,
+    section: str,
+    default: int,
+    description: str,
+    default_display: str | None = None,
+    extra_aliases: tuple[str, ...] = (),
+) -> EnvSpec:
+    return EnvSpec(
+        name=name,
+        section=section,
+        kind="positive_int",
+        default=default,
+        description=description,
+        getter=_positive_int(name, default),
+        default_display=default_display,
+        extra_aliases=extra_aliases,
+    )
+
+
+ENVIRONMENT_SPECS: tuple[EnvSpec, ...] = (
+    # -- Runtime environment -----------------------------------------------
+    _str_spec(
+        "PPU_SDK",
+        section="Runtime environment",
+        default="/usr/local/PPU_SDK",
+        description="SAIL SDK root used at runtime.",
     ),
-    "VLLM_SAIL_FUSED_RMSNORM_QUANT": _bool("VLLM_SAIL_FUSED_RMSNORM_QUANT", False),
-    "VLLM_SAIL_USE_OPT_TOKEN_GROUP_QUANT": _bool(
-        "VLLM_SAIL_USE_OPT_TOKEN_GROUP_QUANT", False
+    _bool_spec(
+        "VLLM_SAIL_STRICT_COMPAT",
+        section="Runtime environment",
+        default=False,
+        description=(
+            "Fail closed when the installed vLLM build does not match the "
+            "verified upstream ref in the packaged kernel manifest (default: warn)."
+        ),
     ),
-    "VLLM_SAIL_DENSE_BF16_DEEPGEMM": _bool("VLLM_SAIL_DENSE_BF16_DEEPGEMM", False),
-    "VLLM_SAIL_USE_PLA": _bool("VLLM_SAIL_USE_PLA", True),
-    "VLLM_SAIL_DEEPGEMM_MOE_TP_FUSED": _bool("VLLM_SAIL_DEEPGEMM_MOE_TP_FUSED", False),
-    "VLLM_SAIL_USE_DEEPSELECT": _bool("VLLM_SAIL_USE_DEEPSELECT", True),
+    # -- Backend selection -------------------------------------------------
+    # PPU MoE group-GEMM backend. Unset means "pick the best available",
+    # which is why `is_set()` is meaningful here.
+    _choice_spec(
+        "VLLM_SAIL_MOE_BACKEND",
+        section="Backend selection",
+        default=None,
+        choices=GEMM_BACKENDS,
+        description="Select the PPU MoE group-GEMM backend instead of automatic selection.",
+    ),
+    # PPU dense-GEMM backend for quantized linear layers.
+    _choice_spec(
+        "VLLM_SAIL_DENSE_BACKEND",
+        section="Backend selection",
+        default=None,
+        choices=GEMM_BACKENDS,
+        description="Select the PPU dense-GEMM backend for quantized linear layers.",
+    ),
+    _bool_spec(
+        "VLLM_SAIL_DENSE_BF16_DEEPGEMM",
+        section="Backend selection",
+        default=False,
+        description="Opt into the Zhenwu M890 BF16 dense DeepGEMM path.",
+    ),
+    _bool_spec(
+        "VLLM_SAIL_DEEPGEMM_MOE_TP_FUSED",
+        section="Backend selection",
+        default=False,
+        description="Enable the supported fused tensor-parallel DeepGEMM MoE path.",
+    ),
     # Fuse the second GEMM's input quantization into DeepGEMM's activation
     # kernel (`silu_and_mul` / `situ_and_mul`) instead of running the activation
     # and a separate per-token/per-block quantize pass. The BF16 (w4a16 or
@@ -218,164 +359,402 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # epilogue also replaces the standalone `vllm::silu_and_mul` /
     # `vllm::situ_and_mul` that unquantized BF16 dense MLPs and shared experts
     # run on, through SiluAndMul / SituAndMul.
-    "VLLM_SAIL_DEEPGEMM_MOE_FUSED_ACT_QUANT": _bool(
-        "VLLM_SAIL_DEEPGEMM_MOE_FUSED_ACT_QUANT", False
+    _bool_spec(
+        "VLLM_SAIL_DEEPGEMM_MOE_FUSED_ACT_QUANT",
+        section="Backend selection",
+        default=False,
+        description=(
+            "Fuse activation and the second MoE GEMM's input quantization into "
+            "DeepGEMM's SiLU/SiTU kernel for FP8 and MXFP4 experts; BF16 "
+            "experts, unquantized dense MLPs and shared experts use its "
+            "values-only epilogue."
+        ),
     ),
-    # -- MoE ---------------------------------------------------------------
-    # PPU MoE group-GEMM backend. Unset means "pick the best available",
-    # which is why `is_set()` is meaningful here.
-    "VLLM_SAIL_MOE_BACKEND": _choice("VLLM_SAIL_MOE_BACKEND", None, GEMM_BACKENDS),
-    # PPU dense-GEMM backend for quantized linear layers.
-    "VLLM_SAIL_DENSE_BACKEND": _choice("VLLM_SAIL_DENSE_BACKEND", None, GEMM_BACKENDS),
-    # Disable / force the wna16 CUDA MoE kernel on PPU. Both exist because the
-    # heuristic that picks between the CUDA and Triton kernels is shape
-    # dependent and occasionally needs a manual override in either direction.
-    "VLLM_SAIL_DISABLE_MOE_WNA16_CUDA": _bool(
-        "VLLM_SAIL_DISABLE_MOE_WNA16_CUDA", False
+    _bool_spec(
+        "VLLM_SAIL_USE_PLA",
+        section="Backend selection",
+        default=True,
+        description="Allow PLA linear-attention paths where available.",
     ),
-    "VLLM_SAIL_FORCE_MOE_WNA16_CUDA": _bool("VLLM_SAIL_FORCE_MOE_WNA16_CUDA", False),
-    # Legacy Marlin selection gate. Native Marlin execution remains excluded
-    # by the CUDA-free manifest; this flag cannot supply those kernels.
-    "VLLM_SAIL_ENABLE_MOE_MARLIN": _bool("VLLM_SAIL_ENABLE_MOE_MARLIN", False),
-    "VLLM_SAIL_MEGA_MOE_MMA_TYPE": _choice(
-        "VLLM_SAIL_MEGA_MOE_MMA_TYPE", "fp8xfp4", MEGA_MOE_MMA_TYPES
+    _bool_spec(
+        "VLLM_SAIL_USE_DEEPSELECT",
+        section="Backend selection",
+        default=True,
+        description=(
+            "Allow the SAIL DeepSelect top-k backend for sparse indexers on "
+            "Zhenwu M890."
+        ),
     ),
-    # -- DSV4.1 mHC ----------------------------------------------------------
-    # Disable the PPU Mega mHC kernel so the upstream TileLang mHC path takes
-    # over. The A/B baseline for bisecting mHC regressions: the two paths
-    # compute the same shifted post/pre block, so a difference in the model's
-    # output points at the Mega mHC kernel.
-    "VLLM_SAIL_DISABLE_MEGA_MHC": _bool("VLLM_SAIL_DISABLE_MEGA_MHC", False),
-    # -- Quantization -------------------------------------------------------
-    # Triton implementation of dynamic per-token int8 quant; faster than the
-    # compiled kernel on PPU.
-    "VLLM_SAIL_USE_TRITON_INT8_QUANT": _bool("VLLM_SAIL_USE_TRITON_INT8_QUANT", True),
-    "VLLM_SAIL_FP8_LOAD_POLICY": _choice(
-        "VLLM_SAIL_FP8_LOAD_POLICY", None, ("native", "bf16", "int8")
+    # Shared upstream name; PPU extends the choices through its general plugin.
+    _choice_spec(
+        "VLLM_GDN_DECODE_KERNEL",
+        section="Backend selection",
+        default="auto",
+        choices=GDN_DECODE_KERNELS,
+        description=(
+            "Select the GDN decode kernel independently of prefill and KDA "
+            "(shared upstream name)."
+        ),
     ),
-    "VLLM_SAIL_ENABLE_FP8_TO_INT8": _bool("VLLM_SAIL_ENABLE_FP8_TO_INT8", False),
-    # Decode-time logits backend for the glm5_next kpool indexer.
-    # ``non_paged`` (default) gathers the pool K cache and uses the non-paged
-    # int8 kernel (same one as prefill). The paged INT8 kernel writes only
-    # part of the logits on PPU, so selecting it is rejected until fixed.
-    "VLLM_SAIL_KPOOL_DECODE_LOGITS": _choice(
-        "VLLM_SAIL_KPOOL_DECODE_LOGITS", "non_paged", KPOOL_DECODE_LOGITS_BACKENDS
-    ),
-    # Dense decode fallback bound: batch * ceil(max_seq_len / kpool) pools.
-    # Above it the fallback would materialise an O(batch * context) logits
-    # matrix (the 1M-context warmup needs ~256 GiB), so fail loudly instead.
-    "VLLM_SAIL_KPOOL_MAX_DENSE_POOLS": _positive_int(
-        "VLLM_SAIL_KPOOL_MAX_DENSE_POOLS", 1 << 21
-    ),
-    # -- Step5 DSA ----------------------------------------------------------
-    # Route the Step5 DSA indexer scoring kernel to the resident-block Triton
-    # implementation in vllm_sail/models/step5/ops/. Read on every call. Off by
-    # default: upstream's kernel stays the reference until validated per model.
-    "VLLM_SAIL_STEP5_DSA_SCORES": _bool("VLLM_SAIL_STEP5_DSA_SCORES", False),
-    # per_row stays the default; the new selector is opt-in only.
-    "VLLM_SAIL_STEP5_DSA_SELECTOR_PPU": _bool(
-        "VLLM_SAIL_STEP5_DSA_SELECTOR_PPU", False
-    ),
-    # Selects native paged attention during prefill metadata planning.
-    "VLLM_SAIL_STEP5_DSA_PREFILL_PPU": _bool("VLLM_SAIL_STEP5_DSA_PREFILL_PPU", False),
-    # Defaults to FlashInfer; native opts into the new prefill/decode and the old
-    # v023 values raise.
-    "VLLM_SAIL_STEP5_DSA_PREFILL_BACKEND": _choice(
-        "VLLM_SAIL_STEP5_DSA_PREFILL_BACKEND", "flashinfer", STEP5_PREFILL_BACKENDS
-    ),
-    # The indexer still runs in chunks; only the explicit native route may batch
-    # attention at finish.
-    "VLLM_SAIL_STEP5_DSA_PREFILL_BATCH_ATTENTION": _bool(
-        "VLLM_SAIL_STEP5_DSA_PREFILL_BATCH_ATTENTION", False
-    ),
-    # 0: E4M3 bytes; 1: E4M3-quantized values stored as FP16, using FP16 MMA.
-    # The FP16 summary cache takes twice the memory; keeps the Step5 fork's name.
-    # Read lazily; set it before the server starts and keep it fixed at runtime.
-    "VLLM_STEP5_INDEXER_FP8_AS_FP16": _bool("VLLM_STEP5_INDEXER_FP8_AS_FP16", False),
-    # -- MiniMax M3 SAIL MSA sparse attention -------------------------------
-    # Enabled by default: the SAIL path is selected whenever the platform, the
-    # model shape and the installed `msa_for_sail` allow it; the dtypes follow
-    # the platform and the KV cache dtype (see models/minimax_m3_msa/gating.py).
-    # 0 keeps the PPU Triton implementation for both halves.
-    "VLLM_SAIL_MINIMAX_M3_MSA": _bool("VLLM_SAIL_MINIMAX_M3_MSA", True),
-    # Bisection switches: keep one half on the PPU Triton implementation while
-    # the other half runs the SAIL kernels.
-    "VLLM_SAIL_MINIMAX_M3_MSA_INDEXER_TRITON": _bool(
-        "VLLM_SAIL_MINIMAX_M3_MSA_INDEXER_TRITON", False
-    ),
-    "VLLM_SAIL_MINIMAX_M3_MSA_ATTEND_TRITON": _bool(
-        "VLLM_SAIL_MINIMAX_M3_MSA_ATTEND_TRITON", False
-    ),
-    # -- Attention / linear attention --------------------------------------
-    # Legacy getter only. Current PLA/Triton dispatch uses VLLM_SAIL_USE_PLA.
-    "VLLM_SAIL_FUSED_GDN_DECODE": _bool("VLLM_SAIL_FUSED_GDN_DECODE", True),
     # Qwen4Exp QSA sparse-attention kernel. ``auto`` (default) takes FA3's QSA
     # path when the shape gate, the platform gate and the wheel probe all pass,
     # and falls back to the upstream Triton kernel otherwise; ``cuda`` and
     # ``triton`` pin either side for A/B measurement. The fork hard-wires
     # ``Qwen4ExpQSAImpl`` on the layer, so this is the only selection point.
-    "VLLM_SAIL_QSA_KERNEL": _choice("VLLM_SAIL_QSA_KERNEL", "auto", QSA_KERNELS),
-    # -- DeepSeek V4.1 fused norm-rope attention (FlashMLA PR#54 wheel) -----
-    # Master switch for the PPU fused norm-rope sparse-attention path. Default
-    # OFF (opt-in): the baseline attention class runs unless the user sets 1.
-    # Enabling also requires the PR#54 wheel (capability probe), PPU SM80/SM89,
-    # the 528B KV record switch below, and a compatible V4.1 head/group
-    # topology; when any gate is closed the selector falls back to baseline
-    # and logs the reason (A-B-A control: set 0 to force baseline even with
-    # the fused wheel installed).
-    "VLLM_SAIL_FUSED_NORM_ROPE_ATTN": _bool("VLLM_SAIL_FUSED_NORM_ROPE_ATTN", False),
-    # KV record format for DeepSeek V4.1 on PPU: True -> 528B V4.1 MXFP8
-    # record (required by the fused decode kernel; opt-in together with the
-    # master switch above), False (default) -> 584B V4 record, identical to
-    # the upstream non-SM100 default, so an unconfigured process behaves
-    # exactly like baseline.
-    # Read once per process by the dsv41_kv_record patch, which also prints
-    # the forensic line "[VLLM_SAIL] kv_mxfp8=<bool> kv_bytes_per_token=<n>".
-    "VLLM_SAIL_PPU_KV_MXFP8": _bool("VLLM_SAIL_PPU_KV_MXFP8", False),
-    # Compressed-KV record for the fused V4.1 path: True -> 288B NVFP4 record
-    # (256B e2m1 + 32 per-16 e4m3 scales) for the *compressed* cache only, while
-    # the sliding-window cache keeps the 528B MXFP8 record the kernel requires.
-    # Default OFF (opt-in): both caches stay 528B MXFP8, byte-identical to the
-    # behaviour without this variable. Requires the master switch and
-    # VLLM_SAIL_PPU_KV_MXFP8=1, capability 8.9 (ZW-M890P; the e2m1 PTX conversion
-    # is unavailable on 8.0) and sliding_window % 8 == 0; the fused gate closes
-    # with a named reason otherwise. Lossy: accuracy must be re-measured.
-    "VLLM_SAIL_PPU_KV_NVFP4": _bool("VLLM_SAIL_PPU_KV_NVFP4", False),
-    # Output FP8 scale format of the fused V4.1 norm-rope attention kernel
-    # (FlashMLA-for-sail PR#59, "channel-wise output and runtime format
-    # selection"). False (default) -> the PR#54 contract: num_per_channels=32
-    # with TMA-aligned, rounded, packed UE8M0 scales, i.e. an int32
-    # [tokens, n_wv_group, D/128] buffer. True -> one exact FP32 dequantization
-    # scale per token and WV group: num_per_channels=4096 with all three format
-    # flags cleared, i.e. a contiguous float32 [tokens, n_wv_group, 1] buffer.
-    # Both formats live in the same PR#59 wheel; the kernel hard-requires
-    # capability 8.9 (ZW-M890P) for the per-token format and rejects any mixed
-    # flag combination, so the fused gate closes with a named reason on 8.0.
-    # Opt-in and lossless-relative-to-block32: the FP32 scale avoids the UE8M0
-    # power-of-two rounding, so accuracy must be re-measured against the
-    # default arm rather than assumed. Requires a PR#59 (or newer) flash_mla
-    # wheel; older wheels reject num_per_channels=4096.
-    "VLLM_SAIL_FUSED_ATTN_PER_TOKEN_SCALE": _bool(
-        "VLLM_SAIL_FUSED_ATTN_PER_TOKEN_SCALE", False
+    _choice_spec(
+        "VLLM_SAIL_QSA_KERNEL",
+        section="Backend selection",
+        default="auto",
+        choices=QSA_KERNELS,
+        description=(
+            "Select the Qwen4Exp QSA sparse-attention kernel (`cuda` selects "
+            "FA3's QSA path when supported)."
+        ),
     ),
-    # -- Distributed MoE ---------------------------------------------------
+    _bool_spec(
+        "VLLM_SAIL_FUSED_RMSNORM_QUANT",
+        section="Backend selection",
+        default=False,
+        description="Enable supported fused RMSNorm and quantization paths.",
+    ),
+    _bool_spec(
+        "VLLM_SAIL_USE_OPT_TOKEN_GROUP_QUANT",
+        section="Backend selection",
+        default=False,
+        description="Enable the optimized token-group quantization path.",
+    ),
+    # Triton implementation of dynamic per-token int8 quant; faster than the
+    # compiled kernel on PPU.
+    _bool_spec(
+        "VLLM_SAIL_USE_TRITON_INT8_QUANT",
+        section="Backend selection",
+        default=True,
+        description="Use Triton dynamic per-token INT8 activation quantization.",
+    ),
     # DeepEP low-latency deferred recv hook. The hook only pays off on backends
     # that can overlap the deferred receive with other compute; setting this to
     # 0 selects an event-based fallback that is also a simpler debugging
     # baseline for overlap issues.
-    "VLLM_DEEPEPLL_RECV_HOOK": _bool("VLLM_DEEPEPLL_RECV_HOOK", True),
-    # -- Profiling (opt-in; see vllm_sail/profiling/) ------------------------
-    "VLLM_SAIL_NVTX_PROFILE": _bool(
+    _bool_spec(
+        "VLLM_DEEPEPLL_RECV_HOOK",
+        section="Backend selection",
+        default=True,
+        description=(
+            "Use DeepEP low-latency deferred receive hook; `0` selects the "
+            "event-based fallback (shared upstream name)."
+        ),
+    ),
+    # -- DeepSeek V4.1 -----------------------------------------------------
+    _choice_spec(
+        "VLLM_SAIL_MEGA_MOE_MMA_TYPE",
+        section="DeepSeek V4.1",
+        default="fp8xfp4",
+        choices=MEGA_MOE_MMA_TYPES,
+        description=(
+            "Activation precision for DeepGEMM MegaMoE MXFP4 routed experts "
+            "(`fp4xfp4`=W4A4, `fp8xfp4`=W4A8, `bf16xfp4`=W4A16)."
+        ),
+    ),
+    # Disable the PPU Mega mHC kernel so the upstream TileLang mHC path takes
+    # over. The A/B baseline for bisecting mHC regressions: the two paths
+    # compute the same shifted post/pre block, so a difference in the model's
+    # output points at the Mega mHC kernel.
+    _bool_spec(
+        "VLLM_SAIL_DISABLE_MEGA_MHC",
+        section="DeepSeek V4.1",
+        default=False,
+        extra_aliases=("SAIL_DISABLE_MEGA_MHC",),
+        description=(
+            "Disable the PPU DeepGEMM Mega mHC kernel on Zhenwu M890 and fall "
+            "back to the upstream TileLang mHC path."
+        ),
+    ),
+    # Master switch for the PPU fused norm-rope sparse-attention path. Default
+    # OFF (opt-in): the baseline attention class runs unless the user sets 1.
+    # Enabling also requires a compatible flash_mla wheel, PPU SM80/SM89,
+    # the 528B KV record switch below, and a compatible V4.1 head/group
+    # topology; when any gate is closed the selector falls back to baseline
+    # and logs the reason.
+    _bool_spec(
+        "VLLM_SAIL_FUSED_NORM_ROPE_ATTN",
+        section="DeepSeek V4.1",
+        default=False,
+        description=(
+            "Opt into the PPU fused norm-rope sparse-attention path; requires "
+            "`VLLM_SAIL_PPU_KV_MXFP8=1`, a compatible `flash_mla` wheel, and "
+            "supported V4.1 topology."
+        ),
+    ),
+    # KV record format for DeepSeek V4.1 on PPU: True -> 528B V4.1 MXFP8
+    # record (required by the fused decode kernel; opt-in together with the
+    # master switch above), False (default) -> 584B V4 record, identical to
+    # the upstream non-SM100 default. Read once per process.
+    _bool_spec(
+        "VLLM_SAIL_PPU_KV_MXFP8",
+        section="DeepSeek V4.1",
+        default=False,
+        description=(
+            "Select the 528-byte V4.1 MXFP8 KV record required by the fused "
+            "decode kernel instead of the default 584-byte V4 record (read "
+            "once per process)."
+        ),
+    ),
+    # Compressed-KV record for the fused V4.1 path: True -> 288B NVFP4 record
+    # for the compressed cache only, while the sliding-window cache keeps the
+    # 528B MXFP8 record. Requires master switch, VLLM_SAIL_PPU_KV_MXFP8=1,
+    # capability 8.9 (ZW-M890P) and sliding_window % 8 == 0.
+    _bool_spec(
+        "VLLM_SAIL_PPU_KV_NVFP4",
+        section="DeepSeek V4.1",
+        default=False,
+        description=(
+            "Opt into a 288-byte NVFP4 record for the compressed KV cache "
+            "while keeping 528-byte MXFP8 for the sliding-window cache; "
+            "requires `VLLM_SAIL_FUSED_NORM_ROPE_ATTN=1`, "
+            "`VLLM_SAIL_PPU_KV_MXFP8=1`, Zhenwu M890 (capability 8.9), and "
+            "`sliding_window % 8 == 0` (lossy)."
+        ),
+    ),
+    # Output FP8 scale format of the fused V4.1 norm-rope attention kernel.
+    # False (default): num_per_channels=32 with packed UE8M0 scales.
+    # True: one exact FP32 dequantization scale per token and WV group
+    # (requires capability 8.9 / ZW-M890P and a compatible flash_mla wheel).
+    _bool_spec(
+        "VLLM_SAIL_FUSED_ATTN_PER_TOKEN_SCALE",
+        section="DeepSeek V4.1",
+        default=False,
+        description=(
+            "Use exact per-token FP32 output scales per WV group instead of "
+            "packed per-32 UE8M0 scales in fused V4.1 attention; requires "
+            "Zhenwu M890 (capability 8.9) and a compatible `flash_mla` wheel."
+        ),
+    ),
+    # -- GLM-5-Next kpool --------------------------------------------------
+    # Decode-time logits backend for the glm5_next kpool indexer.
+    # ``non_paged`` (default) gathers the pool K cache and uses the non-paged
+    # int8 kernel (same one as prefill). The paged INT8 kernel writes only
+    # part of the logits on PPU, so selecting it is rejected until fixed.
+    _choice_spec(
+        "VLLM_SAIL_KPOOL_DECODE_LOGITS",
+        section="GLM-5-Next kpool",
+        default="non_paged",
+        choices=KPOOL_DECODE_LOGITS_BACKENDS,
+        description=(
+            "Decode logits backend for the Zhenwu 810E INT8 kpool indexer; "
+            "only `non_paged` is accepted (`paged` is rejected on PPU)."
+        ),
+    ),
+    # Dense decode fallback bound: batch * ceil(max_seq_len / kpool) pools.
+    # Above it the fallback would materialise an O(batch * context) logits
+    # matrix (the 1M-context warmup needs ~256 GiB), so fail loudly instead.
+    _positive_int_spec(
+        "VLLM_SAIL_KPOOL_MAX_DENSE_POOLS",
+        section="GLM-5-Next kpool",
+        default=1 << 21,
+        default_display="`2097152` (`1 << 21`)",
+        description=(
+            "Upper bound on `batch * ceil(max_seq_len / kpool)` for the kpool "
+            "dense decode fallback."
+        ),
+    ),
+    # -- MiniMax M3 SAIL MSA sparse attention ------------------------------
+    # Enabled by default: the SAIL path is selected whenever the platform, the
+    # model shape and the installed `msa_for_sail` allow it; the dtypes follow
+    # the platform and the KV cache dtype (see models/minimax_m3_msa/gating.py).
+    # 0 keeps the PPU Triton implementation for both halves.
+    _bool_spec(
+        "VLLM_SAIL_MINIMAX_M3_MSA",
+        section="MiniMax M3 SAIL MSA",
+        default=True,
+        description=(
+            "Enable SAIL MSA sparse attention (`msa_for_sail`) when platform, "
+            "shape and wheel gates pass; `0` keeps Triton for both halves."
+        ),
+    ),
+    # Bisection switches: keep one half on the PPU Triton implementation while
+    # the other half runs the SAIL kernels.
+    _bool_spec(
+        "VLLM_SAIL_MINIMAX_M3_MSA_INDEXER_TRITON",
+        section="MiniMax M3 SAIL MSA",
+        default=False,
+        description=(
+            "Bisection switch keeping the MiniMax M3 indexer on Triton while "
+            "sparse attend uses SAIL MSA."
+        ),
+    ),
+    _bool_spec(
+        "VLLM_SAIL_MINIMAX_M3_MSA_ATTEND_TRITON",
+        section="MiniMax M3 SAIL MSA",
+        default=False,
+        description=(
+            "Bisection switch keeping MiniMax M3 sparse attend on Triton "
+            "while the indexer uses SAIL MSA."
+        ),
+    ),
+    # -- Step-5 DSA --------------------------------------------------------
+    # Route the Step5 DSA indexer scoring kernel to the resident-block Triton
+    # implementation in vllm_sail/models/step5/ops/. Read on every call. Off by
+    # default: upstream's kernel stays the reference until validated per model.
+    _bool_spec(
+        "VLLM_SAIL_STEP5_DSA_SCORES",
+        section="Step-5 DSA",
+        default=False,
+        description=(
+            "Opt into the resident-block Triton indexer scoring kernel on "
+            "Zhenwu M890 (capability 8.9)."
+        ),
+    ),
+    # per_row stays the default; the new selector is opt-in only.
+    _bool_spec(
+        "VLLM_SAIL_STEP5_DSA_SELECTOR_PPU",
+        section="Step-5 DSA",
+        default=False,
+        description=(
+            "Opt into the native HGGC FP32 radix region selector (`0 < topk <= 1024`)."
+        ),
+    ),
+    # Defaults to FlashInfer; native opts into the new prefill/decode and old
+    # values raise.
+    _choice_spec(
+        "VLLM_SAIL_STEP5_DSA_PREFILL_BACKEND",
+        section="Step-5 DSA",
+        default="flashinfer",
+        choices=STEP5_PREFILL_BACKENDS,
+        description=(
+            "Select the Step-5 prefill/decode attention backend (`native` "
+            "opts into the plugin's HGGC BF16 paged path)."
+        ),
+    ),
+    # Selects native paged attention during prefill metadata planning.
+    _bool_spec(
+        "VLLM_SAIL_STEP5_DSA_PREFILL_PPU",
+        section="Step-5 DSA",
+        default=False,
+        description=(
+            "Boolean selector for `native` (`1`) vs `flashinfer` (`0`) when "
+            "`VLLM_SAIL_STEP5_DSA_PREFILL_BACKEND` is unset."
+        ),
+    ),
+    # The indexer still runs in chunks; only the explicit native route may batch
+    # attention at finish.
+    _bool_spec(
+        "VLLM_SAIL_STEP5_DSA_PREFILL_BATCH_ATTENTION",
+        section="Step-5 DSA",
+        default=False,
+        description=(
+            "Enable chunked selection with batched attention at finish on the "
+            "`native` Step-5 prefill route."
+        ),
+    ),
+    # 0: E4M3 bytes; 1: E4M3-quantized values stored as FP16, using FP16 MMA.
+    # The FP16 summary cache takes twice the memory; keeps the Step5 fork's name.
+    # Read lazily; set it before the server starts and keep it fixed at runtime.
+    _bool_spec(
+        "VLLM_STEP5_INDEXER_FP8_AS_FP16",
+        section="Step-5 DSA",
+        default=False,
+        description=(
+            "Store E4M3-quantized indexer summaries, packed pages and queries "
+            "as FP16 (2x summary cache memory, FP16 MMA with FP32 "
+            "accumulation); set before startup and keep fixed."
+        ),
+    ),
+    # -- Online quantization and compatibility -----------------------------
+    _choice_spec(
+        "VLLM_SAIL_FP8_LOAD_POLICY",
+        section="Online quantization and compatibility",
+        default=None,
+        choices=("native", "bf16", "int8"),
+        description=(
+            "Default loading-time FP8 conversion policy when no explicit "
+            "`--quantization` argument is supplied."
+        ),
+    ),
+    _bool_spec(
+        "VLLM_SAIL_ENABLE_FP8_TO_INT8",
+        section="Online quantization and compatibility",
+        default=False,
+        description=(
+            "Legacy loading-time FP8 switch used when "
+            "`VLLM_SAIL_FP8_LOAD_POLICY` is unset (`1`=INT8, `0`=BF16 when "
+            "explicitly set)."
+        ),
+    ),
+    # Disable / force the wna16 CUDA MoE kernel on PPU. Both exist because the
+    # heuristic that picks between the CUDA and Triton kernels is shape
+    # dependent and occasionally needs a manual override in either direction.
+    _bool_spec(
+        "VLLM_SAIL_DISABLE_MOE_WNA16_CUDA",
+        section="Online quantization and compatibility",
+        default=False,
+        description=(
+            "Disable the native WNA16 MoE path; takes precedence over "
+            "`VLLM_SAIL_FORCE_MOE_WNA16_CUDA`."
+        ),
+    ),
+    _bool_spec(
+        "VLLM_SAIL_FORCE_MOE_WNA16_CUDA",
+        section="Online quantization and compatibility",
+        default=False,
+        description=(
+            "Request the native WNA16 MoE path; raises if the kernel is unavailable."
+        ),
+    ),
+    # Legacy Marlin selection gate. Native Marlin execution remains excluded
+    # by the CUDA-free manifest; this flag cannot supply those kernels.
+    _bool_spec(
+        "VLLM_SAIL_ENABLE_MOE_MARLIN",
+        section="Online quantization and compatibility",
+        default=False,
+        description=(
+            "Legacy selection gate; does not enable excluded native Marlin kernels."
+        ),
+    ),
+    # Legacy getter only. Current PLA/Triton dispatch uses VLLM_SAIL_USE_PLA.
+    _bool_spec(
+        "VLLM_SAIL_FUSED_GDN_DECODE",
+        section="Online quantization and compatibility",
+        default=True,
+        description=(
+            "Legacy getter; GDN decode dispatch now uses "
+            "`VLLM_GDN_DECODE_KERNEL` and `VLLM_SAIL_USE_PLA`."
+        ),
+    ),
+    # -- Profiling (opt-in; see vllm_sail/profiling/) ----------------------
+    _bool_spec(
         "VLLM_SAIL_NVTX_PROFILE",
-        False,
+        section="Profiling",
+        default=False,
+        extra_aliases=("SAIL_NVTX_PROFILE",),
+        description="Enable optional NVTX instrumentation.",
     ),
     # Step5 forward dict arguments expand only tensor shape/dtype; no device reads.
-    "VLLM_SAIL_NVTX_DUMP_DICT": _bool("VLLM_SAIL_NVTX_DUMP_DICT", False),
-    "VLLM_SAIL_NVTX_DUMP_TOPK": _bool("VLLM_SAIL_NVTX_DUMP_TOPK", False),
-    "VLLM_SAIL_NVTX_VFA_DUMP_SEQLEN": _bool(
-        "VLLM_SAIL_NVTX_VFA_DUMP_SEQLEN",
-        False,
+    _bool_spec(
+        "VLLM_SAIL_NVTX_DUMP_DICT",
+        section="Profiling",
+        default=False,
+        description=(
+            "Expand Step-5 forward dictionary arguments as tensor shapes and "
+            "dtypes in NVTX labels without device reads."
+        ),
     ),
+    _bool_spec(
+        "VLLM_SAIL_NVTX_DUMP_TOPK",
+        section="Profiling",
+        default=False,
+        description="Include top-k details in NVTX labels.",
+    ),
+    _bool_spec(
+        "VLLM_SAIL_NVTX_VFA_DUMP_SEQLEN",
+        section="Profiling",
+        default=False,
+        description="Include sequence lengths in FlashAttention NVTX labels.",
+    ),
+)
+
+environment_specs: dict[str, EnvSpec] = {spec.name: spec for spec in ENVIRONMENT_SPECS}
+environment_variables: dict[str, Callable[[], Any]] = {
+    spec.name: spec.getter for spec in ENVIRONMENT_SPECS
 }
 
 # All plugin variables retain the corresponding PPU spelling. The shared
@@ -383,15 +762,17 @@ environment_variables: dict[str, Callable[[], Any]] = {
 # fork's VLLM_STEP5_INDEXER_FP8_AS_FP16, keep their names and have no plugin
 # aliases.
 _aliases: dict[str, tuple[str, ...]] = {
-    name: (name.replace("VLLM_SAIL_", "VLLM_PPU_", 1),)
-    for name in environment_variables
-    if name.startswith("VLLM_SAIL_")
+    spec.name: spec.aliases for spec in ENVIRONMENT_SPECS if spec.aliases
 }
-_aliases["VLLM_SAIL_NVTX_PROFILE"] += ("SAIL_NVTX_PROFILE",)
-_aliases["VLLM_SAIL_DISABLE_MEGA_MHC"] += ("SAIL_DISABLE_MEGA_MHC",)
 _canonical_names = {
     alias: name for name, aliases in _aliases.items() for alias in aliases
 }
+
+
+def aliases_of(name: str) -> tuple[str, ...]:
+    """Compatibility aliases accepted for ``name``, in precedence order."""
+    canonical = _canonical_names.get(name, name)
+    return _aliases.get(canonical, ())
 
 
 def __getattr__(name: str) -> Any:

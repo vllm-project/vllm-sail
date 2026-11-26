@@ -32,7 +32,6 @@ REASON = (
     "initialize. The fork disables the kernel module-wide; the pure-PyTorch "
     "allreduce + RMSNorm fallback is functionally equivalent."
 )
-AFFECTED_VERSIONS = ">=0.32.0,<0.33.0"
 REMOVE_WHEN = (
     "PPU's cuda.bindings/cudaMalloc stack accepts the Lamport workspace "
     "allocation (the upstream try/except in MiniMaxText01RMSNormTP.__init__ "
@@ -40,9 +39,9 @@ REMOVE_WHEN = (
     "PPU answers correctly."
 )
 
-#: (target, reason, affected versions, remove_when) for every patch installed
+#: (target, reason, remove_when) for every patch installed
 #: by this module. Read by the metadata-shape unit tests.
-METADATA = ((_TARGET, REASON, AFFECTED_VERSIONS, REMOVE_WHEN),)
+METADATA = ((_TARGET, REASON, REMOVE_WHEN),)
 
 _installed = False
 
@@ -68,7 +67,6 @@ def install() -> None:
         PatchRecord(
             target=_TARGET,
             reason=REASON,
-            affected_versions=AFFECTED_VERSIONS,
             remove_when=REMOVE_WHEN,
             kind="value",
             was_missing=False,

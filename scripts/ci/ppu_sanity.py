@@ -87,7 +87,7 @@ def runtime_environment(device: str = "810e", catalog_path: Path = CATALOG) -> d
     import vllm_sail
     from vllm_sail.compat import check_vllm_compatibility
 
-    check_vllm_compatibility(force=True)
+    check_vllm_compatibility(force=True, strict=True)
     if not current_platform.is_ppu() or not torch.cuda.is_available():
         raise RuntimeError("sanity requires the PPU platform and a real device")
     for module in (vllm, vllm_sail):
