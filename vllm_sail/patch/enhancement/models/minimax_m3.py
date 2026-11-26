@@ -23,7 +23,6 @@ _ppu_mlp_init = bind_body(_mlp_body, _model)
     "vllm.models.minimax_m3.nvidia.model",
     "GateLinear",
     reason="MiniMax fixes the gate weight to FP32. BF16 weights let the upstream unquantized router GEMM consume BF16 activations and return FP32 logits on PPU.",
-    affected_versions=">=0.32.0,<0.33.0",
     remove_when="MiniMax exposes a router weight dtype choice independently of the FP32 logits dtype.",
 )
 def make_gate_linear(*args, **kwargs):
