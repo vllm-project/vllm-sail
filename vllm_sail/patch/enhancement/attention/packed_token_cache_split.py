@@ -97,8 +97,6 @@ from vllm_sail.patch.utils import original_of, patch
 
 logger = init_logger(__name__)
 
-_AFFECTED = ">=0.32.0,<0.33.0"
-
 # Captured before patching so the delegating path stays upstream.
 _upstream_map_kv_cache_to_kernel_blocks = AttentionGroup.map_kv_cache_to_kernel_blocks
 _upstream_with_kernel_block_table = AttentionGroup._with_kernel_block_table
@@ -250,7 +248,6 @@ def _force_split_token_cache(self, kv_cache: torch.Tensor) -> torch.Tensor | Non
         "captured, and separate from the shared row because cogroup backends "
         "with manager addressing alias it."
     ),
-    affected_versions=_AFFECTED,
     remove_when=(
         "map_kv_cache_to_kernel_blocks (or the layers) rewrites slot mappings "
         "for split token caches into per-layer rows."
@@ -326,7 +323,6 @@ def _remapped_private_row(
         "slot_mapping must be swapped for the remapped private row for the "
         "force-split groups only."
     ),
-    affected_versions=_AFFECTED,
     remove_when=(
         "map_kv_cache_to_kernel_blocks (or the metadata builders) rewrites "
         "slot mappings for split token caches."
@@ -443,7 +439,6 @@ def _install_precompute_context_kv_patch() -> None:
             "addressing (PAD slots stay negative) so the context KV lands on "
             "the draft's split cache view."
         ),
-        affected_versions=_AFFECTED,
         remove_when=(
             "a force-split token cache has its slot mappings rewritten by "
             "the speculator's own input-prepare kernel."
@@ -464,7 +459,6 @@ _install_precompute_context_kv_patch()
         "so the packed cache cannot be split into the 64-token kernel blocks its "
         "kernels address and KV cache binding fails."
     ),
-    affected_versions=_AFFECTED,
     remove_when=(
         "map_kv_cache_to_kernel_blocks asks the backend "
         "(writes_kv_cache_from_block_table) instead of inferring it from "

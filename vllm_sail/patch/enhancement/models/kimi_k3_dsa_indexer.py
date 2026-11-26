@@ -60,7 +60,6 @@ from vllm_sail.patch.enhancement.dsa_indexer_gate import (
 from vllm_sail.patch.utils import PATCH_MARKER, patch
 from vllm_sail.utils import deep_gemm as _sail_deep_gemm
 
-_AFFECTED = ">=0.32.0,<0.33.0"
 _DSA_MODULE = "vllm.models.kimi_k3.nvidia.ops.dsa_indexer"
 _SPARSE_MODULE = "vllm.model_executor.layers.sparse_attn_indexer"
 
@@ -472,7 +471,6 @@ def _dsa_fused_prologue_kernel(
         "LayerNorm+quant+insert launch must pass the cache as raw uint8. "
         "constexpr-gated; targets with FP8 support delegate to upstream."
     ),
-    affected_versions=_AFFECTED,
     remove_when="upstream dsa_indexer selects the quant encoder through a platform hook.",
 )
 @functools.wraps(_upstream_k_insert)
@@ -541,7 +539,6 @@ def indexer_k_norm_quant_insert(
         "downstream sparse_attn_indexer scoring expects it). constexpr-gated; "
         "targets with FP8 support delegate to upstream."
     ),
-    affected_versions=_AFFECTED,
     remove_when="upstream dsa_indexer selects the quant encoder through a platform hook.",
 )
 @functools.wraps(_upstream_q_quant)
@@ -602,7 +599,6 @@ def indexer_q_quant_fold_weights(
         "missing) over raw uint8 cache views. constexpr-gated; targets with "
         "FP8 support delegate to upstream."
     ),
-    affected_versions=_AFFECTED,
     remove_when="upstream dsa_indexer selects the quant encoder through a platform hook.",
 )
 @functools.wraps(_upstream_prologue)
@@ -933,7 +929,6 @@ def _install_int8_scoring() -> None:
             "the fp8_fp4 contract of compressed rows with an uncleaned tail. "
             "FP8 tensors still fall back to the real fp8 kernel."
         ),
-        affected_versions=_AFFECTED,
         remove_when="deep_gemm exposes a platform-dispatched mqa_logits entry point.",
     )(fp8_fp4_mqa_logits)
     patch(
@@ -947,7 +942,6 @@ def _install_int8_scoring() -> None:
             "[B*next_n, max_model_len] output contract with uncleaned tails. "
             "FP8 tensors still fall back to the real fp8 kernel."
         ),
-        affected_versions=_AFFECTED,
         remove_when="deep_gemm exposes a platform-dispatched paged mqa_logits entry point.",
     )(fp8_fp4_paged_mqa_logits)
 

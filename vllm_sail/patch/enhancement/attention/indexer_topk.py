@@ -97,7 +97,6 @@ def deep_select_topk(
     _MODULE,
     "SparseIndexerTopk.takes_bf16_logits",
     reason=_REASON,
-    affected_versions=_AFFECTED,
     remove_when=_REMOVE_WHEN,
 )
 def takes_bf16_logits(self, logits, topk_tokens, num_rows) -> bool:

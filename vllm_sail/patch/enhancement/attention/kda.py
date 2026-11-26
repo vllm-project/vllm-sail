@@ -34,7 +34,6 @@ _RECOVERSSM_MODULE = "vllm.models.kimi_k3.nvidia.ops.recoverssm"
 _REPLAY_META = dict(
     reason="Kimi KDA RecoverSSM must run PLA replay verify/commit on PPU instead of "
     "Triton RecoverSSM.",
-    affected_versions=">=0.32.0,<0.33.0",
     remove_when="Kimi KDA RecoverSSM supports platform verify/commit registration.",
 )
 

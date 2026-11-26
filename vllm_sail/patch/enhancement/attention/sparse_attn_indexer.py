@@ -246,7 +246,6 @@ _upstream_mqa_logits_mx_inputs = _indexer.mqa_logits_mx_inputs
         "reduce in) and forwards it, but PPU's SAIL kernels emit BF16 logits "
         "whatever it says, so the signalled dtype cannot be honoured here."
     ),
-    affected_versions=_AFFECTED,
     remove_when="mqa_logits_use_mx_scales() covers PPU, or the cast moves out of the SM100 gate.",
 )
 def mqa_logits_mx_inputs_ppu(q, q_scale, weights, logits_dtype=torch.float32):
@@ -411,7 +410,6 @@ def _install_logits_dtype_pin() -> None:
             _MODULE,
             name,
             reason=_LOGITS_PIN_REASON,
-            affected_versions=_AFFECTED,
             remove_when=_LOGITS_PIN_REMOVE_WHEN,
         )(replacement)
 

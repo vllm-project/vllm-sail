@@ -57,7 +57,6 @@ _upstream_moe_init = KimiMoE.__init__
         "partial. Record on the output transform when that sum is owed; "
         "delegates to upstream elsewhere."
     ),
-    affected_versions=_AFFECTED,
     remove_when=(
         "the eager MegaMoE path reduces the shared-expert output itself, the "
         "way MoERunner and LatentMoERunner do."
@@ -228,7 +227,6 @@ def transform_forward(self, hidden_states, residual=None):
         "builds where MLAAttentionSpec natively declares (or lacks) those fields, "
         "the filter is a no-op against upstream's behavior."
     ),
-    affected_versions=_AFFECTED,
     remove_when=(
         "upstream MLAAttentionSpec declares the indexer geometry fields itself "
         "(so no injection happens), or from_spec stops copying unknown fields."
