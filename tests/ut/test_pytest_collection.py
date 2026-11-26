@@ -47,21 +47,21 @@ def test_same_basename_modules_collect_together(tmp_path: Path) -> None:
 def test_ut_partition_is_disjoint_complete_and_source_marked() -> None:
     code = """
 import re
+import shlex
 from pathlib import Path
 import pytest
 import yaml
 from _pytest.mark.expression import Expression
 
 workflow = yaml.safe_load(Path(".github/workflows/ut.yaml").read_text())
-cpu_script = next(
-    step["run"]
+command = next(
+    shlex.split(step["run"])
     for step in workflow["jobs"]["cpu-unit-tests"]["steps"]
-    if step.get("name") == "Run bare CPU unit tests"
+    if "pytest" in step.get("run", "")
 )
+cpu = Expression.compile(command[command.index("-m", 3) + 1])
 pin_script = Path("scripts/ci/ppu_pin_ut.sh").read_text()
-selection = re.compile(r'^\\s+-m "([^"]+)"', re.M)
-cpu = Expression.compile(selection.search(cpu_script).group(1))
-pin = Expression.compile(selection.search(pin_script).group(1))
+pin = Expression.compile(re.search(r'^\\s+-m "([^"]+)"', pin_script, re.M).group(1))
 
 class UTPartition:
     def pytest_collection_modifyitems(self, items):

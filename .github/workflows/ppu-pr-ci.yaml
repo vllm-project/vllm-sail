@@ -75,7 +75,6 @@ jobs:
     with:
       pr_head_sha: ${{ inputs.head_sha }}
       skip_ppu: ${{ needs.validate.outputs.skip_ppu == 'true' }}
-      build_image: ${{ vars.PPU_PR_CI_BUILD_IMAGE }}
       existing_build_run_id: ${{ needs.validate.outputs.existing_build_run_id }}
       resolve_native_donors: true
       wheel_source_sha: ${{ needs.validate.outputs.wheel_source_sha }}

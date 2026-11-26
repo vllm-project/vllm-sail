@@ -536,16 +536,12 @@ def test_cpu_and_pin_ut_use_complementary_full_directory_selections():
     unit_tests = yaml.safe_load((WORKFLOW.parent / "ut.yaml").read_text())
     assert set(unit_tests["jobs"]) == {"cpu-unit-tests"}
     cpu = unit_tests["jobs"]["cpu-unit-tests"]
-    test_step = next(
-        step for step in cpu["steps"] if " -m pytest " in step.get("run", "")
-    )
     command = next(
-        shlex.split(line)
-        for line in test_step["run"].replace("\\\n", " ").splitlines()
-        if " -m pytest " in line
+        shlex.split(step["run"])
+        for step in cpu["steps"]
+        if "pytest" in step.get("run", "")
     )
-    assert command[0] == "${python[@]}"
-    assert command[1:7] == ["-m", "pytest", "tests/ut", "-q", "-rs", "-m"]
+    assert command[:7] == ["python", "-m", "pytest", "tests/ut", "-q", "-rs", "-m"]
     assert command[7] == (
         "not upstream_source and not requires_runtime and not ppu "
         "and not cap80 and not cap89"

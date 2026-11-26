@@ -159,13 +159,6 @@ preserves the image's torch/torchvision stack. It reuses the image's pytest,
 tblib, Numba and Transformers when they satisfy the test environment. Older
 images get any missing packages installed under the image constraints.
 
-For formal PR CI, `PPU_PR_CI_BUILD_IMAGE` can select a pullable, digest-pinned
-build image with the Python build tools installed. `PPU_PR_CI_CPU_IMAGES` takes
-a JSON object mapping Python versions such as `"3.12"` to CPU-only image
-references. A configured CPU job checks the image's requirements and runs the
-tests with container networking disabled. Versions without an image use the
-hosted runner's regular Python setup.
-
 The container reads `HF_HOME=/nas_aisw/datasets/hf_cache` in offline mode. The
 cache and `/nas_aisw/datasets/checkpoints/LLM` are mounted read-only at their host
 paths, so snapshot symlinks into the checkpoint tree remain valid. Imported

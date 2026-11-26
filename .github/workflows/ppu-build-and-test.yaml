@@ -26,10 +26,6 @@ on:
         description: Report success without allocating PPU runners for non-impacting changes
         type: boolean
         default: false
-      build_image:
-        description: Digest-pinned image for building the PR wheels
-        type: string
-        default: ""
       existing_build_run_id:
         description: Skip build and reuse wheels from this run
         type: string
@@ -233,7 +229,6 @@ jobs:
       ci_registry_token: ${{ secrets.ci_registry_token }}
     with:
       pr_head_sha: ${{ inputs.pr_head_sha || github.sha }}
-      build_image: ${{ inputs.build_image }}
       resolve_native_donors: ${{ github.event_name == 'pull_request' || inputs.resolve_native_donors }}
 
   pin-unit-tests:
