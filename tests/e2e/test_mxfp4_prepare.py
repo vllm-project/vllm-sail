@@ -93,3 +93,50 @@ def test_downcast_to_mxfp4_rounding_matches_across_scale_formats(dtype_name):
     packed = q_u8.cpu().reshape(-1).tolist()
     codes = [code for byte in packed for code in (byte & 0x0F, byte >> 4)]
     assert codes == expected_codes
+
+
+@pytest.mark.parametrize("dtype_name", ["float32", "bfloat16"])
+def test_downcast_to_mxfp4_small_magnitudes_match_across_scale_formats(dtype_name):
+    """Issue #397: default UINT16 must not zero representable small values."""
+    import torch
+
+    from vllm_sail.model_executor.layers.quantization.utils.mxfp4_utils import (
+        ScaleFormat,
+        downcast_to_mxfp4,
+    )
+
+    dtype = getattr(torch, dtype_name)
+    levels = (0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0)
+
+    for exp, expected_scale_byte in ((-40, 85), (-32, 93)):
+        inputs = [2.0**exp] * 32 + [-(2.0**exp)] * 32
+        x = torch.tensor(inputs, dtype=dtype, device="cuda").reshape(1, 64)
+
+        q_u16, s_u16 = downcast_to_mxfp4(x, axis=1)
+        q_u8, s_u8 = downcast_to_mxfp4(
+            x, axis=1, scale_format=ScaleFormat.UINT8_ROW_MAJOR
+        )
+        torch.cuda.synchronize()
+
+        assert torch.equal(q_u16.cpu(), q_u8.cpu())
+        scale_bytes_u16 = (
+            s_u16.cpu().contiguous().view(torch.uint8).reshape(-1).tolist()
+        )
+        scale_bytes_u8 = s_u8.cpu().reshape(-1).tolist()
+        assert scale_bytes_u16 == [expected_scale_byte, expected_scale_byte]
+        assert scale_bytes_u8 == scale_bytes_u16
+
+        packed = q_u16.cpu().reshape(-1).tolist()
+        codes = [code for byte in packed for code in (byte & 0x0F, byte >> 4)]
+        decoded_scales = [2.0 ** (byte - 127) for byte in scale_bytes_u16]
+        decoded = [
+            (-1 if code & 8 else 1) * levels[code & 7] * decoded_scales[i // 32]
+            for i, code in enumerate(codes)
+        ]
+        assert decoded == inputs
+
+    zeros = torch.zeros((1, 64), dtype=dtype, device="cuda")
+    q_zero, s_zero = downcast_to_mxfp4(zeros, axis=1)
+    torch.cuda.synchronize()
+    assert q_zero.cpu().reshape(-1).tolist() == [0] * 32
+    assert s_zero.cpu().contiguous().view(torch.uint8).reshape(-1).tolist() == [0, 0]

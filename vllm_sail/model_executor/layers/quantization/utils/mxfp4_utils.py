@@ -391,8 +391,9 @@ def _downcast_to_mxfp4_u16(
         abs_tensor, [BLOCK_SIZE_OUT_DIM, BLOCK_SIZE_QUANT_MX_SCALE, MXFP_BLOCK_SIZE]
     )
     max_val = tl.max(abs_tensor, axis=2, keep_dims=True)
-    # Clamp to avoid log2(0) in scale computation
-    max_val = tl.maximum(max_val, 1e-10)
+    # Floor all-masked padding groups (max_val == -1.0) to 0.0 without
+    # clamping valid small magnitudes.
+    max_val = tl.maximum(max_val, 0.0)
 
     if DEQUANT_SCALE_ROUNDING_MODE == 0:
         # ROUND_UP: 2 ** ceil(log2(max / 6.0))
@@ -405,9 +406,8 @@ def _downcast_to_mxfp4_u16(
         dequant_scale = max_val / 6.0
         dequant_scale_exponent = dequant_scale.to(tl.uint32, bitcast=True) & 0x7F800000
 
-    # dequant_scale_rounded is non-zero (max_val >= 1e-10)
     dequant_scale_rounded = dequant_scale_exponent.to(tl.float32, bitcast=True)
-    quant_scale = 1.0 / dequant_scale_rounded
+    quant_scale = tl.where(dequant_scale_rounded == 0, 0.0, 1.0 / dequant_scale_rounded)
 
     # Apply per-group scale
     f32_tensor = tl.reshape(
