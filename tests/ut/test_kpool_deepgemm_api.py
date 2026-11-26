@@ -107,7 +107,6 @@ def kpool(modules, patch_utils_module, monkeypatch, request):
                 TARGET,
                 name,
                 reason="Duplicate GLM logits override.",
-                affected_versions=">=0.33.0,<0.34.0",
                 remove_when="GLM has a platform logits registry.",
             )(replacement)
     return NS(provider=provider, patch=installed, platform=platform, calls=calls)

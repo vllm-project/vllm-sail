@@ -314,7 +314,7 @@ if ((NATIVE_REUSE == 0)); then
 from vllm_sail.native.toolchain import decide, probe
 from vllm_sail.compat import check_vllm_compatibility
 
-check_vllm_compatibility()
+check_vllm_compatibility(strict=True)
 decision = decide(probe())
 print(decision.reason)
 if not decision.build:
@@ -327,7 +327,7 @@ else
         python - <<'PY'
 from vllm_sail.compat import check_vllm_compatibility
 
-check_vllm_compatibility()
+check_vllm_compatibility(strict=True)
 print("native extensions supplied by verified donor wheel")
 PY
     ) 2>&1 | tee "${LOG_DIR}/native-preflight.log"

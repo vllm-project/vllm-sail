@@ -20,7 +20,7 @@ from tests.support.source import ROOT, definition, function
 def test_real_hisparse_admission_rejects_ppu_before_other_config_probes(
     upstream_source_root, enabled
 ):
-    """只执行真实配置中的完整 HiSparse 准入区段，不模拟整个配置初始化。"""
+    """Execute only the real HiSparse gating section from config without mocking full config initialization."""
     import ast
 
     node = definition(
@@ -58,7 +58,7 @@ def test_real_hisparse_admission_rejects_ppu_before_other_config_probes(
             hisparse_config=object() if enabled else None
         )
     )
-    # 其他配置字段故意缺失：PPU 拒绝必须先于并行/缓存与原生算子检查。
+    # Other config fields are intentionally omitted: PPU rejection must occur before parallel/cache/native checks.
     if enabled:
         with pytest.raises(
             ValueError, match="The current platform does not support HiSparse"

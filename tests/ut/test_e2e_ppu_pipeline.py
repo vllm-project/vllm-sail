@@ -802,7 +802,7 @@ def test_smoke_script_preserves_required_e2e_contract() -> None:
         "Application startup complete",
         "kill -0",
         "ppu-smi",
-        "check_vllm_compatibility(force=True)",
+        "check_vllm_compatibility(force=True, strict=True)",
         "ppu_wheel_manifest.py",
     ):
         assert marker in text, marker

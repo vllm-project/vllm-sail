@@ -30,14 +30,17 @@ is the editable file inside `csrc/upstream/`.
 
 Selection is explicit. A newly added upstream operation is not included until
 its source, binding and dependencies are reviewed and selected by the manifest.
-Excluded operations retain capability diagnostics. Moving an operation into
-the compiled set also requires device validation.
+Excluded operations retain capability diagnostics, except where
+[`vllm_sail/native/triton_ops.py`](../../vllm_sail/native/triton_ops.py) supplies
+a Triton implementation at the `torch.ops` boundary (for example,
+`merge_attn_states`). Moving an operation into the compiled set also requires
+device validation.
 
 ## Regenerate upstream kernels
 
 Use a vLLM checkout at the manifest's exact `upstream_ref`, matching
 [the verified pin](../../.github/vllm-main-verified.commit), and make sailify
-available. The supported release baseline is `v0.32.0`.
+available.
 
 ```bash
 export PYTHONPATH=/path/to/sailify${PYTHONPATH:+:$PYTHONPATH}
@@ -94,7 +97,7 @@ The wheel must contain these native libraries:
 | --- | --- |
 | `vllm_sail._upstream_C` | Selected upstream activation, normalization, quantization, cache and model operations |
 | `vllm_sail._upstream_moe_C` | Selected upstream MoE operations |
-| `vllm_sail._C` | Plugin sampler operations |
+| `vllm_sail._C` | Plugin BF16 sampler and Step-5 native prefill / DSA radix selector operations |
 | `vllm_sail._moe_C` | Plugin expert-parallel scatter operations |
 | `vllm_sail._cumem_allocator` | Host-only HGGC virtual memory allocator for Sleep Mode |
 

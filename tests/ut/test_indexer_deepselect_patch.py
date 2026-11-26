@@ -149,7 +149,6 @@ def test_preloaded_consumers_get_all_matching_replacements(
                 module,
                 name,
                 reason=p._REASON,
-                affected_versions=p._AFFECTED,
                 remove_when=p._REMOVE_WHEN,
             )(lambda *args: None)
     with pytest.raises(RuntimeError, match="already"):

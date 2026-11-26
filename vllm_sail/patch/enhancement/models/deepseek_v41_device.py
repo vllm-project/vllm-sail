@@ -9,7 +9,6 @@ from vllm.platforms import current_platform
 from vllm_sail.patch.utils import patch
 
 _REASON = "PPU reuses CUDA capability numbers but cannot run DSv4.1 NVIDIA-specific decode kernels."
-_AFFECTED = "upstream main e83d82a"
 _REMOVE_WHEN = "The upstream specialized decode predicates distinguish PPU from NVIDIA devices."
 _ampere = ampere.is_ampere
 _hopper = hopper.is_hopper
@@ -19,7 +18,6 @@ _hopper = hopper.is_hopper
     "vllm.models.deepseek_v41.nvidia.specialized_decode.ampere",
     "is_ampere",
     reason=_REASON,
-    affected_versions=_AFFECTED,
     remove_when=_REMOVE_WHEN,
 )
 def is_ampere() -> bool:
@@ -30,7 +28,6 @@ def is_ampere() -> bool:
     "vllm.models.deepseek_v41.nvidia.specialized_decode.hopper",
     "is_hopper",
     reason=_REASON,
-    affected_versions=_AFFECTED,
     remove_when=_REMOVE_WHEN,
 )
 def is_hopper() -> bool:
@@ -48,6 +45,5 @@ for _name, _original, _guarded in (
     ):
         if getattr(sys.modules.get(_path), _name, None) is _original:
             patch(
-                _path, _name, reason=_REASON,
-                affected_versions=_AFFECTED, remove_when=_REMOVE_WHEN,
+                _path, _name, reason=_REASON, remove_when=_REMOVE_WHEN,
             )(_guarded)

@@ -59,7 +59,7 @@ def test_compressor_real_projection_preserves_weight_and_fp32_mm_contract(
     upstream_source_root,
     fail,
 ):
-    """执行完整 projection；mm 边界保留原权重和 FP32 输出要求，不冒充数值验证。"""
+    """Execute full projection; mm boundary preserves original weight and FP32 output checks without claiming numerical validation."""
     weight, transposed, inputs, output = object(), object(), object(), object()
     error = RuntimeError("FP32-output mm unavailable")
     calls = []
@@ -168,7 +168,9 @@ def test_qwen35_real_budget_blocks_flashinfer_and_preserves_norm_fallback(
     modules("vllm.config.compilation", PassConfig=pass_config)
 
     def forbidden(*args, **kwargs):
-        pytest.fail("空 capability budget 不得创建 workspace 或启动融合 kernel")
+        pytest.fail(
+            "Empty capability budget must not create workspace or launch fused kernel"
+        )
 
     hidden = ns(
         is_cuda=True,
@@ -273,7 +275,7 @@ def test_qwen35_real_budget_blocks_flashinfer_and_preserves_norm_fallback(
 def test_step5_real_parent_tracks_complete_and_partial_reload(
     upstream_source_root, missing_shard
 ):
-    """执行完整类及真实父类 loader；存储拷贝由严格边界 double 记录。"""
+    """Execute full class and real base loader; storage copies are recorded by a strict boundary double."""
     ns = types.SimpleNamespace
     linear = upstream_source_root / "vllm/model_executor/layers/linear.py"
     model = upstream_source_root / "vllm/models/step5/nvidia/model.py"
@@ -455,7 +457,7 @@ def complete_warmup_contract(modules, provider, worker, platform, *, entered=Non
         "is_deep_gemm_supported": lambda: False,
         "has_flashinfer": lambda: False,
     }
-    # 纯替身没有 upstream helper；真实源码 provider 必须保留其集体决策实现。
+    # Pure doubles lack the upstream helper; the real source provider must keep its collective decision logic.
     provider.__dict__.setdefault("_warmup_flashinfer_attention", lambda worker: None)
     provider.__dict__.update(
         callbacks,
@@ -655,7 +657,7 @@ def test_compressor_constructor_registers_supported_warmup(
         nn=types.SimpleNamespace(Parameter=noop),
         _prefer_two_stage_compressor=lambda: False,
         MergedColumnParallelLinear=lambda *a, **k: pytest.fail(
-            "非 CPU 不应使用 BF16 输出 projection"
+            "Non-CPU must not use BF16 output projection"
         ),
         DeepseekV4CompressorKVScoreLinear=noop,
         RMSNorm=noop,
@@ -1386,7 +1388,7 @@ def test_fa_sink_combination_respects_ppu_fa3_and_fp8_gates(
 def test_fa_complete_copied_body_matches_upstream_outside_ppu_regions(
     upstream_source_root, name
 ):
-    """完整 AST 比较只归一化两处已声明的 PPU 差异，不刷新 drift baseline。"""
+    """Full AST comparison normalizes only two declared PPU differences without refreshing the drift baseline."""
     combination = name == "supports_combination"
     module = "flash_attn" if combination else "fa_utils"
     copied = definition(
@@ -1398,7 +1400,7 @@ def test_fa_complete_copied_body_matches_upstream_outside_ppu_regions(
     )
     copied.decorator_list = original.decorator_list = []
     if combination:
-        # sinks 放宽和 PPU 错误说明之外，所有旧及新增准入条件都应一致。
+        # Aside from relaxed sinks and PPU error wording, all existing and new gating conditions must match.
         for test in (
             "has_sink and device_capability < DeviceCapability(9, 0)",
             "kv_cache_dtype is not None and is_quantized_kv_cache(kv_cache_dtype) and not flash_attn_supports_kv_cache_dtype(kv_cache_dtype, head_size=head_size, head_size_v=getattr(cls, 'head_size_v', None), has_sinks=has_sink)",
@@ -1510,7 +1512,7 @@ def test_real_fa_fp8_helper_preserves_q_and_v_dimensions_and_ppu_gate(
 def test_bound_fa_combination_keeps_sm90_limits_and_real_v_dimension(
     modules, upstream_source_root, arch, q, v, kv, block, sparse, mm_prefix, expected
 ):
-    """真实 helper 和 bind_body 的公共调用；版本选择为边界替身，不证明 native FA 支持。"""
+    """Public call through real helper and bind_body; version selection is a boundary double and does not prove native FA support."""
     calls = []
     ppu = arch[0] == 8
 
@@ -1564,7 +1566,7 @@ def test_bound_fa_combination_keeps_sm90_limits_and_real_v_dimension(
 
 @pytest.fixture
 def lut_b_source_contract(modules, upstream_source_root):
-    """真实 LUT-B 类、准入与公共构造器；存储、Triton 计算和通信是显式边界。"""
+    """Real LUT-B class, gating, and public constructor; storage, Triton compute, and collectives are explicit boundaries."""
     ns = types.SimpleNamespace
     source = upstream_source_root / "vllm"
     moe = source / "model_executor/layers/fused_moe"
@@ -1584,7 +1586,9 @@ def lut_b_source_contract(modules, upstream_source_root):
     platform.is_device_capability = lambda value: exact(platform, value)
 
     def forbidden(*args, **kwargs):
-        pytest.fail("此源码边界不得启动 SM107 compute stub 或 tile 重排")
+        pytest.fail(
+            "This source boundary must not launch the SM107 compute stub or tile repack"
+        )
 
     torch = ns(ops=ns(_moe_C=ns(lut_b_moe_gemm=forbidden)))
     ops = ns(lut_b_moe_gemm=forbidden)
@@ -1887,7 +1891,7 @@ def test_lut_b_real_kernel_factory_preserves_directional_activation_format(
 def test_lut_b_real_post_load_keeps_weight_release_and_idempotency_contract(
     lut_b_source_contract, fail_at
 ):
-    """真实 get/zero_padding/release 链；量化、参数替换及 tensor 存储是记录边界。"""
+    """Real get/zero_padding/release chain; quantization, parameter replacement, and tensor storage are recording boundaries."""
     f = lut_b_source_contract
     ns = types.SimpleNamespace
     method = f.method(moe=f.config)
@@ -1939,7 +1943,7 @@ def test_lut_b_real_post_load_keeps_weight_release_and_idempotency_contract(
         assert raised.value is error
         assert not hasattr(layer, "_already_called_process_weights_after_loading")
         assert not hasattr(method, "moe_kernel")
-        # 上游逐笔替换；第二笔失败时保留第一笔结果，不伪造事务回滚。
+        # Upstream replaces item by item; if the second fails, the first stays applied without faking rollback.
         for index, name in enumerate(names):
             expected = converted[index] if index < fail_at else weights[index]
             assert layer._parameters[name] is expected
@@ -1988,7 +1992,7 @@ def test_lut_b_real_post_load_keeps_weight_release_and_idempotency_contract(
 def test_lut_b_real_requantization_consumes_shared_staging_in_source_order(
     lut_b_source_contract, modules, upstream_source_root, stored, fail_at
 ):
-    """真实 chunk/shared loader 生命周期；tensor 数值和量化 provider 为显式边界。"""
+    """Real chunk/shared loader lifecycle; tensor numerics and quant provider are explicit boundaries."""
     f = lut_b_source_contract
     ns = types.SimpleNamespace
     events, writes = [], []
@@ -2152,7 +2156,7 @@ def test_lut_b_real_requantization_consumes_shared_staging_in_source_order(
                 and getattr(layer, name) is parameter
             )
     if released:
-        # 上游先释放 shared staging 再校验 padding；失败不能伪造回滚或允许重复加载。
+        # Upstream releases shared staging before validating padding; failure must not fake rollback or allow reload.
         with pytest.raises(NotImplementedError, match="Reloading fused shared experts"):
             loader.load(layer, object(), object(), "w2_weight", "w2", 2, 2)
     assert method.requantization_source_parameters == source_parameters
@@ -2164,7 +2168,7 @@ def test_lut_b_real_requantization_consumes_shared_staging_in_source_order(
 def test_lut_b_real_emulation_qdq_preserves_dtype_routing_and_failure_identity(
     lut_b_source_contract, entry, fail_at
 ):
-    """执行真实 QDQ 与完整 emulation 方法；量化、存储和 Triton 计算为记录边界。"""
+    """Execute real QDQ and full emulation method; quantization, storage, and Triton compute are recording boundaries."""
     f = lut_b_source_contract
     ns = types.SimpleNamespace
     experts = f.emulation(f.config, f.namespace["FUSED_MOE_UNQUANTIZED_CONFIG"])
@@ -2286,7 +2290,7 @@ def test_qwen_hc_real_admission_avoids_compute_stub_and_keeps_linear_fallback(
     platform.is_device_capability = lambda value: capability == value
 
     def forbidden(*args, **kwargs):
-        pytest.fail("PPU 80/89 不得调用 SM100 compute stub")
+        pytest.fail("PPU 80/89 must not call the SM100 compute stub")
 
     torch_boundary = ns(
         bfloat16="bf16", ops=ns(_C=ns(qwen4_exp_hc_up_gate_mix=forbidden))

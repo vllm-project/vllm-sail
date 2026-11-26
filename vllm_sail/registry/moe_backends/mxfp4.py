@@ -6,8 +6,8 @@ from __future__ import annotations
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.config.kernel import MoEBackend
 from vllm.model_executor.layers.fused_moe.oracle import mxfp4 as oracle
-from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    QuantKey,
     kFp8DynamicTokenSym,
 )
 
@@ -15,7 +15,6 @@ from vllm_sail.patch.utils import patch
 from vllm_sail.registry.moe_backends._extend import extend_enum
 
 _MODULE = "vllm.model_executor.layers.fused_moe.oracle.mxfp4"
-_AFFECTED = ">=0.32.0,<0.33.0"
 _REMOVE_WHEN = (
     "upstream gains a register_moe_backend() extension point mirroring "
     "register_linear_kernel(), which would delete this patch."
@@ -74,7 +73,6 @@ _upstream_select_mxfp4_moe_backend = oracle.select_mxfp4_moe_backend
     _MODULE,
     "backend_to_kernel_cls",
     reason="The MXFP4 oracle cannot resolve plugin-owned PPU expert classes.",
-    affected_versions=_AFFECTED,
     remove_when=_REMOVE_WHEN,
 )
 def backend_to_kernel_cls(
@@ -133,7 +131,6 @@ def backend_to_kernel_cls(
         "is_supported_config() activation-format check rejects the standard "
         "candidate for a batched MoE and the batched one for a standard MoE."
     ),
-    affected_versions=_AFFECTED,
     remove_when=_REMOVE_WHEN,
 )
 def map_mxfp4_backend(runner_backend: MoEBackend) -> list[Mxfp4MoeBackend]:
@@ -161,7 +158,6 @@ def map_mxfp4_backend(runner_backend: MoEBackend) -> list[Mxfp4MoeBackend]:
     _MODULE,
     "_get_priority_backends_for_gpt_oss",
     reason="The GPT-OSS MXFP4 candidate list has no PPU DeepGEMM backends.",
-    affected_versions=_AFFECTED,
     remove_when=_REMOVE_WHEN,
 )
 def _get_priority_backends_for_gpt_oss() -> list[Mxfp4MoeBackend]:
@@ -177,7 +173,6 @@ def _get_priority_backends_for_gpt_oss() -> list[Mxfp4MoeBackend]:
     _MODULE,
     "_get_priority_backends",
     reason="The generic MXFP4 candidate list has no PPU DeepGEMM backends.",
-    affected_versions=_AFFECTED,
     remove_when=_REMOVE_WHEN,
 )
 def _get_priority_backends() -> list[Mxfp4MoeBackend]:
@@ -194,7 +189,6 @@ def _get_priority_backends() -> list[Mxfp4MoeBackend]:
     _MODULE,
     "_backend_activation_key",
     reason="PPU MXFP4 W4A4 backends need the kMxfp4Dynamic activation key.",
-    affected_versions=_AFFECTED,
     remove_when=_REMOVE_WHEN,
 )
 def _backend_activation_key(backend: Mxfp4MoeBackend) -> QuantKey | None:
@@ -228,7 +222,6 @@ _upstream_select_deepseek_v4 = oracle.select_deepseek_v4_mxfp4_moe_backend
     _MODULE,
     "select_deepseek_v4_mxfp4_moe_backend",
     reason="Preserve PPU W4A4/W4A16 selection through the 0.31 MXFP4 kernel factory.",
-    affected_versions=_AFFECTED,
     remove_when=_REMOVE_WHEN,
 )
 def select_deepseek_v4_mxfp4_moe_backend(config):

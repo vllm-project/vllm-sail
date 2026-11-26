@@ -38,14 +38,13 @@ from vllm_sail.patch.utils import patch
     "vllm.some_module",
     "target_function",
     reason="PPU's foo kernel needs bar; upstream hardcodes baz.",
-    affected_versions=">=0.32.0,<0.33.0",
     remove_when="upstream PR #12345 lands, which makes baz configurable.",
 )
 def target_function(arg: int) -> int:
     ...
 ```
 
-`reason`, `affected_versions` and `remove_when` are **mandatory** and validated at
+`reason` and `remove_when` are **mandatory** and validated at
 import. Generate an on-demand report from actual installation results with
 `python tools/patch_manifest.py`, or save it using `--output /tmp/patch-report.md`.
 Reports are not committed or used as test input. Each report covers only the
@@ -62,7 +61,7 @@ copying the upstream body:
 ```python
 _upstream = module.target          # captured before patching
 
-@patch("vllm.some_module", "target", reason=..., affected_versions=..., remove_when=...)
+@patch("vllm.some_module", "target", reason=..., remove_when=...)
 def target(*args, **kwargs):
     result = _upstream(*args, **kwargs)
     return adjust(result) if current_platform.is_ppu() else result
@@ -128,7 +127,7 @@ comparison workflow that distinguishes unresolved source from additive targets.
 decorated Triton object is what gets installed:
 
 ```python
-@patch("vllm.some_module", "target_kernel", reason=..., affected_versions=..., remove_when=...)
+@patch("vllm.some_module", "target_kernel", reason=..., remove_when=...)
 @triton.heuristics({...})
 @triton.autotune(configs=[...], key=[...])
 @triton.jit

@@ -17,7 +17,6 @@ from vllm_sail.patch.utils import PATCH_MARKER, patch
 _MODULE = "vllm.models.step5.nvidia.layernorm"
 _NAME = "_step5_rms_norm"
 _REASON = "Supported PPU inputs use the fused FP32 Step5 RMS reduction and scaling by default."
-_AFFECTED = ">=0.32.0,<0.33.0"
 _REMOVE_WHEN = "Upstream provides a PPU-compatible fused Step5 RMS core with the same contract."
 
 
@@ -56,8 +55,7 @@ def install() -> bool:
         return candidate.fused_rms_norm(x, weight, variance_epsilon, zero_centered, out_dtype)
 
     _step5_rms_norm._sail_step5_fused_norm = True
-    patch(_MODULE, _NAME, reason=_REASON, affected_versions=_AFFECTED,
-          remove_when=_REMOVE_WHEN)(_step5_rms_norm)
+    patch(_MODULE, _NAME, reason=_REASON,           remove_when=_REMOVE_WHEN)(_step5_rms_norm)
     return True
 
 

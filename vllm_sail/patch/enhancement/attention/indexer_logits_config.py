@@ -18,7 +18,6 @@ _original = _config._set_deepseek_indexer_logits_dtype
         "reduce in BF16. Resolve from the selected PPU cache format while "
         "preserving explicit dtype requests."
     ),
-    affected_versions=">=0.32.0,<0.33.0",
     remove_when="The model config default queries the selected indexer provider's reduction dtype.",
 )
 def _set_deepseek_indexer_logits_dtype(vllm_config):

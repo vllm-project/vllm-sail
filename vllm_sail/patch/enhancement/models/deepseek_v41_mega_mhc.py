@@ -35,7 +35,6 @@ logger = init_logger("vllm.vllm_sail.deepseek_v41_mega_mhc")
 
 _MODULE = "vllm.models.deepseek_v41.nvidia.ops.mega_mhc"
 _MHC_MODULE = "vllm.models.deepseek_v41.nvidia.ops.mhc"
-_AFFECTED = ">=0.32.0,<0.33.0"
 
 # The PPU Mega mHC kernel is generated for exactly one shape.
 _PPU_HIDDEN_SIZE = 5120
@@ -100,7 +99,6 @@ def _ppu_mega_mhc_supported(hidden_size: int, hc_mult: int) -> bool:
         "targets ZW-M890P (SM 8.9) instead of the upstream SM 10.x family and "
         "only supports the 5120-wide, hc_mult=4 configuration."
     ),
-    affected_versions=_AFFECTED,
     remove_when=(
         "The V4.1 mHC gate queries a platform-specific DeepGEMM capability "
         "contract instead of a hard-coded SM family."
@@ -123,7 +121,6 @@ def is_mega_mhc_supported(hidden_size: int, hc_mult: int) -> bool:
         "must rebind it to the PPU-aware wrapper that resolves the kernel in "
         "the PPU DeepGEMM build."
     ),
-    affected_versions=_AFFECTED,
     remove_when=(
         "The V4.1 mHC module resolves the Mega mHC kernel through a "
         "platform-aware provider instead of a by-value import."
@@ -152,7 +149,6 @@ def mega_mhc(*args: Any, **kwargs: Any) -> None:
         "silently-disabled Mega mHC path is indistinguishable from a kernel "
         "that was never reached."
     ),
-    affected_versions=_AFFECTED,
     remove_when=(
         "The V4.1 mHC dispatcher queries one platform-aware capability "
         "contract instead of evaluating the conditions inline."

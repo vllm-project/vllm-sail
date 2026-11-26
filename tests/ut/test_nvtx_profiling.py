@@ -737,7 +737,7 @@ def test_real_engine_steps_keep_aborts_after_wait_and_close_ranges(
     queued,
     outcome,
 ):
-    """执行完整真实 step；仅在 executor、scheduler 和诊断边界替身。"""
+    """Execute full real step with boundary doubles only for executor, scheduler, and diagnostics."""
     from collections import deque
     from concurrent.futures import Future
     from contextlib import contextmanager

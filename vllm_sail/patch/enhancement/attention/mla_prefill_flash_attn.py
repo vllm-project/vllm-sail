@@ -26,7 +26,6 @@ from vllm_sail.patch.utils import patch
 
 logger = init_logger(__name__)
 
-_AFFECTED = ">=0.32.0,<0.33.0"
 _MODULE = "vllm.v1.attention.backends.mla.prefill.flash_attn"
 
 try:
@@ -56,7 +55,6 @@ else:
             "is_ppu())` to the requires_v_padding condition; this delegates to "
             "the upstream __init__ and clears requires_v_padding for that case."
         ),
-        affected_versions=_AFFECTED,
         remove_when=(
             "upstream's requires_v_padding condition covers PPU's FA3, or PPU "
             "stops using FA3 for MLA prefill."

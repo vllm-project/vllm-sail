@@ -68,7 +68,7 @@ def function(relative, name, namespace):
 
 
 def load_moe_oracle(upstream, name, namespace):
-    """加载真实共享及具体 oracle 类；不证明模块导入、安装或设备行为。"""
+    """Load real shared and concrete oracle classes; does not prove module import, installation, or device behavior."""
     base_namespace = {
         "ABC": ABC,
         "Generic": Generic,

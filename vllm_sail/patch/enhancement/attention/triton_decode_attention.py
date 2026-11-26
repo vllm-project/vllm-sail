@@ -30,7 +30,6 @@ from vllm.v1.attention.ops.triton_decode_attention import (
 
 from vllm_sail.patch.utils import patch
 
-_AFFECTED = ">=0.32.0,<0.33.0"
 _MODULE = "vllm.v1.attention.ops.triton_decode_attention"
 
 
@@ -45,7 +44,6 @@ _MODULE = "vllm.v1.attention.ops.triton_decode_attention"
         "as-in-fork. Module-level platform flags from the fork are resolved "
         "lazily inside the body per plugin rules."
     ),
-    affected_versions=_AFFECTED,
     remove_when=(
         "upstream adopts the PPU block-size workaround and the ROCm tile-layout "
         "change, or the fork drops its architecture-specific tile edits."

@@ -20,8 +20,6 @@ from __future__ import annotations
 
 from vllm_sail.patch.utils import patch
 
-_AFFECTED = ">=0.32.0,<0.33.0"
-
 
 @patch(
     "vllm.platforms.interface",
@@ -34,7 +32,6 @@ _AFFECTED = ">=0.32.0,<0.33.0"
         "predicate must exist on the base Platform class for every platform, "
         "returning False for non-PPU platforms."
     ),
-    affected_versions=_AFFECTED,
     remove_when=(
         "vLLM gains a first-class way for an out-of-tree platform to declare a "
         "vendor identity that is queryable without an enum member (e.g. a "
@@ -60,7 +57,6 @@ def is_ppu(self) -> bool:
         "upstream change to the gate (e.g. to a capability probe) surfaces as a "
         "patch-drift failure rather than silently disabling sleep mode on PPU."
     ),
-    affected_versions=_AFFECTED,
     remove_when=(
         "upstream replaces the enum allow-list with a capability query that PPU "
         "answers correctly by inheritance."

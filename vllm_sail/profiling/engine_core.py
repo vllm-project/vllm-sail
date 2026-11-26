@@ -27,8 +27,6 @@ from vllm.v1.engine.core import EngineCore
 from vllm_sail.patch.utils import patch
 from vllm_sail.profiling import nvtx
 
-_AFFECTED = ">=0.32.0,<0.33.0"
-
 _upstream_init = EngineCore.__init__
 _upstream_step = EngineCore.step
 _upstream_step_with_batch_queue = EngineCore.step_with_batch_queue
@@ -42,7 +40,6 @@ _upstream_step_with_batch_queue = EngineCore.step_with_batch_queue
         "engine-level NVTX iteration ranges (fork engine/core.py hunk "
         "@@ -134). Installed only when VLLM_SAIL_NVTX_PROFILE is set."
     ),
-    affected_versions=_AFFECTED,
     remove_when=(
         "the opt-in NVTX subpackage (docs/developer_guide/architecture.md) "
         "is retired, or upstream adds native NVTX/tracing hooks to the v1 "
@@ -64,7 +61,6 @@ def engine_core_init(self, *args, **kwargs):
         "method, so the range additionally covers scheduling and empty "
         "steps (see module docstring)."
     ),
-    affected_versions=_AFFECTED,
     remove_when=(
         "the opt-in NVTX subpackage (docs/developer_guide/architecture.md) "
         "is retired, or upstream adds native NVTX/tracing hooks to the v1 "
@@ -91,7 +87,6 @@ def step(self):
         "right after execute_model; the wrapper spans the whole method (see "
         "module docstring)."
     ),
-    affected_versions=_AFFECTED,
     remove_when=(
         "the opt-in NVTX subpackage (docs/developer_guide/architecture.md) "
         "is retired, or upstream adds native NVTX/tracing hooks to the v1 "

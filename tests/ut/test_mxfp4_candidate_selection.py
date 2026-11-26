@@ -185,7 +185,7 @@ def test_plugin_does_not_copy_the_selector_body() -> None:
 def test_real_trtllm_mapping_keeps_mxfp8_candidate_and_probe_order(
     modules, real_oracle_source, backend_name, winner
 ):
-    """真实 upstream mapping 经 PPU 委托再由共享 oracle 探测；不证明专家设备准入。"""
+    """Real upstream mapping delegated through PPU and probed by the shared oracle; does not prove expert device gating."""
     candidates, probes, rejected = [], [], []
     for index, name in enumerate(
         (
@@ -370,7 +370,7 @@ def test_w4a4_candidate_rejection_warns_for_bf16_fallback(real_oracle_source):
 def test_ppu_candidates_do_not_treat_padded_standard_as_standard(
     real_oracle_source, explicit
 ):
-    """共享 oracle 必须拒绝两种 PPU 格式，且失败选择不产生回退成功警告。"""
+    """Shared oracle must reject both PPU formats without emitting a fallback-success warning on failed selection."""
     calls = []
 
     def supports(*args):

@@ -42,16 +42,15 @@ REASON = (
     "--moe-backend / --kernel-config CLI parity; the env-var knob "
     "VLLM_PPU_MOE_BACKEND bypasses validation and remains the primary knob."
 )
-AFFECTED_VERSIONS = ">=0.32.0,<0.33.0"
 REMOVE_WHEN = (
     "upstream gains a register_moe_backend() extension point mirroring "
     "register_linear_kernel (the plugin's #1 upstream RFC), or accepts the "
     "ppu_* members into the MoEBackend Literal."
 )
 
-#: (target, reason, affected versions, remove_when) for every patch installed
+#: (target, reason, remove_when) for every patch installed
 #: by this module. Read by the metadata-shape unit tests.
-METADATA = ((_TARGET, REASON, AFFECTED_VERSIONS, REMOVE_WHEN),)
+METADATA = ((_TARGET, REASON, REMOVE_WHEN),)
 
 _installed = False
 
@@ -64,7 +63,6 @@ def _record() -> None:
         PatchRecord(
             target=_TARGET,
             reason=REASON,
-            affected_versions=AFFECTED_VERSIONS,
             remove_when=REMOVE_WHEN,
             kind="value",
             was_missing=False,

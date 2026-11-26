@@ -39,7 +39,6 @@ if TYPE_CHECKING:
 
 _QMODULE = "vllm.model_executor.layers.quantization.mxfp4"
 _OMODULE = "vllm.model_executor.layers.fused_moe.oracle.mxfp4"
-AFFECTED_VERSIONS = ">=0.32.0,<0.33.0"
 
 # Explicit per-kind member lists, keyed by the kernel path each member takes:
 # "w4a16" reuses MARLIN's 16-bit activation packing, "w4a16mma" is DeepGEMM's
@@ -94,59 +93,50 @@ REMOVE_WHEN = (
 )
 
 METADATA = (
-    (f"{_QMODULE}.Mxfp4Config.__init__", REASON_CONFIG, AFFECTED_VERSIONS, REMOVE_WHEN),
+    (f"{_QMODULE}.Mxfp4Config.__init__", REASON_CONFIG, REMOVE_WHEN),
     (
         f"{_QMODULE}.Mxfp4Config.from_config",
         REASON_CONFIG,
-        AFFECTED_VERSIONS,
         REMOVE_WHEN,
     ),
     (
         f"{_QMODULE}.Mxfp4Config.get_quant_method",
         REASON_CONFIG,
-        AFFECTED_VERSIONS,
         REMOVE_WHEN,
     ),
     (
         f"{_QMODULE}.Mxfp4Config.apply_vllm_mapper",
         REASON_CONFIG,
-        AFFECTED_VERSIONS,
         REMOVE_WHEN,
     ),
     (
         f"{_QMODULE}.GptOssMxfp4MoEMethod.__init__",
         REASON_METHOD_SELECT,
-        AFFECTED_VERSIONS,
         REMOVE_WHEN,
     ),
     (
         f"{_QMODULE}.Mxfp4MoEMethod.get_fused_moe_quant_config",
         REASON_QUANT_CONFIG,
-        AFFECTED_VERSIONS,
         REMOVE_WHEN,
     ),
     (
         f"{_OMODULE}.make_mxfp4_moe_quant_config",
         REASON_ORACLE,
-        AFFECTED_VERSIONS,
         REMOVE_WHEN,
     ),
     (
         f"{_OMODULE}.convert_weight_to_mxfp4_moe_kernel_format",
         REASON_ORACLE,
-        AFFECTED_VERSIONS,
         REMOVE_WHEN,
     ),
     (
         f"{_OMODULE}.convert_gpt_oss_weight_to_mxfp4_moe_kernel_format",
         REASON_ORACLE,
-        AFFECTED_VERSIONS,
         REMOVE_WHEN,
     ),
     (
         f"{_OMODULE}.mxfp4_round_up_hidden_size_and_intermediate_size",
         REASON_ORACLE,
-        AFFECTED_VERSIONS,
         REMOVE_WHEN,
     ),
 )
@@ -199,7 +189,6 @@ def install() -> None:
         _QMODULE,
         "Mxfp4Config.__init__",
         reason=REASON_CONFIG,
-        affected_versions=AFFECTED_VERSIONS,
         remove_when=REMOVE_WHEN,
     )
     def _config_init(
@@ -214,7 +203,6 @@ def install() -> None:
         _QMODULE,
         "Mxfp4Config.from_config",
         reason=REASON_CONFIG,
-        affected_versions=AFFECTED_VERSIONS,
         remove_when=REMOVE_WHEN,
     )
     def _from_config(cls, config):
@@ -241,7 +229,6 @@ def install() -> None:
         _QMODULE,
         "Mxfp4Config.get_quant_method",
         reason=REASON_CONFIG,
-        affected_versions=AFFECTED_VERSIONS,
         remove_when=REMOVE_WHEN,
     )
     def _get_quant_method(self, layer: torch.nn.Module, prefix: str):
@@ -302,7 +289,6 @@ def install() -> None:
         _QMODULE,
         "Mxfp4Config.apply_vllm_mapper",
         reason=REASON_CONFIG,
-        affected_versions=AFFECTED_VERSIONS,
         remove_when=REMOVE_WHEN,
     )
     def _apply_vllm_mapper(self, hf_to_vllm_mapper) -> None:
@@ -343,7 +329,6 @@ def install() -> None:
         _QMODULE,
         "GptOssMxfp4MoEMethod.__init__",
         reason=REASON_METHOD_SELECT,
-        affected_versions=AFFECTED_VERSIONS,
         remove_when=REMOVE_WHEN,
     )
     def _gptoss_init(self, moe) -> None:
@@ -357,7 +342,6 @@ def install() -> None:
         _QMODULE,
         "Mxfp4MoEMethod.get_fused_moe_quant_config",
         reason=REASON_QUANT_CONFIG,
-        affected_versions=AFFECTED_VERSIONS,
         remove_when=REMOVE_WHEN,
     )
     def _get_fused_moe_quant_config(self, layer):
@@ -379,7 +363,6 @@ def install() -> None:
         _OMODULE,
         "make_mxfp4_moe_quant_config",
         reason=REASON_ORACLE,
-        affected_versions=AFFECTED_VERSIONS,
         remove_when=REMOVE_WHEN,
     )
     def _make_quant_config(
@@ -533,7 +516,6 @@ def install() -> None:
         _OMODULE,
         "convert_weight_to_mxfp4_moe_kernel_format",
         reason=REASON_ORACLE,
-        affected_versions=AFFECTED_VERSIONS,
         remove_when=REMOVE_WHEN,
     )
     def _convert_weight(
@@ -607,7 +589,6 @@ def install() -> None:
         _OMODULE,
         "convert_gpt_oss_weight_to_mxfp4_moe_kernel_format",
         reason=REASON_ORACLE,
-        affected_versions=AFFECTED_VERSIONS,
         remove_when=REMOVE_WHEN,
     )
     def _convert_gpt_oss_weight(
@@ -679,7 +660,6 @@ def install() -> None:
         _OMODULE,
         "mxfp4_round_up_hidden_size_and_intermediate_size",
         reason=REASON_ORACLE,
-        affected_versions=AFFECTED_VERSIONS,
         remove_when=REMOVE_WHEN,
     )
     def _round_up_sizes(

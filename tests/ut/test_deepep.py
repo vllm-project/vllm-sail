@@ -74,7 +74,7 @@ def test_replacements_accept_upstream_keywords(
 
 @pytest.mark.upstream_source
 def test_complete_factory_body_diff_is_limited_to_ppu_dispatch(upstream_source_root):
-    """比较完整复制体，只还原已记录的 PPU LL dispatch 差异。"""
+    """Compare the full copied body, reverting only documented PPU LL dispatch differences."""
     path = ROOT / "vllm_sail/patch/enhancement/deepep.py"
     node = definition(path, "_maybe_make_prepare_finalize_body")
     source = "\n".join(path.read_text().splitlines()[node.lineno - 1 : node.end_lineno])
@@ -111,7 +111,7 @@ def test_complete_factory_body_diff_is_limited_to_ppu_dispatch(upstream_source_r
 def test_mori_epv2_preserves_expert_partition_and_rank_offset(
     upstream_source_root, upstream, experts
 ):
-    """复制体须采用新 EPv2 路由，并在分区不整除时拒绝创建 handle。"""
+    """Copied body must use the new EPv2 routing and refuse handle creation on indivisible partitions."""
     calls = []
     handle = object()
     manager = NS(world_size=4, rank=2)
@@ -169,7 +169,7 @@ def test_mori_epv2_preserves_expert_partition_and_rank_offset(
 def test_two_sided_factory_uses_real_constructor_dimensions(
     upstream_source_root, copied, max_tokens, dispatchers
 ):
-    """真实 factory 和完整 constructor；通信 manager 是边界，不提供设备证据。"""
+    """Real factory and full constructor; communication manager is a boundary double and provides no device evidence."""
     calls = []
     communication = object()
 
@@ -248,7 +248,7 @@ _ACTIVATION_FORMAT_CASES = [
 def test_real_shared_oracle_factory_observes_installed_ppu_rebinding(
     modules, upstream_source_root, preloaded, experts_format, pf_format, compatible
 ):
-    """真实共享 helper 和格式关系；专家构造是边界，不宣称 PPU 支持 padding。"""
+    """Real shared helper and format relation; expert construction is a boundary double and does not claim PPU padding support."""
     formats = function(
         upstream_source_root / "vllm/model_executor/layers/fused_moe/modular_kernel.py",
         "FusedMoEActivationFormat",
@@ -263,7 +263,7 @@ def test_real_shared_oracle_factory_observes_installed_ppu_rebinding(
     )
 
     def original(*args, **kwargs):
-        pytest.fail("预加载共享 oracle 必须观察已安装的 PPU factory")
+        pytest.fail("Preloaded shared oracle must observe the installed PPU factory")
 
     def local_factory(monolithic):
         factory_calls.append(monolithic)
@@ -338,7 +338,7 @@ def test_real_shared_oracle_factory_observes_installed_ppu_rebinding(
 def test_real_kernel_checks_final_format_after_prepare_setup(
     upstream_source_root, experts_format, pf_format, compatible
 ):
-    """真实末端检查必须使用 post-init 后格式；不执行通信或专家计算。"""
+    """Real terminal check must use the post-init format; does not run collectives or expert compute."""
     path = (
         upstream_source_root / "vllm/model_executor/layers/fused_moe/modular_kernel.py"
     )
@@ -383,7 +383,7 @@ def test_real_kernel_checks_final_format_after_prepare_setup(
 def test_real_fallback_format_requires_both_runtime_branches(
     upstream_source_root, primary_format, fallback_format, expected
 ):
-    """真实 fallback 格式关系取共同能力，不宣称 Standard 专家支持 padding。"""
+    """Real fallback format relation intersects capabilities without claiming Standard expert padding support."""
     root = upstream_source_root / "vllm/model_executor/layers/fused_moe"
     formats = function(
         root / "modular_kernel.py", "FusedMoEActivationFormat", {"Enum": Enum}

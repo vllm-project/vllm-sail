@@ -28,8 +28,6 @@ from vllm.utils.torch_utils import aux_stream
 
 from vllm_sail.patch.utils import patch
 
-_AFFECTED = ">=0.32.0,<0.33.0"
-
 # Captured before patching so every replacement can fall back to upstream.
 _upstream_runner_init = LatentMoERunner.__init__
 _upstream_select_tail_tier = LatentMoERunner._select_tail_tier
@@ -46,7 +44,6 @@ _upstream_transform_forward = KimiRoutedOutputTransform.forward
         "method. Record whether up_proj is quantized on PPU; delegates to "
         "upstream elsewhere."
     ),
-    affected_versions=_AFFECTED,
     remove_when=(
         "LatentMoERunner derives tail eligibility from the up-projection's "
         "quant method instead of assuming a plain weight."
@@ -75,7 +72,6 @@ def runner_init(self, *args, **kwargs) -> None:
         "directly; force tier 1, the only tier that goes through the layer's "
         "quant method. Delegates to upstream for an unquantized weight."
     ),
-    affected_versions=_AFFECTED,
     remove_when=(
         "LatentMoERunner selects its tail from the up-projection quant method, "
         "so a quantized weight never reaches the raw-weight tiers."
@@ -99,7 +95,6 @@ def select_tail_tier(self, fused_output, shared_output):
         "method owns the GEMM. Quantization forces every batch onto this tier, "
         "so the small-batch token guard no longer applies."
     ),
-    affected_versions=_AFFECTED,
     remove_when=(
         "upstream runs the tier-1 up-projection through the linear layer (or "
         "its quant method) instead of torch.mm on the raw weight."
@@ -144,7 +139,6 @@ def overlap_allreduce_tail(self, fused_output, shared_output, trunc_size):
         "PPU, call the linear layer for a quantized weight and keep the "
         "epilogue otherwise."
     ),
-    affected_versions=_AFFECTED,
     remove_when=(
         "upstream folds the residual through the layer's quant method, or "
         "exposes an equivalent epilogue for a quantized up-projection."

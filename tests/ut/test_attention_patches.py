@@ -19,7 +19,6 @@ from pathlib import Path
 import pytest
 
 import vllm_sail.patch as patch_pkg
-from tests.support.upstream import SUPPORTED_RANGE
 from vllm_sail.patch.utils import PATCH_MARKER, PATCH_REGISTRY
 
 
@@ -145,7 +144,6 @@ def test_patch_metadata_is_complete(installed) -> None:
     assert installed, "no patches installed despite vLLM being importable"
     for record in installed:
         assert record.reason.strip(), record.target
-        assert record.affected_versions.strip(), record.target
         assert record.remove_when.strip(), record.target
 
 
@@ -506,7 +504,6 @@ def test_phase4_metadata_shape(installed) -> None:
     ]
     assert len(records) >= 30, [r.target for r in records]
     for record in records:
-        assert record.affected_versions == SUPPORTED_RANGE, record.target
         assert record.reason.strip(), record.target
         assert record.remove_when.strip(), record.target
         assert record.remove_when.strip().lower() != "todo", record.target

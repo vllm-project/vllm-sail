@@ -13,7 +13,6 @@ from vllm.platforms import current_platform
 from vllm_sail.patch.utils import patch
 from vllm_sail.utils import deep_select as _sail
 
-_AFFECTED = ">=0.32.0,<0.33.0"
 _MODULE = "vllm.model_executor.layers.indexer_topk"
 _SPARSE_MODULE = "vllm.model_executor.kernels.attention.dsa.sparse_mqa_logits"
 _REASON = "PPU SM89 uses the SAIL BF16 DeepSelect wheel instead of vllm._deepselect_C."
@@ -30,7 +29,6 @@ _original_resolve = _topk.SparseIndexerTopk.resolve_backend
     _SPARSE_MODULE,
     "has_deep_select",
     reason=_REASON,
-    affected_versions=_AFFECTED,
     remove_when=_REMOVE_WHEN,
 )
 def has_deep_select() -> bool:
@@ -43,7 +41,6 @@ def has_deep_select() -> bool:
     _MODULE,
     "get_deep_select_stride_requirement",
     reason=_REASON,
-    affected_versions=_AFFECTED,
     remove_when=_REMOVE_WHEN,
 )
 def get_deep_select_stride_requirement() -> tuple[int, int]:
@@ -58,7 +55,6 @@ def get_deep_select_stride_requirement() -> tuple[int, int]:
     _MODULE,
     "is_deep_select_supported",
     reason=_REASON,
-    affected_versions=_AFFECTED,
     remove_when=_REMOVE_WHEN,
 )
 def is_deep_select_supported(input: torch.Tensor, topk: int) -> bool:
@@ -71,7 +67,6 @@ def is_deep_select_supported(input: torch.Tensor, topk: int) -> bool:
     _MODULE,
     "deep_select_topk",
     reason=_REASON,
-    affected_versions=_AFFECTED,
     remove_when=_REMOVE_WHEN,
 )
 def deep_select_topk(
@@ -101,7 +96,6 @@ def deep_select_topk(
     _MODULE,
     "SparseIndexerTopk.resolve_backend",
     reason=_REASON,
-    affected_versions=_AFFECTED,
     remove_when=_REMOVE_WHEN,
 )
 def resolve_backend(self, logits, topk_tokens, num_rows):
@@ -166,7 +160,6 @@ def _rebind_consumers():
                     name,
                     replacement.__name__,
                     reason=_REASON,
-                    affected_versions=_AFFECTED,
                     remove_when=_REMOVE_WHEN,
                 )(replacement)
 

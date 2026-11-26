@@ -174,7 +174,7 @@ def test_direct_reload_guard_is_lazy_and_explicit(modules, mode):
 def test_direct_reload_fails_before_allocation_or_one_shot_return(
     modules, file, name, args, converted
 ):
-    """真实入口在读取权重、分配内存或 converted 提前返回前拒绝 direct。"""
+    """Real entrypoint rejects direct mode before reading weights, allocating memory, or returning early."""
     modules("vllm", envs=SimpleNamespace(VLLM_RELOAD_MODE="direct"))
     reject = function(
         QUANT + "online_conversion/loading.py", "reject_direct_reload", {}

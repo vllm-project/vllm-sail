@@ -40,7 +40,6 @@ from vllm.models.step5.nvidia.ops import qkv_indexer_norm_rope as _joint
 from vllm_sail.models.step5.ops import soft_fp8
 from vllm_sail.patch.utils import patch
 
-_AFFECTED = ">=0.32.0,<0.33.0"
 _REASON = (
     "PPU 1.0 (SM 8.0) Triton lacks FP8 instructions and arguments; Step5 indexer "
     "mode 0 stores E4M3 as bytes with software conversion, and mode 1 stores "
@@ -57,7 +56,6 @@ def _install(module: str, name: str, replacement) -> None:
         module,
         name,
         reason=_REASON,
-        affected_versions=_AFFECTED,
         remove_when=_REMOVE_WHEN,
     )(replacement)
 

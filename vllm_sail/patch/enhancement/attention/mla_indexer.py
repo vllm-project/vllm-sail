@@ -55,7 +55,6 @@ from vllm.v1.attention.backends.mla.indexer import (
 import vllm_sail.utils.deep_gemm as _ppu_deep_gemm
 from vllm_sail.patch.utils import patch, patch_value
 
-_AFFECTED = ">=0.32.0,<0.33.0"
 _MODULE = "vllm.v1.attention.backends.mla.indexer"
 
 #: Builder currently inside ``build``. The rebound paged-MQA-logits metadata
@@ -72,7 +71,6 @@ patch_value(
         "Fork constant: thread blocks per compute unit used by PPU DeepGEMM "
         "when sizing the fp4 indexer scheduler-metadata buffer."
     ),
-    affected_versions=_AFFECTED,
     remove_when="upstream defines the constant itself (patch_value becomes a no-op).",
 )
 
@@ -178,7 +176,6 @@ patch(
         "metadata correct in upstream's single fill. The CUDA helper has no "
         "such parameter."
     ),
-    affected_versions=_AFFECTED,
     remove_when=(
         "vllm.utils.deep_gemm dispatches on current_platform internally, or "
         "upstream accepts a DeepGEMM backend registry."
@@ -198,7 +195,6 @@ _upstream_supports_varlen_paged_mqa_logits = (
         "SAIL SM89 accepts device-built varlen query rows and request IDs "
         "through the PPU next_n=1 paged-logits adapter, without an SM100 gate."
     ),
-    affected_versions=_AFFECTED,
     remove_when="The indexer delegates varlen query-row support to the platform.",
 )
 def _supports_varlen_paged_mqa_logits() -> bool:
@@ -231,7 +227,6 @@ patch(
     _MODULE,
     "_supports_flattened_device_query_lens",
     reason="Use device query lengths for adaptive V4.1 verification with SAIL fixed-length paged logits.",
-    affected_versions=_AFFECTED,
     remove_when="The indexer delegates flattened device-query-length support to the platform.",
 )(_supports_flattened_device_query_lens)
 
@@ -247,7 +242,6 @@ _upstream_uses_fp4 = _indexer_module.dsa_indexer_uses_fp4
         "SM100. On sm_89, only V4/V4.1 have MXFP4 producers and default "
         "indexer_kv_dtype to mxfp4."
     ),
-    affected_versions=_AFFECTED,
     remove_when="The indexer exposes a platform capability hook.",
 )
 def dsa_indexer_uses_fp4(vllm_config):
@@ -300,7 +294,6 @@ for _consumer_name in (
             _consumer_name,
             "dsa_indexer_uses_fp4",
             reason="Preloaded indexer consumers must use SAIL's MXFP4 capability.",
-            affected_versions=_AFFECTED,
             remove_when="Consumers resolve the helper through its provider module.",
         )(dsa_indexer_uses_fp4)
 
@@ -365,7 +358,6 @@ patch(
         "buffer for fp4 paged logits. Delegates to the upstream __init__ so "
         "upstream buffer/refactor drift cannot break this plugin."
     ),
-    affected_versions=_AFFECTED,
     remove_when="upstream grows PPU branches in the DSA indexer metadata builder.",
 )(_builder_init_wrapper)
 
@@ -401,7 +393,6 @@ def _decode_request_ids(context_lens, request_lens, flattened):
         "with ones without publishing indices, so preserve ownership from the "
         "separate per-request counts before the metadata call."
     ),
-    affected_versions=_AFFECTED,
     remove_when="The non-varlen indexer decode preparation publishes request IDs to metadata generation.",
 )
 def _prepare_decode_wrapper(
@@ -486,7 +477,6 @@ patch(
         "(including TP prefill row sharding), so "
         "upstream drift cannot break this plugin."
     ),
-    affected_versions=_AFFECTED,
     remove_when=(
         "upstream exposes the builder to the paged metadata helper without "
         "module-level context."
@@ -518,7 +508,6 @@ patch(
         "metadata_extra; otherwise the fp4 scheduler metadata would be "
         "refreshed in the fp8 layout and upstream's shape assertion would fail."
     ),
-    affected_versions=_AFFECTED,
     remove_when=(
         "upstream exposes the builder to the paged metadata helper without "
         "module-level context."

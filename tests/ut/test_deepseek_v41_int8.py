@@ -834,13 +834,12 @@ def test_patch_marker_metadata_and_duplicate_rejection(installed):
     assert getattr(fn, state.utils.PATCH_MARKER)[target] is state.original_q
     records = [r for r in state.utils.PATCH_REGISTRY if r.target.startswith(BASE)]
     assert len(records) >= 10
-    assert all(r.reason and r.affected_versions and r.remove_when for r in records)
+    assert all(r.reason and r.remove_when for r in records)
     with pytest.raises(RuntimeError, match="already patched"):
         state.utils.patch(
             BASE + ".common.ops",
             "fused_indexer_q_rope_quant",
             reason=state.patch.REASON,
-            affected_versions=state.patch.AFFECTED_VERSIONS,
             remove_when=state.patch.REMOVE_WHEN,
         )(fn)
 

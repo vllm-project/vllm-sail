@@ -137,7 +137,6 @@ def builder_factory(modules, patch_utils_module):
                     TARGET,
                     name,
                     reason="Reject a second query-layout override.",
-                    affected_versions=">=0.33.0,<0.34.0",
                     remove_when="The platform exposes query-layout capabilities.",
                 )(lambda: False)
         return provider.DeepseekV32IndexerMetadataBuilder, calls
@@ -150,11 +149,13 @@ def builder_factory(modules, patch_utils_module):
 def test_fused_mqa_topk_schema_does_not_select_sm100_on_ppu(
     upstream_source_root, capability
 ):
-    """CUDA 兼容身份与 stub schema 不能绕过 SM100 的真实设备门控。"""
+    """CUDA-compatible identity and stub schemas must not bypass real SM100 device gating."""
 
     class Ops:
         def __getattr__(self, name):
-            raise AssertionError("PPU 不应探测或调用未编译的 fused MQA op")
+            raise AssertionError(
+                "PPU must not probe or invoke the uncompiled fused MQA op"
+            )
 
     available = function(
         upstream_source_root

@@ -240,7 +240,7 @@ def test_humming_delegation_stages_canonical_parameters_and_preserves_loader_ali
     canonical = []
 
     def convert(target, **kwargs):
-        # 在实际 Humming 计算边界使用 double；staging 与 alias 工具来自真实 pin。
+        # Use a double at the Humming compute boundary; staging and alias utilities come from the real pin.
         assert target is layer
         for name, tensor in zip(names, canonical, strict=True):
             assert getattr(layer, name) is held[name]

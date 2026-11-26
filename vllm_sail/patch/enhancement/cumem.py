@@ -6,7 +6,6 @@ from vllm_sail.patch.utils import patch
 _MODULE = "vllm.device_allocator.cumem"
 _PATCH = {
     "reason": "vLLM's empty wheel needs native HGGC pluggable allocation on PPU.",
-    "affected_versions": ">=0.33.0,<0.34.0",
     "remove_when": "vLLM provides a platform hook for tagged memory allocators.",
 }
 
@@ -31,7 +30,6 @@ def install():
         "vllm.v1.executor.abstract",
         "Executor.sleep",
         reason="A partially suspended PPU must wake its pools before serving again.",
-        affected_versions=_PATCH["affected_versions"],
         remove_when="Executor.sleep records sleeping tags when the worker RPC fails.",
     )
     def sleep(self, level=1):

@@ -427,7 +427,7 @@ def _assert_checkpoint_identity(
     if golden_tail != actual_tail:
         raise AssertionError(
             f"golden checkpoint mismatch: golden {golden_path} "
-            f"来自 {golden_tail!r}，本次运行 {actual_tail!r}，"
-            "基准与 checkpoint 不匹配；如属有意换基线请先删除"
-            "旧 golden 或用 --update-golden 重采。"
+            f"is from {golden_tail!r}, current run uses {actual_tail!r}, "
+            "baseline does not match checkpoint; if switching baselines intentionally, "
+            "delete the old golden or re-capture with --update-golden."
         )

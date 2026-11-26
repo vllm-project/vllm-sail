@@ -3,9 +3,9 @@
 
 Adapted from vLLM-MetaX's ``vllm_metax/patch/utils.py``, with three additions:
 
-1. **Mandatory metadata.** ``reason``, ``affected_versions`` and ``remove_when``
-   are required keyword arguments, validated at import time. The on-demand
-   ``tools/patch_manifest.py`` report displays the installed records' metadata.
+1. **Mandatory metadata.** ``reason`` and ``remove_when`` are required keyword
+   arguments, validated at import time. The on-demand ``tools/patch_manifest.py``
+   report displays the installed records' metadata.
 2. **A registry.** Every installed patch is recorded in :data:`PATCH_REGISTRY`
    so tooling can enumerate patches, and so the drift harness
    (``tools/check_patch_drift.py``) can hash the upstream source each patch
@@ -46,7 +46,6 @@ class PatchRecord:
     target: str
     """Fully-qualified target, e.g. ``vllm.model_executor.custom_op.CustomOp.forward_ppu``."""
     reason: str
-    affected_versions: str
     remove_when: str
     kind: str
     """``"module"`` or ``"class"``."""
@@ -60,20 +59,16 @@ class PatchRecord:
 PATCH_REGISTRY: list[PatchRecord] = []
 
 
-def _validate_metadata(
-    target: str, reason: str, affected_versions: str, remove_when: str
-) -> None:
+def _validate_metadata(target: str, reason: str, remove_when: str) -> None:
     for name, value in (
         ("reason", reason),
-        ("affected_versions", affected_versions),
         ("remove_when", remove_when),
     ):
         if not isinstance(value, str) or not value.strip():
             raise ValueError(
                 f"Patch for {target} is missing required metadata {name!r}. "
-                "Every patch must document why it exists, which vLLM versions "
-                "it applies to, and the condition under which it can be "
-                "deleted. See vllm_sail/patch/README.md."
+                "Every patch must document why it exists and the condition "
+                "under which it can be deleted. See vllm_sail/patch/README.md."
             )
 
 
@@ -164,7 +159,6 @@ def _patch_module_attribute(
     allow_missing: bool,
     allow_wrapping: bool,
     reason: str,
-    affected_versions: str,
     remove_when: str,
 ) -> Callable[[PatchTarget], PatchTarget]:
     """Replace a module-level function, class, Triton kernel, or other object.
@@ -187,7 +181,7 @@ def _patch_module_attribute(
 
         target_module = importlib.import_module(target_module_path)
         full_target_name = f"{target_module_path}.{resolved_attribute_name}"
-        _validate_metadata(full_target_name, reason, affected_versions, remove_when)
+        _validate_metadata(full_target_name, reason, remove_when)
 
         original_attribute = _read_original_attribute(
             target_module, resolved_attribute_name, full_target_name, allow_missing
@@ -211,7 +205,6 @@ def _patch_module_attribute(
             PatchRecord(
                 target=full_target_name,
                 reason=reason,
-                affected_versions=affected_versions,
                 remove_when=remove_when,
                 kind="module",
                 was_missing=original_attribute is _MISSING,
@@ -282,7 +275,6 @@ def _patch_class_method(
     allow_missing: bool,
     allow_wrapping: bool,
     reason: str,
-    affected_versions: str,
     remove_when: str,
 ) -> Callable[[PatchTarget], PatchTarget]:
     """Replace a class method or property through a dotted attribute path."""
@@ -297,7 +289,7 @@ def _patch_class_method(
         target_module = importlib.import_module(target_module_path)
         target_class = _resolve_target_class(target_module, target_class_path)
         full_target_name = f"{target_module_path}.{target_attribute_path}"
-        _validate_metadata(full_target_name, reason, affected_versions, remove_when)
+        _validate_metadata(full_target_name, reason, remove_when)
 
         original_attribute = _read_original_attribute(
             target_class, target_attribute_name, full_target_name, allow_missing
@@ -339,7 +331,6 @@ def _patch_class_method(
             PatchRecord(
                 target=full_target_name,
                 reason=reason,
-                affected_versions=affected_versions,
                 remove_when=remove_when,
                 kind="class",
                 was_missing=original_attribute is _MISSING,
@@ -356,7 +347,6 @@ def patch(
     target_attribute_name: str | None = None,
     *,
     reason: str,
-    affected_versions: str,
     remove_when: str,
     allow_missing: bool = False,
     allow_wrapping: bool = False,
@@ -371,8 +361,6 @@ def patch(
             ``"TargetClass.method"`` uses the class-attribute path, which
             resolves the class internally and preserves method descriptors.
         reason: Why this patch exists. Required.
-        affected_versions: vLLM version or range the patch applies to, e.g.
-            ``">=0.32.0,<0.33.0"``. Required.
         remove_when: A verifiable condition under which this patch can be
             deleted, e.g. an upstream PR or capability. Required.
         allow_missing: Permit the target not to exist yet. Use only when
@@ -399,7 +387,6 @@ def patch(
             allow_missing=allow_missing,
             allow_wrapping=allow_wrapping,
             reason=reason,
-            affected_versions=affected_versions,
             remove_when=remove_when,
         )
     return _patch_module_attribute(
@@ -408,7 +395,6 @@ def patch(
         allow_missing=allow_missing,
         allow_wrapping=allow_wrapping,
         reason=reason,
-        affected_versions=affected_versions,
         remove_when=remove_when,
     )
 
@@ -419,7 +405,6 @@ def patch_value(
     value: Any,
     *,
     reason: str,
-    affected_versions: str,
     remove_when: str,
     allow_missing: bool = False,
 ) -> Any:
@@ -438,7 +423,7 @@ def patch_value(
     """
     target_module = importlib.import_module(target_module_path)
     full_target_name = f"{target_module_path}.{target_attribute_name}"
-    _validate_metadata(full_target_name, reason, affected_versions, remove_when)
+    _validate_metadata(full_target_name, reason, remove_when)
 
     original_attribute = _read_original_attribute(
         target_module, target_attribute_name, full_target_name, allow_missing
@@ -458,7 +443,6 @@ def patch_value(
         PatchRecord(
             target=full_target_name,
             reason=reason,
-            affected_versions=affected_versions,
             remove_when=remove_when,
             kind="value",
             was_missing=original_attribute is _MISSING,
