@@ -103,8 +103,9 @@ jobs runs PPU inference or `tests/e2e`.
 Upstream reuse runs on a single M890 card in the authorized PPU pipeline, not
 automatically on PRs or a nightly schedule. It uses the runner-configured Docker
 runtime and the validated CI wheels with the SAIL plugin enabled, preserves the
-image's torch/torchvision stack and installs only the dedicated
-`requirements/upstream-reuse.txt` tooling. `requirements/dev.txt` stays unchanged.
+image's torch/torchvision stack. It reuses the image's pytest, tblib, Numba and
+Transformers when they satisfy the test environment. Older images get any
+missing packages installed under the image constraints.
 
 The container reads `HF_HOME=/nas_aisw/datasets/hf_cache` in offline mode. The
 cache and `/nas_aisw/datasets/checkpoints/LLM` are mounted read-only at their host
