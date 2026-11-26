@@ -1,0 +1,52 @@
+name: Verify tagged PPU build image identity
+on:
+  push:
+    branches: [codex/verify-tagged-wheel-image-403]
+permissions: {}
+cache-mode: none
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    container:
+      image: download.t-head.cn/docker_test/vllm:v0.34.0-20261126-e48a294
+      credentials:
+        username: ${{ secrets.RELEASE_USERNAME }}
+        password: ${{ secrets.RELEASE_TOKEN }}
+    env:
+      VLLM_SAIL_BUILD_IMAGE: download.t-head.cn/docker_test/vllm:v0.34.0-20261126-e48a294
+    steps:
+      - name: Record actual image ID for a tagged build image
+        id: build-image-id
+        if: ${{ !contains(env.VLLM_SAIL_BUILD_IMAGE, '@') }}
+        continue-on-error: true
+        shell: bash
+        env:
+          CONTAINER_ID: ${{ job.container.id }}
+        run: |
+          set -euo pipefail
+          [[ "$CONTAINER_ID" =~ ^[0-9a-f]{64}$ ]]
+          # The hosted runner mounts its Docker socket into the job container.
+          # Inspect the running container by ID; a tag may have moved since pull.
+          curl --fail --silent --show-error --max-time 10 --noproxy '*' \
+            --unix-socket /var/run/docker.sock --get \
+            --data-urlencode "filters={\"id\":[\"$CONTAINER_ID\"]}" \
+            http://localhost/containers/json | python3 -c '
+          import json, os, re, sys
+
+          (container,) = json.load(sys.stdin)
+          image_id = container["ImageID"]
+          if container["Id"] != os.environ["CONTAINER_ID"] or not re.fullmatch(
+              r"sha256:[0-9a-f]{64}", image_id
+          ):
+              sys.exit("Docker did not report an immutable ID for the job image")
+          print(f"image_id={image_id}")
+          ' >> "$GITHUB_OUTPUT"
+
+      - name: Require an immutable image ID
+        shell: bash
+        env:
+          IMAGE_ID: ${{ steps.build-image-id.outputs.image_id }}
+        run: |
+          [[ "$IMAGE_ID" =~ ^sha256:[0-9a-f]{64}$ ]]
+          printf 'Verified Docker image ID %s\n' "$IMAGE_ID"
