@@ -187,6 +187,19 @@ jobs:
           github-token: ${{ github.token }}
           run-id: ${{ steps.donors.outputs.run_3 }}
 
+      - name: Download upstream vLLM wheel donor
+        id: donor-upstream
+        if: steps.donors.outputs.run_upstream != '' && steps.donors.outputs.artifact_upstream != ''
+        timeout-minutes: 3
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          artifact-ids: ${{ steps.donors.outputs.artifact_upstream }}
+          path: ${{ runner.temp }}/ppu-native-donors/upstream
+          merge-multiple: true
+          github-token: ${{ github.token }}
+          run-id: ${{ steps.donors.outputs.run_upstream }}
+
       - name: Build or repackage wheels
         shell: bash
         env:
@@ -194,6 +207,7 @@ jobs:
           SOURCE_1: ${{ steps.donor-1.outcome == 'success' && steps.donors.outputs.source_1 || '' }}
           SOURCE_2: ${{ steps.donor-2.outcome == 'success' && steps.donors.outputs.source_2 || '' }}
           SOURCE_3: ${{ steps.donor-3.outcome == 'success' && steps.donors.outputs.source_3 || '' }}
+          SOURCE_UPSTREAM: ${{ steps.donor-upstream.outcome == 'success' && steps.donors.outputs.source_upstream || '' }}
         run: |
           set -euo pipefail
           slot=0
@@ -203,6 +217,9 @@ jobs:
               printf '%s\n' "$source" > "$VLLM_SAIL_NATIVE_REUSE_ROOT/$slot.source"
             fi
           done
+          if [[ "$SOURCE_UPSTREAM" =~ ^[0-9a-f]{40}$ ]]; then
+            printf '%s\n' "$SOURCE_UPSTREAM" > "$VLLM_SAIL_NATIVE_REUSE_ROOT/upstream.source"
+          fi
           # Older checkouts still understand the single-donor input.
           if [[ -f "$VLLM_SAIL_NATIVE_REUSE_ROOT/1.source" ]]; then
             export VLLM_SAIL_NATIVE_REUSE_DIR="$VLLM_SAIL_NATIVE_REUSE_ROOT/1"

@@ -1086,15 +1086,29 @@ def test_native_repack_selects_first_verified_donor(
     }
     image = f"sdk@sha256:{'a' * 64}" if upstream_only else ""
     donor_root = tmp_path / "native-reuse"
-    for slot in (1, 2, 3):
-        donor = donor_root / str(slot)
+    for slot in ("1", "2", "3", "upstream"):
+        if slot == "upstream" and not upstream_only:
+            continue
+        donor = donor_root / slot
         data = make_donor(
-            donor, vllm_commit=pin, sail_commit=sail_commit, fingerprint=fingerprint
+            donor,
+            vllm_commit=pin,
+            sail_commit=sail_commit,
+            fingerprint=(
+                manifest.native_fingerprint(
+                    source,
+                    build_image=image,
+                    pytorch_sail_arch=arch,
+                    vllm_sail_hg_flags="-O3",
+                )
+                if slot == "upstream"
+                else fingerprint
+            ),
         )
-        failure = first_failure if slot == 1 else None
+        failure = first_failure if slot == "1" else None
         if first_failure == "all":
             failure = "sail_commit"
-        elif first_failure == "third" and slot < 3:
+        elif first_failure == "third" and slot in {"1", "2"}:
             failure = "pin"
         if failure not in {"missing_sidecar", "legacy"}:
             expected = "invalid" if failure == "invalid_sidecar" else sail_commit
@@ -1111,7 +1125,7 @@ def test_native_repack_selects_first_verified_donor(
             data["commits"]["vllm-sail"] = "0" * 40
         elif failure == "fingerprint":
             data["native_reuse"]["fingerprint"] = "0" * 64
-        if upstream_only and slot == 3:
+        if slot == "upstream":
             data["vllm_build_fingerprint"] = manifest.vllm_build_fingerprint(
                 source, commit=pin, image=image
             )
@@ -1224,7 +1238,7 @@ git() {
         assert "entered cold build" not in result.stdout
         assert "reuse_mode=vllm-only\n" in build_manifest.read_text()
         (wheel,) = wheels.iterdir()
-        donor_wheel = next((donor_root / "3").rglob("vllm-*.whl"))
+        donor_wheel = next((donor_root / "upstream").rglob("vllm-*.whl"))
         assert wheel.read_bytes() == donor_wheel.read_bytes()
         assert not list(work.iterdir())
     elif selected is None:

@@ -17,6 +17,7 @@ from scripts.ci.ppu_wheel_manifest import (
 )
 
 NIGHTLY_WHEELS = "nightly-wheels.yaml"
+UPSTREAM_DOWNLOAD = "Download upstream vLLM wheel donor"
 # The build verifies the full fingerprint, including exact legacy orchestration
 # revisions. The Git tree prefilter only needs to reject incompatible inputs.
 ORCHESTRATION = {*FINGERPRINT_COMPAT_PATHS, FINGERPRINT_COMPAT}
@@ -69,14 +70,19 @@ def built_artifact(controller, run, source, *, historical):
     if not build:
         return None
     steps = build.get("steps") or []
-    # Accept builds with direct native provenance. A formal run, or a future
-    # Nightly run, could otherwise publish binaries from an earlier candidate.
+    # Historical donors must have compiled SAIL. Its upstream-only step cannot
+    # supply SAIL extensions. Scheduled Nightly donors must have built both wheels.
     downloads = [
         step
         for step in steps
         if step.get("name", "").startswith("Download native wheel donor")
     ]
     if not downloads or any(step.get("conclusion") != "skipped" for step in downloads):
+        return None
+    if not historical and any(
+        step.get("name") == UPSTREAM_DOWNLOAD and step.get("conclusion") != "skipped"
+        for step in steps
+    ):
         return None
     required = {
         "Verify checked-out revision",
@@ -224,7 +230,7 @@ def select_donors(controller, candidate):
                 f"run_{slot}={donor.run_id}\nartifact_{slot}={donor.artifact_id}\n"
                 f"source_{slot}={donor.source}\n"
             )
-            print(f"Native wheel donor {slot}: {donor.run_id}", flush=True)
+            print(f"Wheel donor {slot}: {donor.run_id}", flush=True)
 
         if nightly:
             write_donor(1, nightly)
@@ -232,8 +238,7 @@ def select_donors(controller, candidate):
         for slot, donor in enumerate(historical, 2 if nightly else 1):
             write_donor(slot, donor)
         if upstream:
-            # Reserve the last slot for a Nightly whose SAIL inputs differ.
-            write_donor(3, upstream)
+            write_donor("upstream", upstream)
         if not nightly and not historical and not upstream:
             print("Native wheel donor candidates: none")
 

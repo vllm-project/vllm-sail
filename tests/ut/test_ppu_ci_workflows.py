@@ -776,8 +776,9 @@ def test_build_leaf_preserves_retry_identity_and_image_output():
         for step in build["steps"]
         if step.get("uses") == "actions/download-artifact@v4"
     ]
-    assert len(downloads) == 3
-    for slot, download in enumerate(downloads, 1):
+    assert len(downloads) == 4
+    for slot, download in zip((1, 2, 3, "upstream"), downloads, strict=True):
+        assert download["id"] == f"donor-{slot}"
         assert download["if"] == (
             f"steps.donors.outputs.run_{slot} != '' && steps.donors.outputs.artifact_{slot} != ''"
         )
@@ -798,8 +799,9 @@ def test_build_leaf_preserves_retry_identity_and_image_output():
         package["env"]["VLLM_SAIL_NATIVE_REUSE_ROOT"]
         == "${{ runner.temp }}/ppu-native-donors"
     )
-    for slot in range(1, 4):
-        assert package["env"][f"SOURCE_{slot}"] == (
+    assert downloads[-1]["name"] == "Download upstream vLLM wheel donor"
+    for slot in (1, 2, 3, "upstream"):
+        assert package["env"][f"SOURCE_{str(slot).upper()}"] == (
             f"${{{{ steps.donor-{slot}.outcome == 'success' && steps.donors.outputs.source_{slot} || '' }}}}"
         )
 

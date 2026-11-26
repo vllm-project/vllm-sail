@@ -207,8 +207,9 @@ prepare_vllm_reuse() {
 
 try_donors() {
     local prepare="$1" slot donor_dir source_file donor_sail_commit
+    shift
     if [[ -n "${NATIVE_REUSE_ROOT}" ]]; then
-        for slot in 1 2 3; do
+        for slot in "$@"; do
             donor_dir="${NATIVE_REUSE_ROOT}/${slot}"
             source_file="${donor_dir}.source"
             [[ -d "${donor_dir}" && -f "${source_file}" ]] || continue
@@ -229,11 +230,11 @@ try_donors() {
 }
 
 if [[ "${VLLM_REF}" =~ ^[0-9a-f]{40}$ ]]; then
-    if try_donors prepare_native_reuse; then
+    if try_donors prepare_native_reuse 1 2 3; then
         VLLM_REUSE=1
         # A legacy paired donor may lack an independent vLLM fingerprint.
         vllm_fingerprint=""
-    elif [[ -n "${vllm_fingerprint}" ]] && try_donors prepare_vllm_reuse; then
+    elif [[ -n "${vllm_fingerprint}" ]] && try_donors prepare_vllm_reuse 1 2 3 upstream; then
         VLLM_REUSE=1
     elif [[ -n "${NATIVE_REUSE_ROOT}${NATIVE_REUSE_DIR}" ]]; then
         echo "Native reuse unavailable or invalid; compiling"
