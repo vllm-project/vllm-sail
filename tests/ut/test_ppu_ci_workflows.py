@@ -1724,6 +1724,7 @@ def test_recipe_model_sanity_has_one_scheduled_entry():
         ("workflow_dispatch", "recipe:all", "true", [], "", ""),
         ("workflow_dispatch", "recipe:all ", "true", [], "", ""),
         ("workflow_dispatch", " recipe:all ", "true", [], "", ""),
+        ("workflow_dispatch", " forward:deepseek-v4.1-flash ", "true", [], None, ""),
         (
             "workflow_dispatch",
             " recipe:all ",
@@ -1856,7 +1857,9 @@ def test_accuracy_nightly_routes_selected_models(
     assert values["full_run"] == str(full_selection).lower()
     assert bool(expression(jobs["notify-summary"]["if"], context)) == full_selection
     assert expression(jobs["accuracy"]["if"], context) == (legacy_cases != [])
-    assert not expression(jobs["recipe-forward-perf"]["if"], context)
+    assert bool(expression(jobs["recipe-forward-perf"]["if"], context)) == (
+        models.strip() == "forward:deepseek-v4.1-flash"
+    )
     if legacy_cases is None:
         catalog = json.loads((ROOT / "scripts/ci/ppu_e2e_models.json").read_text())
         expected = [
@@ -1883,6 +1886,7 @@ def test_accuracy_nightly_routes_selected_models(
     [
         (" recipe:all ", False, False, True),
         (" recipe:glm-5.3 ", False, False, True),
+        (" forward:deepseek-v4.1-flash ", False, False, True),
         (" \t", False, True, True),
         ("glm-5.3-mxfp4-tp4", False, False, False),
         (" \t", False, False, False),
@@ -1928,6 +1932,31 @@ def test_accuracy_nightly_recipe_dependencies_follow_normalized_input(
     )
     for step in (setup, install):
         assert bool(expression(step["if"], context)) == required
+
+
+def test_forward_artifact_upload_precedes_failed_verdict():
+    job = workflow("_ppu-recipe-model-sanity.yaml")["jobs"]["sanity"]
+    steps = job["steps"]
+    publish = next(step for step in steps if step.get("id") == "publish-forward")
+    upload = next(
+        step
+        for step in steps
+        if step.get("name") == "Upload public forward performance summary"
+    )
+    gate = next(
+        step
+        for step in steps
+        if step.get("name") == "Enforce Forward performance verdict"
+    )
+    assert steps.index(publish) < steps.index(upload) < steps.index(gate)
+    assert gate["run"] == "exit 1"
+    context = {"steps.publish-forward.outcome": "success"}
+    for status in ("pass", "fail"):
+        context["steps.publish-forward.outputs.status"] = status
+        assert expression(upload["if"], context)
+        assert expression(gate["if"], context) == (status == "fail")
+    assert expression(job["timeout-minutes"], {"inputs.forward_perf": True}) == 60
+    assert expression(job["timeout-minutes"], {"inputs.forward_perf": False}) == 240
 
 
 @pytest.mark.parametrize(

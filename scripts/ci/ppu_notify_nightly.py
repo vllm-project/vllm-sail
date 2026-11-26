@@ -29,12 +29,29 @@ ACCURACY = (
     "golden_config_mismatch",
 )
 SETUP = (
+    "forward_config_mismatch",
     "runtime_setup_failed",
     "wheel_verification_failed",
     "recipe_validation_failed",
     "runtime_dependencies_failed",
     "platform_check_failed",
 )
+FORWARD = (
+    "forward_measurement_failed",
+    "forward_measurement_timeout",
+    "forward_measurement_unstable",
+    "forward_regression",
+)
+
+
+def runtime_failure_phase(reason):
+    if reason in SETUP:
+        return "runtime_setup"
+    if reason == "model_cache_check_failed":
+        return "model_cache_check"
+    if reason == "private_retention_failed":
+        return "private_retention"
+    return "unknown"
 
 
 def evidence(root, model, prefix, run_id, attempt):
@@ -51,18 +68,14 @@ def evidence(root, model, prefix, run_id, attempt):
     ):
         raise ValueError("Missing passing gate evidence")
 
-    phase = "unknown"
+    phase = runtime_failure_phase(reason)
     if reason in STARTUP:
         phase = "startup"
     elif reason in ACCURACY:
         phase = "gsm8k_score vs golden"
     elif reason == "micro_e2e_failed":
         phase = "micro_e2e"
-    elif reason == "model_cache_check_failed":
-        phase = "model_cache_check"
-    elif reason in SETUP:
-        phase = "runtime_setup"
-    elif report.get("retention") == "failed":
+    elif phase == "unknown" and report.get("retention") == "failed":
         phase = "private_retention"
     return status, phase, gsm8k.get("score"), gsm8k.get("golden_score")
 
@@ -90,7 +103,11 @@ def forward_evidence(root, run_id, attempt):
     status = report["status"]
     if status == "pass" and not report["cases"]:
         raise ValueError("Missing forward performance evidence")
-    return status, "forward performance", None, None
+    reason = report.get("failure_reason")
+    phase = (
+        "forward performance" if reason in FORWARD else runtime_failure_phase(reason)
+    )
+    return status, phase, None, None
 
 
 def collect(root):

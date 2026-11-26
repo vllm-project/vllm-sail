@@ -289,7 +289,7 @@ jobs:
           models = os.environ["MODELS"].strip()
           if (
               os.environ["SCHEDULED"] == "true"
-              or models.startswith("recipe:")
+              or models.startswith(("recipe:", "forward:"))
               or (os.environ["SKIP_WHEEL_BUILD"] == "true" and not models)
           ):
               with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
@@ -340,11 +340,20 @@ jobs:
           skip_wheel_build = os.environ.get("SKIP_WHEEL_BUILD", "false") == "true"
           target_sha = os.environ["TARGET_SHA"]
           output = Path(os.environ["GITHUB_OUTPUT"])
+          forward_model = "deepseek-v4.1-flash"
+
+          def validate_forward_policy():
+              try:
+                  select.build_recipe_matrix(forward_model, "forward_perf")
+              except ValueError as error:
+                  sys.exit(f"Forward policy is unavailable for the selected target_ref: {error}")
+
           if requested.startswith("forward:"):
-              if requested != "forward:deepseek-v4.1-flash":
+              if requested != f"forward:{forward_model}":
                   sys.exit("Unknown forward performance policy")
               if skip_wheel_build or os.environ["RECIPE_PUBLIC_ENABLED"] != "true":
                   sys.exit("Forward performance requires Recipe CI and wheels from this run")
+              validate_forward_policy()
               with output.open("a", encoding="utf-8") as handle:
                   handle.write(f"target_sha={target_sha}\n")
                   handle.write(f"full_run={full_run}\n")
@@ -355,6 +364,7 @@ jobs:
               os.environ["SCHEDULED_RECIPE_ENABLED"] == "true"
               and os.environ.get("SCHEDULED_FORWARD_PERF_ENABLED") == "true"
           ):
+              validate_forward_policy()
               with output.open("a", encoding="utf-8") as handle:
                   handle.write("run_forward=true\n")
 

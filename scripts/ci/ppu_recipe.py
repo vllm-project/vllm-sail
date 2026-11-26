@@ -1085,10 +1085,6 @@ def resolve_recipe(
                 eff_layers = tier_cfg.get("layer_override", "auto")
             if eff_preset is None:
                 eff_preset = tier_cfg.get("preset")
-        elif tier == "forward_perf":
-            eff_cache = "disabled"
-            eff_dummy = True
-            eff_layers = None
         elif tier == "model_sanity":
             stages = tier_cfg.get("stages", [])
             if eff_cache is None and stages:
@@ -1101,6 +1097,11 @@ def resolve_recipe(
                     break
         if policy.get("hardware") and hardware == "zhenwu_m890":
             hardware = policy["hardware"]
+
+    if tier == "forward_perf":
+        eff_cache = "disabled"
+        eff_dummy = True
+        eff_layers = None
 
     ordered: list[tuple[str, str | None, bool]] = []
     server_env: dict[str, str] = {}
@@ -1844,6 +1845,12 @@ def validate_policy_structure(
             if recipe_path is None:
                 raise ValidationError(f"{forward_context} requires a recipe")
             _validate_forward_groups(forward["groups"], context=forward_context)
+            resolve_recipe(
+                recipe_path,
+                tier="forward_perf",
+                variant=policy_variant,
+                hardware=policy["hardware"],
+            )
         if "fast_sanity" in tiers:
             fs = _check_keys(
                 tiers["fast_sanity"],
@@ -2480,7 +2487,9 @@ def main(argv: list[str] | None = None) -> int:
     res = sub.add_parser("resolve", help="Resolve a recipe into argv/env/digest")
     res.add_argument("--recipe", type=Path, required=True)
     res.add_argument("--policy", type=Path, default=None)
-    res.add_argument("--tier", choices=["fast_sanity", "model_sanity"], default=None)
+    res.add_argument(
+        "--tier", choices=["fast_sanity", "model_sanity", "forward_perf"], default=None
+    )
     res.add_argument("--variant", default=None)
     res.add_argument("--hardware", default="zhenwu_m890")
     res.add_argument("--preset", default=None)

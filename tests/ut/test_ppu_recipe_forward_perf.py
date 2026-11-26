@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 import json
 import os
+import signal
 import subprocess
 import sys
 from pathlib import Path
@@ -27,8 +28,22 @@ def modules(monkeypatch):
 def test_recipe_resolves_only_the_tp_prefill_command(tmp_path, modules):
     recipe, runner = modules
     policy = recipe._load_yaml(POLICY)
-    resolved = recipe.resolve_recipe(
-        ROOT / policy["recipe"], policy_path=POLICY, tier="forward_perf"
+    resolved = json.loads(
+        subprocess.check_output(
+            [
+                sys.executable,
+                "-B",
+                str(CI_DIR / "ppu_recipe.py"),
+                "resolve",
+                "--recipe",
+                str(ROOT / policy["recipe"]),
+                "--policy",
+                str(POLICY),
+                "--tier",
+                "forward_perf",
+            ],
+            text=True,
+        )
     )
     commands = runner.commands(
         resolved, policy["tiers"]["forward_perf"]["groups"], tmp_path, tmp_path
@@ -38,6 +53,7 @@ def test_recipe_resolves_only_the_tp_prefill_command(tmp_path, modules):
         assert "--nproc-per-node=8" in cmd
         assert "--standalone" in cmd
         assert "--local-addr=127.0.0.1" in cmd[: cmd.index(runner.VLLM_CLI_MODULE)]
+        assert "--shutdown-timeout=20" in cmd[: cmd.index(runner.VLLM_CLI_MODULE)]
         assert "--exclude-sampler" in cmd[cmd.index(runner.VLLM_CLI_MODULE) + 1 :]
         assert cmd[cmd.index("--load-format") + 1] == "dummy"
         assert "--no-enable-prefix-caching" in cmd
@@ -52,6 +68,19 @@ def test_recipe_resolves_only_the_tp_prefill_command(tmp_path, modules):
         name: runner.benchmark_args(cmd, resolved["hf_model_id"])
         for name, cmd in commands.items()
     } == baseline["config"]["benchmark_args"]
+
+
+def test_policy_validation_rejects_non_tp_forward_recipe(tmp_path, modules):
+    recipe, _ = modules
+    policy = recipe._load_yaml(POLICY)
+    doc = recipe._load_yaml(ROOT / policy["recipe"])
+    flags = doc["model"]["base_args"]
+    flags[flags.index("--tensor-parallel-size") + 1] = "1"
+    model_recipe = tmp_path / "prefill.yaml"
+    model_recipe.write_text(yaml.safe_dump(doc))
+    policy["recipe"] = model_recipe.name
+    with pytest.raises(recipe.ValidationError, match="requires a TP recipe"):
+        recipe.validate_policy_structure(policy, context="forward", base_dir=tmp_path)
 
 
 def test_snapshot_provenance_supports_commit_and_local_cache_ref(tmp_path, modules):
@@ -146,7 +175,7 @@ def test_forward_regression_threshold(modules, median_us, cv, case_status, reaso
 def test_one_regressed_case_is_reported_to_nightly(tmp_path, monkeypatch, modules):
     _, runner = modules
     from ppu_notify_nightly import collect
-    from ppu_notify_summary import JobExecution
+    from ppu_notify_summary import JobExecution, make_payload
 
     baseline = json.loads(BASELINE.read_text())
     baseline_us = baseline["metrics"]["prefill_16k"]["median_us"]
@@ -171,6 +200,7 @@ def test_one_regressed_case_is_reported_to_nightly(tmp_path, monkeypatch, module
         "PRIVATE_DIR": str(private),
         "PUBLIC_DIR": str(public),
         "GITHUB_STEP_SUMMARY": str(summary),
+        "GITHUB_OUTPUT": str(tmp_path / "outputs"),
         "RECIPE_OUTCOME": "failure",
         "RETENTION_OUTCOME": "success",
         "GITHUB_REPOSITORY": "example/framework",
@@ -185,6 +215,7 @@ def test_one_regressed_case_is_reported_to_nightly(tmp_path, monkeypatch, module
     }.items():
         monkeypatch.setenv(key, value)
     assert runner.publish() == 0
+    assert (tmp_path / "outputs").read_text() == "status=fail\n"
     assert "| +6.00% | FAIL |" in summary.read_text()
 
     recipe_job = "Recipe model sanity & micro-E2E / Model sanity & micro-E2E atlas"
@@ -209,31 +240,68 @@ def test_one_regressed_case_is_reported_to_nightly(tmp_path, monkeypatch, module
         "ppu_notify_nightly.run_jobs",
         lambda expected: ({name: jobs[name] for name in expected}, 0),
     )
-    rows = collect(tmp_path)["results"]
+    report = collect(tmp_path)
+    rows = report["results"]
     assert [(row["model"], row["status"]) for row in rows] == [
         ("atlas", "pass"),
         ("deepseek-v4.1-flash-forward", "fail"),
     ]
+    markdown = make_payload(report, {}, 0, version="main")["markdown"]
+    assert markdown["title"] == "[vllm-sail | main] PPU Nightly 晨报"
+    assert "`deepseek-v4.1-flash-forward` · forward performance" in markdown["text"]
+    assert "actions/runs/123/job/202" in markdown["text"]
     monkeypatch.setenv("NOTIFY_FORWARD_SELECTED", "")
     assert collect(tmp_path)["results"] == rows[:1]
 
 
-@pytest.mark.parametrize("has_result", [False, True])
-def test_isolated_publisher_reports_failure_without_private_details(
-    tmp_path, has_result
+@pytest.mark.parametrize(
+    "results, recipe_outcome, retention_outcome, reason",
+    [
+        ("missing", "failure", "success", "model_cache_check_failed"),
+        ("mismatch", "failure", "success", "forward_config_mismatch"),
+        ("malformed", "success", "success", "forward_measurement_failed"),
+        ("empty", "success", "success", "forward_measurement_failed"),
+        ("pass", "success", "failure", "private_retention_failed"),
+        ("pass", "success", "success", "not_applicable"),
+        ("timeout", "failure", "success", "forward_measurement_timeout"),
+    ],
+)
+def test_isolated_publisher_emits_verdict_without_private_details(
+    tmp_path, results, recipe_outcome, retention_outcome, reason
 ):
     private = tmp_path / "private"
     (private / "results").mkdir(parents=True)
-    (private / "recipe-phase.txt").write_text("model_cache_check\n")
+    phase = "model_cache_check" if results == "missing" else "forward_measurement"
+    (private / "recipe-phase.txt").write_text(phase + "\n")
     (private / "runtime.log").write_text("private-runtime-error\n")
-    if has_result:
-        (private / "results/summary.json").write_text(
+    evidence = private / "results/summary.json"
+    row = {
+        "case": "prefill_4k",
+        "status": "PASS",
+        "median_us": 100,
+        "baseline_us": 100,
+        "delta": 0,
+    }
+    if results in ("mismatch", "timeout"):
+        evidence.write_text(
             json.dumps(
                 {
                     "status": "fail",
-                    "failure_reason": "forward_config_mismatch",
+                    "failure_reason": reason,
                     "cases": [],
                     "config_mismatch": ["torch_sha256", "private-detail"],
+                }
+            )
+        )
+    elif results == "malformed":
+        evidence.write_text("{-private-detail")
+    elif results in ("empty", "pass"):
+        evidence.write_text(
+            json.dumps(
+                {
+                    "status": "pass",
+                    "failure_reason": "not_applicable",
+                    "cases": [row] if results == "pass" else [],
                 }
             )
         )
@@ -248,26 +316,86 @@ def test_isolated_publisher_reports_failure_without_private_details(
             "PRIVATE_DIR": str(private),
             "PUBLIC_DIR": str(public),
             "GITHUB_STEP_SUMMARY": str(summary),
-            "RECIPE_OUTCOME": "failure",
-            "RETENTION_OUTCOME": "success",
+            "GITHUB_OUTPUT": str(tmp_path / "outputs"),
+            "RECIPE_OUTCOME": recipe_outcome,
+            "RETENTION_OUTCOME": retention_outcome,
         },
         capture_output=True,
         text=True,
         check=True,
     )
     expected = {
-        "status": "fail",
-        "failure_reason": "model_cache_check_failed",
-        "cases": [],
+        "status": "pass" if reason == "not_applicable" else "fail",
+        "failure_reason": reason,
+        "cases": [row] if results == "pass" else [],
     }
-    if has_result:
-        expected["failure_reason"] = "forward_config_mismatch"
+    if results == "mismatch":
         expected["config_mismatch"] = ["torch_sha256"]
     assert json.loads((public / "summary.json").read_text()) == expected
+    assert (tmp_path / "outputs").read_text() == f"status={expected['status']}\n"
     assert expected["failure_reason"] in summary.read_text()
     for output in (result.stdout, result.stderr, summary.read_text()):
         assert "private-runtime-error" not in output
         assert "private-detail" not in output
+
+
+@pytest.mark.parametrize(
+    "reason, phase",
+    [
+        ("wheel_verification_failed", "runtime_setup"),
+        ("runtime_dependencies_failed", "runtime_setup"),
+        ("platform_check_failed", "runtime_setup"),
+        ("recipe_validation_failed", "runtime_setup"),
+        ("runtime_setup_failed", "runtime_setup"),
+        ("model_cache_check_failed", "model_cache_check"),
+        ("private_retention_failed", "private_retention"),
+        ("forward_config_mismatch", "runtime_setup"),
+        ("forward_measurement_timeout", "forward performance"),
+        ("forward_regression", "forward performance"),
+        ("unexpected", "unknown"),
+    ],
+)
+def test_nightly_attributes_forward_failures(tmp_path, modules, reason, phase):
+    _, runner = modules
+    from ppu_notify_nightly import forward_evidence
+
+    artifact = tmp_path / "ppu-recipe-forward_perf-deepseek-v4.1-flash-123-1"
+    artifact.mkdir()
+    runner.write_json(
+        artifact / "summary.json",
+        {"status": "fail", "failure_reason": reason, "cases": []},
+    )
+    assert forward_evidence(tmp_path, "123", 1) == ("fail", phase, None, None)
+
+
+@pytest.mark.parametrize("launch_signal", [None, signal.SIGTERM, signal.SIGINT])
+def test_forward_timeout_or_cancellation_stops_launcher(
+    tmp_path, monkeypatch, modules, launch_signal
+):
+    _, runner = modules
+    launch = subprocess.Popen
+    processes = []
+
+    def track(*args, **kwargs):
+        assert kwargs["start_new_session"] is True
+        proc = launch(*args, **kwargs)
+        processes.append(proc)
+        if launch_signal is not None:
+            os.kill(os.getpid(), launch_signal)
+        return proc
+
+    monkeypatch.setattr(subprocess, "Popen", track)
+    monkeypatch.setattr(runner, "BENCHMARK_TIMEOUT_S", 0.1)
+    handlers = {sig: signal.getsignal(sig) for sig in (signal.SIGTERM, signal.SIGINT)}
+    argv = [sys.executable, "-c", "import time; time.sleep(60)"]
+    expected = subprocess.TimeoutExpired if launch_signal is None else SystemExit
+    with (tmp_path / "log").open("w") as log, pytest.raises(expected) as error:
+        runner.run_benchmark(argv, os.environ, log)
+    if launch_signal is not None:
+        assert error.value.code == 128 + launch_signal
+    assert len(processes) == 1
+    assert processes[0].returncode in (-signal.SIGTERM, -signal.SIGKILL)
+    assert all(signal.getsignal(sig) == handler for sig, handler in handlers.items())
 
 
 @pytest.mark.parametrize(
@@ -317,3 +445,54 @@ def test_nightly_selection(tmp_path, models, scheduled, enabled, skip_build, for
         assert not values.get("recipe_matrix")
     else:
         assert json.loads(values["recipe_matrix"])["include"]
+
+
+@pytest.mark.parametrize("scheduled", [False, True])
+def test_nightly_rejects_forward_when_target_has_no_policy_tier(tmp_path, scheduled):
+    target = tmp_path / "target"
+    policy = yaml.safe_load(POLICY.read_text())
+    # Simulate an earlier checkout that contains the serving recipe and its fast tier.
+    policy["tiers"] = {"fast_sanity": policy["tiers"]["fast_sanity"]}
+    policy.pop("replaces_legacy_cases", None)
+    for path in (
+        CI_DIR / "ppu_recipe.py",
+        CI_DIR / "ppu_e2e_select.py",
+        ROOT / policy["recipe"],
+    ):
+        copy = target / path.relative_to(ROOT)
+        copy.parent.mkdir(parents=True, exist_ok=True)
+        copy.write_bytes(path.read_bytes())
+    target_policy = target / POLICY.relative_to(ROOT)
+    target_policy.parent.mkdir(parents=True)
+    target_policy.write_text(yaml.safe_dump(policy))
+
+    flow = yaml.safe_load(
+        (ROOT / ".github/workflows/ppu-accuracy-nightly.yaml").read_text()
+    )
+    step = next(
+        step for step in flow["jobs"]["select"]["steps"] if step.get("id") == "select"
+    )
+    script = step["run"].split("python3 - <<'PY'\n", 1)[1].rsplit("\nPY", 1)[0]
+    output = tmp_path / "outputs"
+    selection = subprocess.run(
+        [sys.executable, "-B", "-c", script],
+        cwd=target,
+        env={
+            **os.environ,
+            "TARGET_SHA": "b" * 40,
+            "GITHUB_OUTPUT": str(output),
+            "MODELS": "" if scheduled else "forward:deepseek-v4.1-flash",
+            "SKIP_WHEEL_BUILD": "false",
+            "RECIPE_PUBLIC_ENABLED": "true",
+            "SCHEDULED_RECIPE_ENABLED": str(scheduled).lower(),
+            "SCHEDULED_FORWARD_PERF_ENABLED": str(scheduled).lower(),
+        },
+        capture_output=True,
+        text=True,
+    )
+    assert selection.returncode != 0
+    assert (
+        "Forward policy is unavailable for the selected target_ref" in selection.stderr
+    )
+    assert "has no tier 'forward_perf'" in selection.stderr
+    assert not output.exists()

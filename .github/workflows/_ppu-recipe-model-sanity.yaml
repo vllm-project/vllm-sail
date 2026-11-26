@@ -149,7 +149,7 @@ jobs:
     name: ${{ inputs.forward_perf && 'Forward performance' || 'Model sanity & micro-E2E' }} ${{ matrix.model.key }}
     needs: prepare
     runs-on: 8-ppu-m890p
-    timeout-minutes: 240
+    timeout-minutes: ${{ inputs.forward_perf && 60 || 240 }}
     strategy:
       fail-fast: false
       max-parallel: 2
@@ -511,3 +511,7 @@ jobs:
           path: ${{ steps.runtime.outputs.public }}/summary.json
           if-no-files-found: error
           retention-days: 14
+
+      - name: Enforce Forward performance verdict
+        if: always() && steps.publish-forward.outcome == 'success' && steps.publish-forward.outputs.status != 'pass'
+        run: exit 1

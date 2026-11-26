@@ -7,6 +7,7 @@ import json
 import math
 import os
 import re
+import signal
 import stat
 import subprocess
 import sys
@@ -17,6 +18,7 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.append(str(ROOT / "tests/e2e/perf"))
 ITERS = 20
 SAMPLES = 5
+BENCHMARK_TIMEOUT_S = 45 * 60
 VLLM_CLI_MODULE = "vllm.entrypoints.cli.main"
 REGRESSION_LIMIT = Decimal("1.05")
 MAX_CV = 0.15
@@ -73,6 +75,8 @@ def commands(resolved, groups, checkpoint, results_dir):
             "--standalone",
             # c10d also advertises a bootstrap address to the local ranks.
             "--local-addr=127.0.0.1",
+            # Give the elastic agent time to terminate its worker groups.
+            "--shutdown-timeout=20",
             f"--nproc-per-node={resolved['ppu_count']}",
             "-m",
             VLLM_CLI_MODULE,
@@ -106,6 +110,39 @@ def benchmark_args(argv, model_id):
     # Earlier vLLM builds excluded sampling by default when recording the baseline.
     args.remove("--exclude-sampler")
     return args
+
+
+def run_benchmark(argv, env, log):
+    from ppu_recipe_runner import _stop_server as stop_process_group
+
+    from scripts.eval.ppu_model_sanity import defer_termination_signals
+
+    def interrupted(signum, _frame):
+        raise SystemExit(128 + signum)
+
+    previous_handler = signal.signal(signal.SIGTERM, interrupted)
+    try:
+        process = None
+        try:
+            with defer_termination_signals() as launch_signals:
+                process = subprocess.Popen(
+                    argv,
+                    env=env,
+                    stdout=log,
+                    stderr=subprocess.STDOUT,
+                    start_new_session=True,
+                )
+            if launch_signals:
+                raise SystemExit(128 + launch_signals[-1])
+            returncode = process.wait(timeout=BENCHMARK_TIMEOUT_S)
+        finally:
+            if process is not None and process.returncode != 0:
+                with defer_termination_signals():
+                    stop_process_group(process)
+    finally:
+        signal.signal(signal.SIGTERM, previous_handler)
+    if returncode:
+        raise subprocess.CalledProcessError(returncode, argv)
 
 
 def positive(value):
@@ -290,10 +327,23 @@ def run(args):
         for raw in groups[name]["cases"]:
             case = parse_case(raw)
             expected[case.name] = [asdict(req) for req in case.requests]
-        with (output / f"{name}.log").open("w") as log:
-            subprocess.run(
-                argv, env=env, stdout=log, stderr=subprocess.STDOUT, check=True
+        try:
+            with (output / f"{name}.log").open("w") as log:
+                run_benchmark(argv, env, log)
+        except subprocess.TimeoutExpired:
+            print(
+                f"Forward benchmark exceeded {BENCHMARK_TIMEOUT_S} seconds",
+                file=sys.stderr,
             )
+            write_json(
+                output / "summary.json",
+                {
+                    "status": "fail",
+                    "failure_reason": "forward_measurement_timeout",
+                    "cases": [],
+                },
+            )
+            return 1
         current["metrics"].update(
             read_measurements(output / f"{name}.json", expected, count)
         )
@@ -331,10 +381,10 @@ def publish():
         if not stat.S_ISREG(info.st_mode) or info.st_size > 64 * 1024:
             raise ValueError("Expected bounded regular summary")
         report = json.loads(path.read_text())
-        if report["failure_reason"] in {
-            "not_applicable",
+        if report["status"] == "fail" and report["failure_reason"] in {
             "forward_config_mismatch",
             "forward_regression",
+            "forward_measurement_timeout",
             "forward_measurement_unstable",
         }:
             reason = report["failure_reason"]
@@ -344,7 +394,10 @@ def publish():
                 for field in BASELINE_CONFIG_FIELDS
                 if field in report.get("config_mismatch", [])
             ]
-        for row in report["cases"]:
+        cases = report["cases"]
+        if not isinstance(cases, list):
+            raise ValueError("Expected a list of forward results")
+        for row in cases:
             if (
                 CASE_NAME.fullmatch(row["case"])
                 and row["status"] in {"PASS", "FAIL", "UNSTABLE"}
@@ -368,10 +421,14 @@ def publish():
         if (
             os.environ["RECIPE_OUTCOME"] == "success"
             and report["status"] == "pass"
+            and report["failure_reason"] == "not_applicable"
             and rows
+            and len(cases) == len(rows)
+            and all(row["status"] == "PASS" for row in rows)
         ):
             status = "pass"
-    except (OSError, KeyError, ValueError, TypeError, RecursionError):
+            reason = "not_applicable"
+    except (OSError, KeyError, ValueError, TypeError, OverflowError, RecursionError):
         pass
     if os.environ["RETENTION_OUTCOME"] == "failure":
         status = "fail"
@@ -399,7 +456,9 @@ def publish():
                     f"| {row['case']} | {row['median_us']:.2f} | "
                     f"{row['baseline_us']:.2f} | {row['delta']:+.2%} | {row['status']} |\n"
                 )
-    return 0 if status == "pass" or os.environ["RECIPE_OUTCOME"] != "success" else 1
+    with Path(os.environ["GITHUB_OUTPUT"]).open("a", encoding="utf-8") as stream:
+        stream.write(f"status={status}\n")
+    return 0
 
 
 def main():
