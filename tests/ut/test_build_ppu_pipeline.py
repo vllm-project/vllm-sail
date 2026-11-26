@@ -536,12 +536,16 @@ def test_cpu_and_pin_ut_use_complementary_full_directory_selections():
     unit_tests = yaml.safe_load((WORKFLOW.parent / "ut.yaml").read_text())
     assert set(unit_tests["jobs"]) == {"cpu-unit-tests"}
     cpu = unit_tests["jobs"]["cpu-unit-tests"]
-    command = next(
-        shlex.split(step["run"])
-        for step in cpu["steps"]
-        if "pytest" in step.get("run", "")
+    test_step = next(
+        step for step in cpu["steps"] if " -m pytest " in step.get("run", "")
     )
-    assert command[:7] == ["python", "-m", "pytest", "tests/ut", "-q", "-rs", "-m"]
+    command = next(
+        shlex.split(line)
+        for line in test_step["run"].replace("\\\n", " ").splitlines()
+        if " -m pytest " in line
+    )
+    assert command[0] == "${python[@]}"
+    assert command[1:7] == ["-m", "pytest", "tests/ut", "-q", "-rs", "-m"]
     assert command[7] == (
         "not upstream_source and not requires_runtime and not ppu "
         "and not cap80 and not cap89"
@@ -1056,8 +1060,9 @@ def test_runtime_scripts_capture_same_image_stack_before_installing_wheels(scrip
 
 
 @pytest.mark.parametrize("script", ["ppu_e2e_smoke.sh", "ppu_upstream_reuse.sh"])
-def test_runtime_lanes_upgrade_transformers_before_verifying_image_stack(
-    script, tmp_path
+@pytest.mark.parametrize("preinstalled", [True, False])
+def test_runtime_lanes_satisfy_transformers_before_verifying_image_stack(
+    script, preinstalled, tmp_path
 ):
     from packaging.requirements import Requirement
 
@@ -1071,12 +1076,15 @@ def test_runtime_lanes_upgrade_transformers_before_verifying_image_stack(
         "import json, os, sys\n"
         "with open(os.environ['CALLS'], 'a') as log:\n"
         "    log.write(json.dumps([sys.argv[1:], os.environ.get('PIP_CONSTRAINT')]) + '\\n')\n"
+        "if '--dry-run' in sys.argv and os.environ['PREINSTALLED'] == '0':\n"
+        "    sys.exit(1)\n"
     )
     python.chmod(0o755)
     subprocess.run(
         [
             "bash",
             "-euc",
+            'source "${ROOT_DIR}/scripts/ci/ppu_ci_deps.sh"\n'
             "vllm_wheels=(/wheels/vllm.whl)\n"
             "sail_wheels=(/wheels/vllm_sail.whl)\n" + text[start:end],
         ],
@@ -1087,12 +1095,18 @@ def test_runtime_lanes_upgrade_transformers_before_verifying_image_stack(
             "REUSE_RESULTS_DIR": str(tmp_path),
             "PIP_CONSTRAINT": str(tmp_path / "image-constraints.txt"),
             "CALLS": str(calls),
+            "PREINSTALLED": str(int(preinstalled)),
             "BASH_ENV": "/dev/null",
         },
         check=True,
     )
     recorded = [json.loads(line) for line in calls.read_text().splitlines()]
     assert recorded[-1][0][1] == "verify"
+    dependency_calls = [args for args, _ in recorded[:-1] if "-r" in args]
+    assert len(dependency_calls) == (1 if preinstalled else 2)
+    assert dependency_calls[0][3:5] == ["--dry-run", "--no-index"]
+    if not preinstalled:
+        assert dependency_calls[1][3:] == dependency_calls[0][5:]
 
     def requirements(path):
         for line in path.read_text().splitlines():
@@ -1102,14 +1116,14 @@ def test_runtime_lanes_upgrade_transformers_before_verifying_image_stack(
 
     installed = []
     for args, constraint in recorded[:-1]:
-        if args[:3] != ["-m", "pip", "install"]:
+        if "--dry-run" not in args:
             continue
         assert constraint == str(tmp_path / "image-constraints.txt")
         for index, arg in enumerate(args[:-1]):
             if arg == "-r":
                 installed.extend(requirements(Path(args[index + 1])))
     transformers = [req for req in installed if req.name == "transformers"]
-    assert len(transformers) == 1, "runtime must upgrade the image's transformers"
+    assert len(transformers) == 1, "runtime must check the image's transformers"
     assert "5.16.1" in transformers[0].specifier
     assert "5.15.0" not in transformers[0].specifier
     assert "5.20.0" not in transformers[0].specifier

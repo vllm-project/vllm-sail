@@ -200,6 +200,7 @@ def test_executor_separates_read_only_pr_execution_and_always_reporting():
     assert ppu["with"] == {
         "pr_head_sha": "${{ inputs.head_sha }}",
         "skip_ppu": "${{ needs.validate.outputs.skip_ppu == 'true' }}",
+        "build_image": "${{ vars.PPU_PR_CI_BUILD_IMAGE }}",
         "existing_build_run_id": "${{ needs.validate.outputs.existing_build_run_id }}",
         "resolve_native_donors": True,
         "wheel_source_sha": "${{ needs.validate.outputs.wheel_source_sha }}",
@@ -388,6 +389,7 @@ def test_pr_pipeline_structure():
     assert set(inputs) == {
         "pr_head_sha",
         "skip_ppu",
+        "build_image",
         "existing_build_run_id",
         "resolve_native_donors",
         "skip_device_tests",
@@ -448,6 +450,7 @@ def test_pr_pipeline_structure():
     assert build["uses"] == "./.github/workflows/_ppu-build.yaml"
     assert build["with"] == {
         "pr_head_sha": "${{ inputs.pr_head_sha || github.sha }}",
+        "build_image": "${{ inputs.build_image }}",
         "resolve_native_donors": "${{ github.event_name == 'pull_request' || inputs.resolve_native_donors }}",
     }
     assert inputs["resolve_native_donors"]["type"] == "boolean"
@@ -1218,10 +1221,18 @@ def test_bare_cpu_matrix_is_on_demand_and_uses_the_exact_pr_head():
     }
     for step in cpu["steps"]:
         assert "cache" not in step.get("with", {})
-        if "pip install" in step.get("run", ""):
+        if step.get("name") == "Install CPU-only test tooling":
+            assert step["if"] == "env.CPU_UT_IMAGE == ''"
             assert step["run"] == (
                 "python -m pip install --no-cache-dir -r requirements/dev.txt"
             )
+        if step.get("name") == "Run bare CPU unit tests":
+            assert "--network=none" in step["run"]
+            assert "--dry-run --no-index -r requirements/dev.txt" in step["run"]
+    assert (
+        "fromJSON(vars.PPU_PR_CI_CPU_IMAGES)[matrix.python-version]"
+        in cpu["env"]["CPU_UT_IMAGE"]
+    )
     coverage = next(
         step for step in cpu["steps"] if step.get("uses") == "codecov/codecov-action@v5"
     )
@@ -3620,7 +3631,8 @@ def test_upstream_reuse_script_protects_image_and_wheel_imports_and_is_fail_clos
     assert 'ppu_image_stack.py" capture' in text
     assert 'ppu_image_stack.py" verify' in text
     assert "trap cleanup EXIT" in text
-    assert "requirements/upstream-reuse.txt" in text
+    assert "ppu_ci_install_if_missing --no-cache-dir" in text
+    assert "'numba>=0.65'" in text
     assert "requirements/dev.txt" not in text
     assert "current_platform.is_ppu()" in text
     assert "export VLLM_PLUGINS=ppu" in text

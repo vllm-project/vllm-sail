@@ -34,6 +34,7 @@ def run_recipe(tmp_path):
     scripts.mkdir(parents=True)
     for name in (
         Path(ENTRYPOINT).name,
+        "ppu_ci_deps.sh",
         "ppu_wheel_manifest.py",
         "ppu_recipe.py",
         "ppu_recipe_runner.py",
