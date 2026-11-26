@@ -37,7 +37,6 @@ from vllm.platforms import current_platform
 import vllm_sail.envs as ppu_envs
 from vllm_sail.patch.utils import patch
 
-_AFFECTED = ">=0.32.0,<0.33.0"
 _MODULE = "vllm.models.deepseek_v41.attention"
 
 logger = init_logger(__name__)
@@ -59,7 +58,6 @@ _logged = False
         "fused decode path can never run on PPU and the A/B record format "
         "cannot be held equal on both sides."
     ),
-    affected_versions=_AFFECTED,
     remove_when=(
         "upstream selects the V4.1 KV record from the attention backend's "
         "capability instead of hard-gating it to family(100)."

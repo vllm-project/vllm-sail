@@ -19,7 +19,6 @@ from pathlib import Path
 import pytest
 
 import vllm_sail.patch as patch_pkg
-from tests.support.upstream import SUPPORTED_RANGE
 from vllm_sail.patch.utils import PATCH_MARKER, PATCH_REGISTRY
 
 
@@ -127,6 +126,18 @@ _ATTENTION_TARGETS = (
         "_hc_prenorm_gemm_outputs",
     ),
     ("vllm.v1.kv_cache_interface", "MLAAttentionSpec.__init__"),
+    (
+        "vllm.v1.worker.gpu.attn_utils",
+        "build_slot_mappings_by_layer",
+    ),
+    (
+        "vllm.v1.worker.utils",
+        "AttentionGroup._with_kernel_block_table",
+    ),
+    (
+        "vllm.v1.worker.utils",
+        "AttentionGroup.map_kv_cache_to_kernel_blocks",
+    ),
 )
 
 #: The fork's five forward_ppu overrides (mhc x4 + sparse attn indexer).
@@ -145,7 +156,6 @@ def test_patch_metadata_is_complete(installed) -> None:
     assert installed, "no patches installed despite vLLM being importable"
     for record in installed:
         assert record.reason.strip(), record.target
-        assert record.affected_versions.strip(), record.target
         assert record.remove_when.strip(), record.target
 
 
@@ -494,6 +504,7 @@ def test_phase4_metadata_shape(installed) -> None:
     phase4_prefixes = (
         "vllm.v1.attention.",
         "vllm.v1.kv_cache_interface.",
+        "vllm.v1.worker.utils.",
         "vllm.model_executor.layers.attention.",
         "vllm.model_executor.layers.mhc.",
         "vllm.model_executor.layers.sparse_attn_indexer.",
@@ -506,7 +517,6 @@ def test_phase4_metadata_shape(installed) -> None:
     ]
     assert len(records) >= 30, [r.target for r in records]
     for record in records:
-        assert record.affected_versions == SUPPORTED_RANGE, record.target
         assert record.reason.strip(), record.target
         assert record.remove_when.strip(), record.target
         assert record.remove_when.strip().lower() != "todo", record.target
@@ -537,6 +547,7 @@ def test_phase4_plugin_modules_import_without_hardware(installed) -> None:
         "vllm_sail.patch.enhancement.attention.mhc",
         "vllm_sail.patch.enhancement.attention.mhc_tilelang",
         "vllm_sail.patch.enhancement.attention.kv_cache_interface",
+        "vllm_sail.patch.enhancement.attention.packed_token_cache_split",
         "vllm_sail.patch.performance.fla",
         "vllm_sail.patch.performance.fla.autotune_cache",
     ):

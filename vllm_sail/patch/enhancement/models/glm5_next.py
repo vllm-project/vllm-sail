@@ -34,7 +34,6 @@ from vllm.platforms import current_platform
 
 from vllm_sail.patch.utils import PATCH_MARKER, patch
 
-_AFFECTED = ">=0.32.0,<0.33.0"
 _PROVIDER = "vllm.models.glm5next.nvidia.ops.kpool_compress"
 # ``common.attention`` is the live consumer. The legacy
 # ``nvidia/attention.py`` copy imports ``model_executor.layers.
@@ -107,8 +106,8 @@ def fwht128_quant_fp8(q: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
 
 
 def init_mega_moe_experts(self, vllm_config, config, quant_config, prefix):
-    # PPU MODIFICATION: begin — GLM 的新 block-FP8 adapter 需要 MXFP8，
-    # SAIL MegaMoE 当前仅消费 MXFP4；在冷加载和预加载进程中一致拒绝。
+    # PPU MODIFICATION: begin — GLM's new block-FP8 adapter requires MXFP8,
+    # whereas SAIL MegaMoE only consumes MXFP4; reject consistently in cold and preloaded processes.
     if current_platform.is_ppu():
         raise NotImplementedError(
             "GLM-5.3 block-FP8 MegaMoE requires MXFP8 expert weights; "
@@ -136,7 +135,6 @@ if not _unavailable:
             "only supports MXFP4; reject this unsupported path consistently on "
             "PPU instead of admitting the NVIDIA provider in preloaded processes."
         ),
-        affected_versions=_AFFECTED,
         remove_when="SAIL MegaMoE implements GLM block-FP8/MXFP8 expert loading.",
     )(init_mega_moe_experts)
 
@@ -144,7 +142,6 @@ if not _unavailable:
         _PROVIDER,
         "fwht128_quant_fp8",
         reason=_REASON,
-        affected_versions=_AFFECTED,
         remove_when=_REMOVE_WHEN,
     )(fwht128_quant_fp8)
 
@@ -158,6 +155,5 @@ if not _unavailable:
                 _consumer_name,
                 "fwht128_quant_fp8",
                 reason=_REASON,
-                affected_versions=_AFFECTED,
                 remove_when=_REMOVE_WHEN,
             )(fwht128_quant_fp8)

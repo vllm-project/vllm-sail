@@ -1,15 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
-"""vLLM version compatibility for the PPU plugin.
+"""vLLM compatibility check for the PPU plugin.
 
-**Policy (learned from vllm-ascend, which got this wrong):** version gates live
-*only* in this module and in patch-module *selection*. Never call
-:func:`vllm_version_is` from a hot path — vllm-ascend has 28 such call sites
-inside its model runner and attention code and calls it out as a mistake.
+Compatibility with upstream vLLM is verified through source-contract, API, and
+functional tests rather than hardcoded version ranges. This module provides a
+lightweight runtime check against the single source of truth recorded in the
+packaged kernel manifest (``csrc/upstream/manifest.toml``'s ``upstream_ref``):
 
-Release-tag manifests use the release range below. Commit-pinned checkpoints require
-the full source commit recorded in both ``.github/vllm-main-verified.commit``
-and ``csrc/upstream/manifest.toml``. The latter ships inside the wheel, so the
-same identity check works outside a source checkout.
+* **Default (warn):** log a warning when the installed vLLM build does not
+  match ``upstream_ref`` so developers can test against neighboring commits or
+  releases without being blocked by a version gate, while still flagging
+  mismatched environments prominently in startup logs.
+* **Strict (CI / release verification):** pass ``strict=True`` or set
+  ``VLLM_SAIL_STRICT_COMPAT=1`` to raise :class:`RuntimeError` on mismatch.
 """
 
 from __future__ import annotations
@@ -19,37 +21,27 @@ import re
 
 from vllm.logger import init_logger
 
+from vllm_sail import envs
+
 logger = init_logger(__name__)
 
-#: Inclusive lower bound / exclusive upper bound of the supported vLLM range.
-MIN_VLLM_VERSION = "0.32.0"
-MAX_VLLM_VERSION_EXCLUSIVE = "0.33.0"
-
 _checked = False
+_last_matched = False
 
 
-def _verified_upstream_commit() -> str | None:
-    """Read the exact source pin from the metadata shipped with the kernels."""
+def _upstream_ref() -> str:
+    """Read the verified upstream ref from the packaged kernel metadata."""
     from vllm_sail.native.manifest import load
 
-    ref = load().upstream_ref
-    return ref if re.fullmatch(r"[0-9a-f]{40}", ref) else None
+    return load().upstream_ref.strip()
+
+
+def _is_commit_sha(ref: str) -> bool:
+    return bool(re.fullmatch(r"[0-9a-f]{40}", ref))
 
 
 def installed_vllm_version() -> str:
-    """The installed vLLM version string.
-
-    ``VLLM_VERSION`` overrides the detected value. This escape hatch exists
-    because a vLLM installed from git reports a version like
-    ``0.1.dev1+g4bdc8a788``, which no range check can interpret; developers set
-    ``VLLM_VERSION`` to the release the checkout is based on. (Same mechanism as
-    ``vllm_ascend.utils``.) An exact main pin still requires the full commit
-    hash; a numeric override cannot establish its source identity.
-    """
-    override = os.getenv("VLLM_VERSION")
-    if override:
-        return override.strip()
-
+    """Read the version reported by the installed vLLM package."""
     try:
         from vllm.version import __version__
 
@@ -58,130 +50,99 @@ def installed_vllm_version() -> str:
         return "unknown"
 
 
-def _version_key(version: str) -> tuple[int, ...] | None:
-    """Parse the leading ``X.Y[.Z]`` of a version into a comparable tuple.
-
-    Returns ``None`` when no ``X.Y`` prefix can be read, which callers treat as
-    "cannot judge" rather than "incompatible".
-    """
-    head = version.strip().lstrip("v").split("+", 1)[0]
-    parts: list[int] = []
-    for chunk in head.split("."):
-        digits = ""
-        for char in chunk:
-            if not char.isdigit():
-                break
-            digits += char
-        if not digits:
-            break
-        parts.append(int(digits))
-    return tuple(parts) if len(parts) >= 2 else None
+def _release_line(version: str) -> str | None:
+    """Read the major and minor components from a release or SCM version."""
+    match = re.match(r"v?([0-9]+)\.([0-9]+)", version.strip())
+    if match is None:
+        return None
+    major, minor = match.groups()
+    return f"{major.lstrip('0') or '0'}.{minor.lstrip('0') or '0'}"
 
 
-def is_dev_build(version: str) -> bool:
-    """Whether ``version`` looks like a VCS build rather than a release.
-
-    This matters because setuptools-scm produces versions whose numeric prefix is
-    *not* always a reliable ordering key. A shallow clone with no tags fetched
-    reports something like ``0.1.dev1+g4bdc8a788``, whose ``(0, 1)`` prefix cannot
-    prove which release the checkout is based on. Those ambiguous builds must use
-    ``VLLM_VERSION``; a source build whose numeric prefix is inside the supported
-    range remains usable without an override.
-    """
-    lowered = version.strip().lower()
-    return ".dev" in lowered or "+g" in lowered or lowered.endswith(".dev")
-
-
-def vllm_version_is(target: str) -> bool:
-    """Whether the installed vLLM matches ``target`` exactly.
-
-    Use for patch *selection* only, e.g. choosing between two variants of a
-    patch across an upstream API change. Never in a hot path.
-    """
-    return installed_vllm_version().lstrip("v").split("+", 1)[0] == target.lstrip("v")
-
-
-def vllm_version_at_least(target: str) -> bool:
-    """Whether the installed vLLM is >= ``target``. ``False`` if unparseable."""
-    current = _version_key(installed_vllm_version())
-    wanted = _version_key(target)
-    if current is None or wanted is None:
-        return False
-    return current >= wanted
-
-
-def check_vllm_compatibility(*, force: bool = False) -> None:
-    """Validate the installed vLLM against its exact pin or release range.
-
-    Called once from :func:`vllm_sail.register_out_of_tree`, before any patch is
-    applied, so that a version mismatch produces an actionable error instead of
-    an obscure ``AttributeError`` from a patch whose target has moved.
-
-    Raises:
-        RuntimeError: The installed build cannot prove its exact main commit,
-            or a release-tag manifest's version falls outside its range.
-    """
-    global _checked
-    if _checked and not force:
-        return
-    # A forced re-check replaces the cached result. Leave the cache invalid if
-    # validation below fails and the caller catches the exception.
-    _checked = False
-
-    version = installed_vllm_version()
-    pin = _verified_upstream_commit()
-    if pin is not None:
+def _mismatch_reason(version: str, ref: str) -> str | None:
+    """Return a human-readable mismatch message, or ``None`` when compatible."""
+    if _is_commit_sha(ref):
         # Main and release tags may live on different branches. SCM's numeric
         # prefix then describes an older tag, while its full hash still names
         # the source precisely. An abbreviation cannot establish this identity.
         commit = re.search(r"(?:\+|\.)g([0-9a-f]{40})(?=\.|$)", version)
-        if commit is None or commit.group(1) != pin:
-            raise RuntimeError(
-                f"vllm-sail {_plugin_version()} requires verified vLLM commit "
-                f"{pin}, but the installed version is {version!r}. Build that "
-                "exact source with the full SCM commit hash and unset "
-                "VLLM_VERSION and VLLM_VERSION_OVERRIDE."
-            )
-        _checked = True
-        logger.debug("vllm-sail validated against vLLM commit %s", pin)
+        if commit is not None and commit.group(1) == ref:
+            return None
+        return (
+            f"vllm-sail {_plugin_version()} was built against verified vLLM commit "
+            f"{ref}, but the installed vLLM version is {version!r}. Build that "
+            "exact source with the full SCM commit hash."
+        )
+
+    release_line = _release_line(ref)
+    if release_line is not None:
+        if _release_line(version) == release_line:
+            return None
+        return (
+            f"vllm-sail {_plugin_version()} was built against vLLM {ref} "
+            f"(expected {release_line}.x), but the installed vLLM version is "
+            f"{version!r}. Install a matching vLLM build or set VLLM_VERSION if "
+            "running from a source checkout."
+        )
+
+    if version.strip().lstrip("v") == ref.lstrip("v"):
+        return None
+    return (
+        f"vllm-sail {_plugin_version()} was built against vLLM ref {ref!r}, "
+        f"but the installed vLLM version is {version!r}."
+    )
+
+
+def check_vllm_compatibility(
+    *, force: bool = False, strict: bool | None = None
+) -> None:
+    """Validate the installed vLLM against the packaged manifest's ``upstream_ref``.
+
+    Called once from :func:`vllm_sail.register_out_of_tree`. By default, a
+    mismatch logs a warning and allows startup to proceed; set
+    ``VLLM_SAIL_STRICT_COMPAT=1`` or pass ``strict=True`` (used in CI) to raise
+    :class:`RuntimeError` instead.
+
+    Raises:
+        RuntimeError: Strict mode is enabled and the installed vLLM build does
+            not match the manifest's ``upstream_ref``.
+    """
+    global _checked, _last_matched
+    effective_strict = envs.VLLM_SAIL_STRICT_COMPAT if strict is None else strict
+    if _checked and not force and (_last_matched or not effective_strict):
         return
-    key = _version_key(version)
-    supported = f">={MIN_VLLM_VERSION},<{MAX_VLLM_VERSION_EXCLUSIVE}"
-    explicit = os.getenv("VLLM_VERSION") is not None
-    low = _version_key(MIN_VLLM_VERSION)
-    high = _version_key(MAX_VLLM_VERSION_EXCLUSIVE)
-    assert low is not None and high is not None
 
-    if key is None or (is_dev_build(version) and not explicit and key < low):
-        raise RuntimeError(
-            f"vllm-sail {_plugin_version()} cannot verify compatibility against "
-            f"vLLM version {version!r}. This plugin requires vLLM {supported}. "
-            "If this is a source checkout based on a supported release, set "
-            "VLLM_VERSION to that release. Refusing to apply patches to an "
-            "unverifiable vLLM build."
-        )
+    # Leave the cache invalid if strict validation raises and the caller catches it.
+    _checked = False
+    _last_matched = False
 
-    if not (low <= key < high):
-        raise RuntimeError(
-            f"vllm-sail {_plugin_version()} requires vLLM {supported}, but vLLM "
-            f"{version} is installed. Install a matching vLLM, or set "
-            "VLLM_VERSION if you are running a git build of a supported "
-            "release. Refusing to patch a vLLM this plugin has not been "
-            "validated against."
-        )
-
-    if is_dev_build(version) and not explicit:
-        logger.warning(
-            "vllm-sail is accepting development build %r because its numeric "
-            "version is inside the tested vLLM range %s. Set VLLM_VERSION to "
-            "the release your checkout is based on to make this check "
-            "authoritative.",
+    ref = _upstream_ref()
+    # Only release-line checks accept a developer-supplied version. Commit
+    # checks must read the identity recorded in the installed build.
+    override = (
+        (os.getenv("VLLM_VERSION") or "").strip()
+        if _release_line(ref) is not None
+        else ""
+    )
+    version = override or installed_vllm_version()
+    mismatch = _mismatch_reason(version, ref)
+    if mismatch is None:
+        _checked = True
+        _last_matched = True
+        logger.debug(
+            "vllm-sail %s validated against vLLM %s (%s)",
+            _plugin_version(),
             version,
-            supported,
+            ref,
         )
+        return
 
+    if effective_strict:
+        raise RuntimeError(mismatch)
+
+    logger.warning("%s", mismatch)
     _checked = True
-    logger.debug("vllm-sail %s validated against vLLM %s", _plugin_version(), version)
+    _last_matched = False
 
 
 def _plugin_version() -> str:

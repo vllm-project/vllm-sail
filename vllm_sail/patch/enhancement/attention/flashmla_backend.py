@@ -39,7 +39,6 @@ from vllm.v1.attention.backends.mla import flashmla as _flashmla_backend
 
 from vllm_sail.patch.utils import patch
 
-_AFFECTED = ">=0.32.0,<0.33.0"
 _MODULE = "vllm.v1.attention.backends.mla.flashmla"
 
 #: Hard-coded SM count the fork uses for the PPU MLA scheduler buffers.
@@ -59,7 +58,6 @@ _upstream_build_decode = _flashmla_backend.FlashMLAMetadataBuilder._build_decode
         "PPU runs FlashMLA on capability major 8. Upstream accepts only majors "
         "9 and 10, so without this PPU could never select the FlashMLA backend."
     ),
-    affected_versions=_AFFECTED,
     remove_when="upstream accepts PPU's capability for FlashMLA natively.",
 )
 def supports_compute_capability(cls, capability: DeviceCapability) -> bool:
@@ -76,7 +74,6 @@ def supports_compute_capability(cls, capability: DeviceCapability) -> bool:
         "tile-scheduler buffers ('temporarily use hard-coded ppu magic number, "
         "this is align with ppu mla algo') instead of querying the device."
     ),
-    affected_versions=_AFFECTED,
     remove_when=(
         "PPU reports a compute-unit count the FlashMLA scheduler can use "
         "directly, and the fork's hard-coded 320 is removed."
@@ -113,7 +110,6 @@ def builder_init(
         "branch forwards to flash_mla_with_kvcache_fp8; num_splits stays None as "
         "the sail kernel requires."
     ),
-    affected_versions=_AFFECTED,
     remove_when="PPU builds the FP8 dense FlashMLA metadata extension natively.",
 )
 def _build_decode(

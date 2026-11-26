@@ -48,7 +48,7 @@ def install():
         loaded = sys.modules.get(name)
         if loaded is not None and getattr(loaded, "select_regions", None) is original:
             patch(name, "select_regions", reason=_REASON,
-                  affected_versions=">=0.32.0,<0.33.0", remove_when=_REMOVE)(select)
+                  remove_when=_REMOVE)(select)
     _installed = True
 
 

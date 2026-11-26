@@ -48,7 +48,6 @@ from vllm.models.deepseek_v41.nvidia import flash_mla_mega_attn as _upstream_meg
 from vllm_sail.patch.utils import patch
 
 _MODULE = "vllm.models.deepseek_v41.nvidia.flash_mla_mega_attn"
-_AFFECTED_VERSIONS = ">=0.32.0,<0.33.0"
 
 logger = init_logger(__name__)
 
@@ -89,7 +88,6 @@ def scale_permute_action(axis: int, perm_length: int) -> str:
         "per-row scale is invariant under the K-chunk permutation, so skipping "
         "it is exact."
     ),
-    affected_versions=_AFFECTED_VERSIONS,
     remove_when=(
         "upstream permutes wo_a.weight_scale only when the scale is an MXFP8 "
         "block layout (or selects the permutation from the quant scheme)."

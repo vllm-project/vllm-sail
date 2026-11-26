@@ -39,7 +39,6 @@ from vllm_sail.patch.utils import patch
 
 logger = init_logger(__name__)
 
-_AFFECTED = ">=0.32.0,<0.33.0"
 
 #: Upstream FLA ops modules and the autotuned kernels the fork decorates with
 #: cache_results=True. Kept explicit so an upstream rename fails loudly.
@@ -247,7 +246,6 @@ def _install() -> None:
                     "cache_results=True. UNCONDITIONAL in the fork (all "
                     "platforms), reproduced as-in-fork."
                 ),
-                affected_versions=_AFFECTED,
                 remove_when=(
                     "upstream enables cache_results on the FLA autotune sites, "
                     "or the fork drops the cache_results additions."

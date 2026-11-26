@@ -13,8 +13,8 @@ Use an SDK environment with the following components installed together:
 | SAIL SDK | Driver, HGGC headers, runtime libraries and `hgcc` compiler |
 | SAIL PyTorch | A PPU build of PyTorch from the SAIL fork |
 | Triton | The [Triton for SAIL](https://github.com/t-head/triton-for-sail) build matching your SDK |
-| Compute libraries | PPU builds of `acext`, `deep_gemm`, `flash_attn` and `flash_attn_3`, as needed by the selected backend |
-| Model-specific libraries | PPU FlashMLA, PLA, TileLang or DeepEP when required by the workload |
+| Compute libraries | PPU builds of `acext`, `deep_gemm`, `deep_select`, `flash_attn` and `flash_attn_3`, as needed by the selected backend |
+| Model-specific libraries | PPU FlashMLA, `msa_for_sail`, PLA, TileLang, FlashInfer or DeepEP when required by the workload |
 | Python | 3.10–3.13, with matching SDK wheels |
 
 Obtain the SDK and its Python packages through your PPU software distribution.
@@ -68,15 +68,14 @@ SDK, mirror and parallelism options. Continue with step 4 for runtime checks.
 
 Install a vLLM build with `VLLM_TARGET_DEVICE=empty` in the same environment.
 This lets the PPU plugin provide the native operations used by the engine.
-The supported release line is `>=0.32.0,<0.33.0`. Build the exact upstream commit
-recorded in [the verified pin](../../.github/vllm-main-verified.commit) and
+Build the exact upstream commit recorded in
+[the verified pin](../../.github/vllm-main-verified.commit) and
 [kernel manifest](../../csrc/upstream/manifest.toml); both records must agree.
-**v0.32.0** is the release baseline for this line.
 
-For a commit-pinned main build, the full upstream SHA establishes compatibility.
-The numeric prefix produced by setuptools-scm or `git describe` can depend on
-the tags present in the build checkout; it does not change the supported release
-range. Keep the full SHA in the wheel version and leave version overrides unset.
+For a commit-pinned main build, the runtime check reads the full upstream SHA
+from the installed vLLM version. A mismatch logs a warning by default so you
+can test neighboring upstream builds with API and functional tests. Set
+`VLLM_SAIL_STRICT_COMPAT=1` to reject mismatches. CI passes `strict=True`.
 
 Use a matching wheel supplied with your PPU environment, or build that upstream
 source pin. For a source build, prepare vLLM's build and runtime dependencies

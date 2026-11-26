@@ -71,6 +71,7 @@ from vllm_sail.patch.enhancement.models import (
     glm5_next_indexer,  # noqa: F401
     glm5_next_mtp,  # noqa: F401
     kimi_k3,  # noqa: F401
+    kimi_k3_dsa_indexer,  # noqa: F401
     llama4,  # noqa: F401
     minimax_m3,  # noqa: F401
     minimax_m3_msa,  # noqa: F401

@@ -38,6 +38,50 @@ def native_kernels():
     install()
 
 
+@pytest.mark.parametrize("force_fp32", [False, True])
+def test_bf16_router_load_and_fp32_logits(monkeypatch, force_fp32):
+    from vllm.config import VllmConfig, set_current_vllm_config
+    from vllm.models.minimax_m3.nvidia import model
+    from vllm.platforms import current_platform
+    from vllm.utils.torch_utils import set_default_torch_dtype
+
+    from vllm_sail import register_out_of_tree
+
+    register_out_of_tree()
+    if not current_platform.is_ppu():
+        pytest.skip("MiniMax BF16 router test requires a PPU")
+    for module in ("layers.linear", "parameter"):
+        prefix = f"vllm.model_executor.{module}.get_tensor_model_parallel"
+        monkeypatch.setattr(f"{prefix}_rank", lambda: 0)
+        monkeypatch.setattr(f"{prefix}_world_size", lambda: 1)
+    with set_current_vllm_config(VllmConfig()), set_default_torch_dtype(torch.bfloat16):
+        with torch.device("cuda"):
+            gate = model.GateLinear(
+                6144,
+                128,
+                bias=False,
+                params_dtype=torch.float32,
+                out_dtype=torch.float32,
+                force_fp32_compute=force_fp32,
+                prefix="mlp.gate",
+            )
+        weight = torch.zeros((128, 6144), dtype=torch.float32)
+        weight[:, 0] = 1 + 2**-10
+        weight[:, 1] = 1
+        gate.weight.weight_loader(gate.weight, weight)
+        assert gate.weight.dtype == (torch.float32 if force_fp32 else torch.bfloat16)
+        assert gate.allow_cublas_router_gemm is (not force_fp32)
+        hidden = torch.zeros((64, 6144), dtype=torch.bfloat16, device="cuda")
+        hidden[:, 0] = 1
+        hidden[:, 1] = 2**-10
+        logits, bias = gate(hidden)
+    assert logits.dtype == torch.float32 and bias is None
+    expected = 1 + (2 if force_fp32 else 1) * 2**-10
+    torch.testing.assert_close(
+        logits, torch.full_like(logits, expected), atol=0, rtol=0
+    )
+
+
 def make_cos_sin_cache(max_pos, rotary_dim, base, dtype, device):
     inv_freq = 1.0 / (
         base

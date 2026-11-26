@@ -13,7 +13,6 @@ from vllm_sail.patch.utils import patch
 _MODULE = "vllm.models.deepseek_v4.attention"
 _METADATA = dict(
     reason="PPU paged logits metadata needs the indexer's unpadded query head count and dimension.",
-    affected_versions=">=0.32.0,<0.33.0",
     remove_when="DeepseekV4Indexer propagates query dimensions into its MLA cache spec.",
 )
 _cache_init = attention.DeepseekV4IndexerCache.__init__
@@ -25,7 +24,6 @@ _cache_spec = attention.DeepseekV4IndexerCache.get_kv_cache_config
     _MODULE,
     "DeepseekV4IndexerCache.__init__",
     reason="PPU paged logits metadata needs the indexer query head count and dimension.",
-    affected_versions=">=0.32.0,<0.33.0",
     remove_when="DeepseekV4Indexer propagates query dimensions into its MLA cache spec.",
 )
 def cache_init(self, *args, n_head=None, q_head_dim=None, **kwargs):
@@ -38,7 +36,6 @@ def cache_init(self, *args, n_head=None, q_head_dim=None, **kwargs):
     _MODULE,
     "DeepseekV4Indexer.__init__",
     reason="PPU paged logits metadata needs the indexer query head count and dimension.",
-    affected_versions=">=0.32.0,<0.33.0",
     remove_when="DeepseekV4Indexer propagates query dimensions into its MLA cache spec.",
 )
 def indexer_init(self, *args, **kwargs):
@@ -52,7 +49,6 @@ def indexer_init(self, *args, **kwargs):
     _MODULE,
     "DeepseekV4IndexerCache.get_kv_cache_config",
     reason="PPU paged logits metadata needs the indexer query head count and dimension.",
-    affected_versions=">=0.32.0,<0.33.0",
     remove_when="DeepseekV4Indexer propagates query dimensions into its MLA cache spec.",
 )
 def get_kv_cache_config(self, vllm_config):

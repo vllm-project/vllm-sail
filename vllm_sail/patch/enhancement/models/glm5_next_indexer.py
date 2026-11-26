@@ -21,7 +21,6 @@ from vllm.v1.attention.backends.mla.indexer import Glm5NextIndexerBackend
 from vllm_sail.patch.utils import patch
 
 _kernel_sizes = Glm5NextIndexerBackend.get_supported_kernel_block_sizes
-_AFFECTED = ">=0.32.0,<0.33.0"
 
 
 def _resolve_index_kpool(kv_cache_spec) -> int:
@@ -47,7 +46,6 @@ def _resolve_index_kpool(kv_cache_spec) -> int:
         "leaving the common-block selector free to pick a block compatible with "
         "other cache groups (for example the 640-token mamba pages)."
     ),
-    affected_versions=_AFFECTED,
     remove_when=(
         "The indexer backend obtains the platform page-size contract, including "
         "the 810E 64-token multiple, from SAIL DeepGEMM."

@@ -17,7 +17,6 @@ from vllm_sail.patch.utils import patch
 
 _PREFIX = "vllm.models.deepseek_v41"
 REASON = "PPU V4.1 W8A8 uses INT8 DSA and software FP8 main-cache operators."
-AFFECTED_VERSIONS = ">=0.32.0,<0.33.0"
 REMOVE_WHEN = "V4.1 provides quantization-aware PPU operator registration for W8A8."
 _q = ops.fused_indexer_q_rope_quant
 _k = indexer_k_store.indexer_k_norm_rope_store
@@ -33,7 +32,7 @@ def _uses_int8():
 
 @patch(
     _PREFIX + ".common.ops", "fused_indexer_q_rope_quant",
-    reason=REASON, affected_versions=AFFECTED_VERSIONS, remove_when=REMOVE_WHEN,
+    reason=REASON, remove_when=REMOVE_WHEN,
 )
 def fused_indexer_q_rope_quant(
     positions, index_q, index_q_cos_sin_cache, index_weights,
@@ -59,7 +58,7 @@ def fused_indexer_q_rope_quant(
 
 @patch(
     _PREFIX + ".common.ops.indexer_k_store", "indexer_k_norm_rope_store",
-    reason=REASON, affected_versions=AFFECTED_VERSIONS, remove_when=REMOVE_WHEN,
+    reason=REASON, remove_when=REMOVE_WHEN,
 )
 def indexer_k_norm_rope_store(
     k_pre, positions, cos_sin_cache, rms_norm_weight, rms_norm_eps,
@@ -78,7 +77,7 @@ def indexer_k_norm_rope_store(
 
 @patch(
     _PREFIX + ".common.ops.fused_compress_quant_cache", "rope_quant_insert",
-    reason=REASON, affected_versions=AFFECTED_VERSIONS, remove_when=REMOVE_WHEN,
+    reason=REASON, remove_when=REMOVE_WHEN,
 )
 def rope_quant_insert(latent, positions, cos_sin_cache, kv_cache, slot_mapping,
                       compress_ratio, fp8_scale=None):
@@ -93,7 +92,7 @@ def rope_quant_insert(latent, positions, cos_sin_cache, kv_cache, slot_mapping,
 
 @patch(
     _PREFIX + ".common.ops.cache_utils", "dequantize_and_gather_k_cache",
-    reason=REASON, affected_versions=AFFECTED_VERSIONS, remove_when=REMOVE_WHEN,
+    reason=REASON, remove_when=REMOVE_WHEN,
 )
 def dequantize_and_gather_k_cache(out, k_cache, seq_lens, gather_lens, block_table,
                                 block_size, offset, use_fnuz=False, max_gather_len=None):
@@ -169,7 +168,6 @@ def _rebind_aliases():
             for name, original, replacement in _ALIASES:
                 if getattr(module, name, None) is original:
                     patch(module_name, name, reason=REASON,
-                          affected_versions=AFFECTED_VERSIONS,
                           remove_when=REMOVE_WHEN)(replacement)
 
 

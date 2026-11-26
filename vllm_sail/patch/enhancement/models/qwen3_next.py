@@ -19,8 +19,6 @@ from __future__ import annotations
 import vllm_sail.envs as ppu_envs
 from vllm_sail.patch.utils import patch
 
-_AFFECTED = ">=0.32.0,<0.33.0"
-
 _nvtx = None  # (range_push, range_pop), resolved lazily on first use
 
 
@@ -56,7 +54,6 @@ def _resolve_nvtx():
         "Ports the fork's NVTX profiling scaffold for qwen3_next; no-op "
         "unless VLLM_PPU_NVTX_PROFILE is set and torch.cuda.nvtx imports."
     ),
-    affected_versions=_AFFECTED,
     remove_when=(
         "the vllm_sail.profiling subpackage (Phase 6) takes over model-level "
         "NVTX instrumentation, or upstream adds NVTX hooks to qwen3_next."
@@ -74,7 +71,6 @@ def th_nvtx_range_push(label) -> None:
         "Ports the fork's NVTX profiling scaffold for qwen3_next; no-op "
         "unless VLLM_PPU_NVTX_PROFILE is set and torch.cuda.nvtx imports."
     ),
-    affected_versions=_AFFECTED,
     remove_when=(
         "the vllm_sail.profiling subpackage (Phase 6) takes over model-level "
         "NVTX instrumentation, or upstream adds NVTX hooks to qwen3_next."

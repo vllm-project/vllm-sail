@@ -22,7 +22,6 @@ from vllm_sail.patch.utils import patch
 
 _TARGET = "vllm.models.step5.nvidia.layernorm"
 _REASON = "Step5 checks Tensor.is_cuda directly and selects unsupported CuTeDSL on PPU."
-_AFFECTED = ">=0.32.0,<0.33.0"
 _REMOVE_WHEN = "Step5 normalization selects kernels through platform capabilities."
 
 _upstream_apply_step5_rms_norm = _layernorm.apply_step5_rms_norm
@@ -33,7 +32,6 @@ _upstream_apply_step5_add_rms_norm = _layernorm.apply_step5_add_rms_norm
     _TARGET,
     "apply_step5_rms_norm",
     reason=_REASON,
-    affected_versions=_AFFECTED,
     remove_when=_REMOVE_WHEN,
 )
 def apply_step5_rms_norm(
@@ -66,7 +64,6 @@ def apply_step5_rms_norm(
     _TARGET,
     "apply_step5_add_rms_norm",
     reason=_REASON,
-    affected_versions=_AFFECTED,
     remove_when=_REMOVE_WHEN,
 )
 def apply_step5_add_rms_norm(

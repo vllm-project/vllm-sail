@@ -18,8 +18,8 @@ PR#229 that are decidable without a kernel:
   error, and static wiring of ``_alloc_attn_out`` / ``_o_proj`` / both kernel
   call sites;
 * the ``dsv41_kv_record`` patch module: non-PPU delegation, once-per-process
-  env caching, the forensic log line, and the patch metadata (target,
-  affected_versions against the repo's SUPPORTED_RANGE);
+  env caching, the forensic log line, and the patch metadata (target, reason,
+  and remove_when);
 * the ``_select_dsv4_attn_cls`` selector patch: which attention class is
   returned for each (platform, selected, gate) combination.
 
@@ -44,7 +44,6 @@ from types import SimpleNamespace
 import pytest
 
 from tests.support.modules import load_patch
-from tests.support.upstream import SUPPORTED_RANGE
 from vllm_sail import envs
 
 _REAL_FIND_SPEC = importlib.util.find_spec
@@ -324,7 +323,7 @@ def test_lora_closes_fused_gate_before_the_wheel_probe(gate, monkeypatch) -> Non
     config.lora_config = object()
 
     def forbidden(*args, **kwargs):
-        raise AssertionError("LoRA 配置不应探测 fused wheel")
+        raise AssertionError("LoRA config must not probe the fused wheel")
 
     monkeypatch.setattr(importlib.util, "find_spec", forbidden)
     ok, report = gate.module.fused_gate(config)
@@ -641,10 +640,6 @@ def test_kv_record_patch_metadata(kv_record) -> None:
     assert records, "dsv41_kv_record did not register a PatchRecord"
     record = records[-1]
     assert record.kind == "module"
-    assert record.affected_versions == SUPPORTED_RANGE, (
-        "dsv41_kv_record must declare the repo's supported vLLM range "
-        f"({SUPPORTED_RANGE}), got {record.affected_versions!r}"
-    )
     assert record.remove_when.strip()
     assert record.reason.strip()
 
@@ -831,7 +826,6 @@ def test_selector_patch_metadata(selector) -> None:
     assert originals is not None and target in originals
     records = [r for r in selector.registry if r.target == target]
     assert records, "selector patch did not register a PatchRecord"
-    assert records[-1].affected_versions == SUPPORTED_RANGE
 
 
 # ---------------------------------------------------------------------------
@@ -1146,7 +1140,6 @@ def test_fused_layout_patch_metadata(permute_patch) -> None:
     assert records, "the loader patch did not register a PatchRecord"
     record = records[-1]
     assert record.kind == "module"
-    assert record.affected_versions == SUPPORTED_RANGE
     assert record.remove_when.strip() and record.reason.strip()
 
 

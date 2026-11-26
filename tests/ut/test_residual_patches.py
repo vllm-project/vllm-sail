@@ -5,7 +5,7 @@ Two tiers, both runnable on a bare CPU runner with no vLLM:
 
 * **Bare-CPU import + metadata shape.** The residual leaf modules define their
   replacements without importing vLLM at module scope, so they import cleanly
-  here. Their mandatory ``reason`` / ``affected_versions`` / ``remove_when``
+  here. Their mandatory ``reason`` / ``remove_when``
   metadata is asserted twice: from the ``METADATA`` tuples the modules expose,
   and structurally, by AST-scanning every ``patch`` / ``patch_value`` /
   ``PatchRecord`` call for the three keyword arguments.
@@ -44,7 +44,7 @@ MODULE_NAMES = (
     "kernel_moe_backend_literal",
     "minimax_fused_ar_rms_qk",
 )
-REQUIRED_METADATA = ("reason", "affected_versions", "remove_when")
+REQUIRED_METADATA = ("reason", "remove_when")
 
 #: Loaded once per session: importing through the ``vllm_sail.patch.enhancement``
 #: package chain would execute that package's vLLM-dependent ``__init__``, so the
@@ -147,11 +147,10 @@ def test_metadata_shape(name: str) -> None:
     module = _module(name)
     metadata = module.METADATA
     assert metadata, f"{name} declares no patch metadata"
-    for target, reason, affected, remove_when in metadata:
+    for target, reason, remove_when in metadata:
         assert target.startswith("vllm."), target
-        for value in (reason, affected, remove_when):
+        for value in (reason, remove_when):
             assert isinstance(value, str) and value.strip(), target
-        assert ">=" in affected and "<" in affected, target
         assert remove_when.strip().lower() != "todo", target
 
 

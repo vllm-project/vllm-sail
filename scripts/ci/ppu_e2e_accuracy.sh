@@ -285,7 +285,7 @@ versions = {
     "torch": safe_version("torch", getattr(torch, "__version__", None)),
 }
 try:
-    check_vllm_compatibility(force=True)
+    check_vllm_compatibility(force=True, strict=True)
 except Exception as exc:
     raise SystemExit(
         f"vLLM compatibility check failed ({type(exc).__name__}): "

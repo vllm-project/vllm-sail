@@ -14,7 +14,6 @@ from vllm_sail.patch.bodies import bind_body
 from vllm_sail.patch.utils import PATCH_MARKER, patch
 
 _MODULE = "vllm.v1.attention.backends.fa_utils"
-_AFFECTED = ">=0.32.0,<0.33.0"
 
 
 def get_flash_attn_version(
@@ -158,7 +157,6 @@ get_flash_attn_version = patch(
     _MODULE,
     "get_flash_attn_version",
     reason="PPU prefers FA3 before applying configuration and compatibility fallbacks, including ALiBi.",
-    affected_versions=_AFFECTED,
     remove_when="The FlashAttention capability resolver supports PPU through a platform hook.",
 )(bind_body(get_flash_attn_version, _fa_utils))
 
@@ -199,7 +197,6 @@ flash_attn_supports_kv_cache_dtype = patch(
     _MODULE,
     "flash_attn_supports_kv_cache_dtype",
     reason="PPU 1.5 FA3 supports FP8 descales; the NVIDIA SM90 gate excludes PPU.",
-    affected_versions=_AFFECTED,
     remove_when="The FlashAttention capability resolver supports PPU through a platform hook.",
 )(bind_body(flash_attn_supports_kv_cache_dtype, _fa_utils))
 
@@ -225,6 +222,5 @@ for _name, _consumers in _CONSUMERS.items():
                 _consumer,
                 _name,
                 reason="A preloaded attention consumer must use PPU FA capabilities.",
-                affected_versions=_AFFECTED,
                 remove_when="Attention consumers resolve FA capabilities through their provider module.",
             )(_replacement)

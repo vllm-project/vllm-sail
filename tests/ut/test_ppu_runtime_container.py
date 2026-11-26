@@ -395,7 +395,7 @@ def test_accuracy_self_check_redacts_raw_version_on_compat_failure(tmp_path):
         '__version__ = "0.34.0.dev1+internal.host"\n', encoding="utf-8"
     )
     (stubs / "vllm_sail/compat.py").write_text(
-        "def check_vllm_compatibility(force=True):\n"
+        "def check_vllm_compatibility(force=True, strict=False):\n"
         "    raise RuntimeError(\"installed version is '0.10.2+registry.internal'\")\n",
         encoding="utf-8",
     )
@@ -517,7 +517,8 @@ def test_accuracy_script_redacts_raw_image_stack_in_stdout_and_artifacts(tmp_pat
         '__version__ = "0.34.0.dev1+example.invalid"\n', encoding="utf-8"
     )
     (stubs / "vllm_sail/compat.py").write_text(
-        "def check_vllm_compatibility(force=True): return None\n", encoding="utf-8"
+        "def check_vllm_compatibility(force=True, strict=False): return None\n",
+        encoding="utf-8",
     )
     (stubs / "evalscope/__init__.py").write_text(
         "TaskConfig = object\ndef run_task(*a, **k): pass\n", encoding="utf-8"

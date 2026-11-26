@@ -11,7 +11,7 @@ from vllm.model_executor.layers.linear import UnquantizedLinearMethod
 
 
 def reject_direct_reload():
-    """在分配或加载权重前拒绝无法重放的一次性转换。"""
+    """Reject non-replayable one-shot conversion before allocating or loading weights."""
     from vllm import envs
 
     if envs.VLLM_RELOAD_MODE == "direct":

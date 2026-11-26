@@ -1,16 +1,21 @@
 # Configuration
 
 Set environment variables before starting vLLM so the server and worker processes
-inherit the same configuration. Runtime defaults are defined in
-[`vllm_sail/envs.py`](../../vllm_sail/envs.py).
+inherit the same configuration. Runtime defaults and metadata are defined in
+[`vllm_sail/envs.py`](../../vllm_sail/envs.py); see the generated
+[Runtime environment variables](environment_variables.md) reference for the full
+table of variables, defaults, choices and aliases.
 
 Every `VLLM_SAIL_*` runtime variable accepts the corresponding `VLLM_PPU_*`
 name for compatibility. The SAIL name takes precedence whenever it is set,
 including `0` or an empty string. An empty boolean is false; an empty backend
 selection uses its default. Boolean truthy values are `true`, `1`, `yes` and
 `on`, case-insensitively. `is_set()` recognizes either name, and `snapshot()`
-reports effective values under SAIL names. `VLLM_DEEPEPLL_RECV_HOOK` keeps its
-shared upstream name.
+reports effective values under SAIL names. `VLLM_DEEPEPLL_RECV_HOOK`,
+`VLLM_GDN_DECODE_KERNEL`, and `VLLM_STEP5_INDEXER_FP8_AS_FP16` keep their
+shared or upstream names and have no `VLLM_PPU_*` aliases. `VLLM_SAIL_NVTX_PROFILE`
+and `VLLM_SAIL_DISABLE_MEGA_MHC` additionally accept `SAIL_NVTX_PROFILE` and
+`SAIL_DISABLE_MEGA_MHC` after their `VLLM_PPU_*` aliases.
 
 ## Plugin discovery
 
@@ -27,20 +32,10 @@ application in the allowlist.
 
 ## Backend selection
 
-| Variable | Default | Values / behavior |
-| --- | --- | --- |
-| `VLLM_SAIL_MOE_BACKEND` | Automatic | `deepgemm`, `acext`, `triton` |
-| `VLLM_SAIL_DENSE_BACKEND` | Automatic | `deepgemm`, `acext`, `triton` |
-| `VLLM_SAIL_DENSE_BF16_DEEPGEMM` | `0` | Opt into the PPU 1.5 BF16 dense DeepGEMM path |
-| `VLLM_SAIL_DEEPGEMM_MOE_TP_FUSED` | `0` | Enable the supported fused tensor-parallel MoE path |
-| `VLLM_SAIL_DEEPGEMM_MOE_FUSED_ACT_QUANT` | `0` | Fuse the activation and the second MoE GEMM's input quantization into DeepGEMM's SiLU/SiTU kernel for the FP8 and MXFP4 experts; the BF16 (w4a16 or unquantized) experts use its values-only kernel, which also replaces the standalone `vllm::silu_and_mul` / `vllm::situ_and_mul` that unquantized BF16 dense MLPs and shared experts run on |
-| `VLLM_SAIL_USE_PLA` | `1` | Allow PLA linear-attention paths where available |
-| `VLLM_GDN_DECODE_KERNEL` | `auto` on PPU | `auto`, `cuda`, `pla`, `triton`; selects GDN decode independently of prefill and KDA |
-| `VLLM_SAIL_QSA_KERNEL` | `auto` on PPU | `auto`, `cuda`, `triton`; selects the Qwen4Exp QSA sparse-attention kernel |
-| `VLLM_SAIL_FUSED_RMSNORM_QUANT` | `0` | Enable supported fused RMSNorm and quantization paths |
-| `VLLM_SAIL_USE_OPT_TOKEN_GROUP_QUANT` | `0` | Enable the optimized token-group quantization path |
-| `VLLM_SAIL_USE_TRITON_INT8_QUANT` | `1` | Use Triton dynamic per-token INT8 quantization |
-| `VLLM_DEEPEPLL_RECV_HOOK` | `1` | Use the deferred receive hook; `0` selects the event-based fallback |
+See [Backend selection](environment_variables.md#backend-selection) for the full
+list of runtime backend toggles (`VLLM_SAIL_MOE_BACKEND`,
+`VLLM_SAIL_DENSE_BACKEND`, `VLLM_GDN_DECODE_KERNEL`, `VLLM_SAIL_QSA_KERNEL`,
+DeepGEMM/PLA/DeepSelect/DeepEP switches and fused quantization flags).
 
 For example, to request the MoE DeepGEMM backend:
 
@@ -170,43 +165,111 @@ Prefill chunking retains upstream's chunker and BF16 budget conversion for the
 sparse backend. The PPU sparse builder includes SAIL's physical row padding in
 that budget; the dense path keeps the conservative upstream FP32 budget.
 
+### Mega mHC
+
+On Zhenwu M890 (`ZW-M890P`, capability 8.9), DeepSeek V4.1 automatically uses
+the PPU DeepGEMM Mega mHC kernel for `hidden_size=5120`, `hc_mult=4` when a
+DeepGEMM build exposing `mega_mhc` is installed. Set
+`VLLM_SAIL_DISABLE_MEGA_MHC=1` (also accepts `VLLM_PPU_DISABLE_MEGA_MHC` and
+`SAIL_DISABLE_MEGA_MHC`) to disable the PPU Mega mHC gate and fall back to the
+upstream TileLang mHC path for A/B bisection.
+
+### Fused norm-rope sparse attention
+
+An opt-in PPU fused norm-rope sparse-attention path is available for DeepSeek
+V4.1 when using a compatible `flash_mla` wheel. Enable it with
+`VLLM_SAIL_FUSED_NORM_ROPE_ATTN=1` and `VLLM_SAIL_PPU_KV_MXFP8=1` (528-byte
+MXFP8 KV record, read once per process); optional Zhenwu M890 extensions are
+`VLLM_SAIL_PPU_KV_NVFP4=1` (lossy 288-byte NVFP4 compressed KV record when
+`sliding_window % 8 == 0`) and `VLLM_SAIL_FUSED_ATTN_PER_TOKEN_SCALE=1` (exact
+per-token FP32 output scales). See
+[DeepSeek V4.1 variables](environment_variables.md#deepseek-v41) for exact
+defaults and aliases.
+
+When any capability, wheel, or topology gate is closed, the selector falls back
+to the baseline attention class and logs the closing gate.
+
+## Model-specific sparse attention
+
+### GLM-5-Next kpool
+
+On Zhenwu 810E, the INT8 kpool indexer defaults to
+`VLLM_SAIL_KPOOL_DECODE_LOGITS=non_paged` (`paged` is rejected on PPU) and
+guards its dense decode fallback with `VLLM_SAIL_KPOOL_MAX_DENSE_POOLS`. See
+[GLM-5-Next kpool variables](environment_variables.md#glm-5-next-kpool).
+
+### MiniMax M3 SAIL MSA
+
+MiniMax M3 / M3.1-Flash selects SAIL MSA sparse attention (`msa_for_sail`) by
+default on PPU (`VLLM_SAIL_MINIMAX_M3_MSA=1`) when the wheel, architecture, and
+model-shape gates pass (`block_size=128`, `head_dim=128`,
+`sparse_index_dim=128`, `sparse_topk_blocks=16`, `sparse_score_type="max"`,
+matching KV/index head counts, and context within the SAIL tile limit). On
+Zhenwu M890 with `--kv-cache-dtype fp8`, `auto` indexer KV dtype defaults to
+FP8 with BF16 top-k logits; on Zhenwu 810E or with a BF16 KV cache, SAIL MSA
+uses BF16 index/attend with FP32 logits. Selecting SAIL MSA downgrades full
+CUDA graphs to `PIECEWISE`. Use `VLLM_SAIL_MINIMAX_M3_MSA_INDEXER_TRITON=1` or
+`VLLM_SAIL_MINIMAX_M3_MSA_ATTEND_TRITON=1` to bisect either half against
+Triton; see
+[MiniMax M3 SAIL MSA variables](environment_variables.md#minimax-m3-sail-msa).
+
+### Step-5 DSA
+
+By default on PPU, Step-5 DSA runs upstream's Triton SM90 indexer scorer
+(native E4M3 on Zhenwu M890, software E4M3 on Zhenwu 810E) and FlashInfer
+prefill attention, with SAIL DeepSelect used for `auto` / `deep_select` region
+selection on Zhenwu M890 when `VLLM_SAIL_USE_DEEPSELECT=1`. Opt-in switches
+cover the resident-block Triton scorer (`VLLM_SAIL_STEP5_DSA_SCORES`), native
+HGGC radix selector (`VLLM_SAIL_STEP5_DSA_SELECTOR_PPU`), native HGGC BF16
+paged prefill/decode (`VLLM_SAIL_STEP5_DSA_PREFILL_BACKEND=native`,
+`VLLM_SAIL_STEP5_DSA_PREFILL_PPU`,
+`VLLM_SAIL_STEP5_DSA_PREFILL_BATCH_ATTENTION`), and FP16 indexer storage
+(`VLLM_STEP5_INDEXER_FP8_AS_FP16`, set before startup). See
+[Step-5 DSA variables](environment_variables.md#step-5-dsa).
+
 ## Compatibility controls
 
 For FP8/BF16 conversion and recipe selection, see [Online quantization](online_quantization.md).
 `VLLM_SAIL_FP8_LOAD_POLICY=native|bf16|int8` applies only when no explicit
 quantization argument was supplied. Leaving it unset preserves native behavior;
 the guide describes legacy opt-in variable precedence and source-format limits.
-
-| Variable | Default | Behavior |
-| --- | --- | --- |
-| `VLLM_SAIL_DISABLE_MOE_WNA16_CUDA` | `0` | Disable the native WNA16 MoE path; takes precedence over `VLLM_SAIL_FORCE_MOE_WNA16_CUDA` |
-| `VLLM_SAIL_FORCE_MOE_WNA16_CUDA` | `0` | Request the native WNA16 path; raises if the kernel is unavailable |
-| `VLLM_SAIL_ENABLE_MOE_MARLIN` | `0` | Legacy selection gate; does not enable excluded native Marlin kernels |
-| `VLLM_SAIL_FUSED_GDN_DECODE` | `1` | Legacy getter; dispatch now uses `VLLM_SAIL_USE_PLA` |
+Legacy MoE and GDN switches (`VLLM_SAIL_DISABLE_MOE_WNA16_CUDA`,
+`VLLM_SAIL_FORCE_MOE_WNA16_CUDA`, `VLLM_SAIL_ENABLE_MOE_MARLIN`,
+`VLLM_SAIL_FUSED_GDN_DECODE`) are listed in
+[Online quantization and compatibility variables](environment_variables.md#online-quantization-and-compatibility).
 
 ## Profiling
 
-| Variable | Default | Behavior |
-| --- | --- | --- |
-| `VLLM_SAIL_NVTX_PROFILE` | `0` | Enable optional NVTX instrumentation |
-| `VLLM_SAIL_NVTX_DUMP_TOPK` | `0` | Include top-k details in NVTX labels |
-| `VLLM_SAIL_NVTX_VFA_DUMP_SEQLEN` | `0` | Include sequence lengths in FlashAttention NVTX labels |
-
-`SAIL_NVTX_PROFILE` is also accepted, after `VLLM_PPU_NVTX_PROFILE` in precedence.
+Enable opt-in NVTX instrumentation with `VLLM_SAIL_NVTX_PROFILE=1` (also
+accepts `VLLM_PPU_NVTX_PROFILE` and `SAIL_NVTX_PROFILE`), along with optional
+label detail flags (`VLLM_SAIL_NVTX_DUMP_DICT`, `VLLM_SAIL_NVTX_DUMP_TOPK`,
+`VLLM_SAIL_NVTX_VFA_DUMP_SEQLEN`); see
+[Profiling variables](environment_variables.md#profiling).
 The profiling integration requires the optional `nvtx` package; install it with
 `python -m pip install --no-build-isolation -e '.[profiling]'` from the repository
-root. The SAIL SDK's optional `model_prof` package adds iteration hooks.
+root. The SAIL SDK's optional `model_prof` package adds iteration hooks, and
+`python -m vllm_sail.benchmarks.serve` provides a profiling-aware serving
+benchmark wrapper (`--skip-first-concurrency`).
+
+Separately, `--enable-layerwise-nvtx-tracing` is extended on PPU for the V2
+runner's target and draft/MTP models with shared-module deduplication. It does not
+require `VLLM_SAIL_NVTX_PROFILE` or the optional `nvtx` package; use
+`--enforce-eager` to observe per-layer markers without compilation or CUDA
+graph replay bypassing module hooks.
 
 ## Version metadata
 
-Commit-pinned installations must report the full source SHA recorded in the
-packaged kernel manifest. Leave `VLLM_VERSION` and `VLLM_VERSION_OVERRIDE` unset
-so the plugin can verify that identity.
+`vllm_sail.compat.check_vllm_compatibility()` checks the installed vLLM build
+against the `upstream_ref` recorded in the packaged kernel manifest
+(`csrc/upstream/manifest.toml`). By default, a mismatch logs a warning and
+continues so developers can validate neighboring upstream commits via API and
+functional tests. Set `VLLM_SAIL_STRICT_COMPAT=1` to reject a mismatch with a
+`RuntimeError`. CI passes `strict=True`.
 
-For release-tag metadata, `VLLM_VERSION` can state the actual release base when a
-source build reports an ambiguous version. Use `VLLM_VERSION=0.32.0` only for a
-checkout verified against that release. Commit-pinned installations still
-require their full source SHA.
+Commit-pinned installations match the full 40-character source SHA reported by
+the installed vLLM package. Release-tag manifests match the major and minor
+version. For those manifests, `VLLM_VERSION` can state the actual release version
+when a source build reports an ambiguous SCM prefix.
 
 ## Inspect the active environment
 
@@ -219,9 +282,7 @@ the PPU environment-variable snapshot. Package presence is a discovery check;
 successful loading and execution require the
 [verification steps](verification_guide.md).
 
-`PPU_SDK` is also read at runtime and defaults to `/usr/local/PPU_SDK`. When
-importing ACEXT fails on an unresolved cuBLAS symbol, the plugin preloads
-`CUDA_SDK/lib64/libcublas.so` from that root and retries.
+`PPU_SDK` is also read at runtime and defaults to `/usr/local/PPU_SDK`.
 
 Build-time settings such as `PPU_SDK`, `HGCC`, `CMAKE_HGCC_DIR` and
 `PYTORCH_SAIL_ARCH` are documented in [HGGC kernels](../developer_guide/kernels.md#build-settings).

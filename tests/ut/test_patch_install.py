@@ -138,7 +138,6 @@ def test_patches_actually_land(installed_patches) -> None:
 def test_every_patch_has_metadata(installed_patches) -> None:
     for record in installed_patches:
         assert record.reason.strip(), record.target
-        assert record.affected_versions.strip(), record.target
         assert record.remove_when.strip(), record.target
         # "when upstream fixes it" is not a verifiable condition.
         assert record.remove_when.strip().lower() != "todo", record.target

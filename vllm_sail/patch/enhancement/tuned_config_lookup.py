@@ -20,7 +20,6 @@ from vllm_sail.registry.tuned_configs import block_quant_config_path
 
 logger = init_logger(__name__)
 
-_AFFECTED = ">=0.32.0,<0.33.0"
 _REMOVE_WHEN = (
     "upstream gives get_w8a8_block_fp8_configs a user-config-folder hook "
     "like fused_moe.get_moe_configs already has (envs.VLLM_TUNED_CONFIG_FOLDER)."
@@ -52,7 +51,6 @@ def _load_plugin_config(json_file_name: str, kind: str) -> dict[int, Any] | None
         "this plugin ships for PPU-ZW810/ZW810E/ZW-M890P are never found and the "
         "kernel silently falls back to an untuned default."
     ),
-    affected_versions=_AFFECTED,
     remove_when=_REMOVE_WHEN,
 )
 def get_w8a8_block_fp8_configs(

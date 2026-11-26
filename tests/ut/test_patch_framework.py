@@ -46,7 +46,6 @@ def test_module_fixture_uses_imported_package_python(modules):
 def metadata() -> dict[str, str]:
     return {
         "reason": "exercise the patch contract",
-        "affected_versions": ">=0.27.0,<0.28.0",
         "remove_when": "the upstream extension point exists",
     }
 
@@ -242,8 +241,6 @@ def test_missing_target_without_allow_missing_raises(
     [
         ("reason", ""),
         ("reason", None),
-        ("affected_versions", "   "),
-        ("affected_versions", None),
         ("remove_when", ""),
         ("remove_when", None),
     ],

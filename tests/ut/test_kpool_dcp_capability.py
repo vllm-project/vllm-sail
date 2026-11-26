@@ -84,7 +84,7 @@ def test_int8_pcp_fails_before_dtype_query_or_cache_access(kpool, method):
     layer = cls()
     layer.dcp_world_size = 1
     layer._parallel_config = NS(prefill_context_parallel_size=2)
-    # 不提供 dtype、Q、cache 或 op 替身之外的属性，证明拒绝早于读取这些输入。
+    # Omit attributes beyond dtype, Q, cache, and op doubles to prove rejection happens before reading inputs.
     with pytest.raises(NotImplementedError, match="prefill context parallel size 1"):
         getattr(layer, method)(*[object() for _ in range(4)])
     assert calls == []
@@ -198,7 +198,7 @@ def test_real_kpool_constructor_and_installer_preserve_dispatch_contract(
     dcp_world,
     enabled,
 ):
-    """真实 CustomOp、Kpool 类与安装器；nn.Module 和计算是边界，不证明分布式数值。"""
+    """Real CustomOp, Kpool class, and installer; nn.Module and compute are boundaries without proving distributed numerics."""
     import functools
     import inspect
 
@@ -275,7 +275,7 @@ def test_real_kpool_constructor_and_installer_preserve_dispatch_contract(
         "SparseAttnIndexerKpool",
         namespace,
     )
-    # 源码抽取移除类的外层 decorator，显式应用真实 register，保留注册与分派语义。
+    # Source extraction strips outer class decorators and applies real register() explicitly to keep registration/dispatch semantics.
     cls = base.register("sparse_attn_indexer_kpool")(cls)
     assert namespace["op_registry"][cls.name] is cls
     modules(
@@ -378,13 +378,13 @@ def test_real_kpool_constructor_and_installer_preserve_dispatch_contract(
             else ()
         )
         assert args == common + extra
-    # 真实 constructor 保留 PCP+DCP 的上游拒绝边界。
+    # Real constructor preserves upstream's PCP+DCP rejection boundary.
     config.parallel_config.prefill_context_parallel_size = 2
     if dcp_world > 1:
         with pytest.raises(NotImplementedError, match=r"does not support PCP\+DCP"):
             cls(cache, 128, "ue8m0", 4, 128, 16, 32, output)
     else:
-        # 单独 PCP 被真实 constructor 接受；拒绝必须来自实际安装的 INT8 分派。
+        # PCP alone is accepted by the real constructor; rejection must come from the installed INT8 dispatch.
         calls.clear()
         cache_reads.clear()
         pcp_layer = cls(cache, 128, "ue8m0", 4, 128, 16, 32, output, tail_cache=tail)
@@ -417,7 +417,7 @@ def test_real_kpool_constructor_and_installer_preserve_dispatch_contract(
         assert cache._cache is pcp_layer.k_cache._cache
         assert tail._cache is pcp_layer.tail_cache._cache
 
-        # 同一 PCP 配置在非 PPU 路径仍委托真实 upstream forward，不受 INT8 guard 影响。
+        # The same PCP config still delegates to upstream forward on non-PPU paths, unaffected by the INT8 guard.
         platform.is_ppu = lambda: False
         calls.clear()
         cache_reads.clear()
@@ -448,7 +448,7 @@ def test_real_dcp_merge_bypasses_single_rank_and_requires_cutedsl(
     dtype,
     topk,
 ):
-    """真实 merge 的单 rank 与缺少 CuteDSL 边界；不提供分布式数值或设备证据。"""
+    """Real merge single-rank and missing-CuteDSL boundaries; provides no distributed numerics or device evidence."""
     from tests.support.source import function
 
     capability_reads = []
@@ -483,7 +483,7 @@ def test_real_dcp_merge_bypasses_single_rank_and_requires_cutedsl(
         )
         assert capability_reads == []
     else:
-        # 未提供分配、kernel、group 或 collective 替身；缺能力时必须在触及它们之前拒绝。
+        # No allocation, kernel, group, or collective doubles are provided; missing capability must reject before touching them.
         with pytest.raises(RuntimeError, match="requires CuteDSL"):
             merge(
                 logits,

@@ -44,7 +44,6 @@ from vllm_sail.models.step5.ops import soft_fp8
 from vllm_sail.patch.bodies import bind_body
 from vllm_sail.patch.utils import patch
 
-_AFFECTED = ">=0.32.0,<0.33.0"
 _REASON = (
     "VLLM_STEP5_INDEXER_FP8_AS_FP16=1 stores E4M3-quantized values as FP16, "
     "using FP16 dot products with FP32 accumulation; the main attention KV cache "
@@ -69,7 +68,6 @@ def _install(module: str, name: str, replacement) -> None:
         module,
         name,
         reason=_REASON,
-        affected_versions=_AFFECTED,
         remove_when=_REMOVE_WHEN,
     )(replacement)
 
@@ -586,7 +584,6 @@ _install(
     "vllm.models.step5.common.sparse_summary_cache",
     "Step5SparseSummaryCacheLayer.get_kv_cache_config",
     reason=_REASON,
-    affected_versions=_AFFECTED,
     remove_when=_REMOVE_WHEN,
 )
 def _get_kv_cache_config(self, vllm_config):
@@ -603,7 +600,6 @@ def _get_kv_cache_config(self, vllm_config):
     "vllm.models.step5.nvidia.flashinfer_sparse",
     "Step5FlashInferSparse.decode_logits",
     reason=_REASON,
-    affected_versions=_AFFECTED,
     remove_when=_REMOVE_WHEN,
 )
 def _decode_logits(
@@ -633,7 +629,6 @@ def _decode_logits(
     "vllm.models.step5.nvidia.flashinfer_sparse",
     "Step5FlashInferSparse.logits",
     reason=_REASON,
-    affected_versions=_AFFECTED,
     remove_when=_REMOVE_WHEN,
 )
 def _logits(

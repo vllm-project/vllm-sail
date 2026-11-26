@@ -63,8 +63,10 @@ vLLM API; no application-level registration call is needed.
 
 - **Multiple devices:** set `--tensor-parallel-size` to the intended device
   count, after confirming the model and communication libraries support it.
-- **Quantization:** use a checkpoint with a supported quantization format.
-  Match the model's metadata and the backend constraints in the feature matrix.
+- **Quantization:** use a checkpoint with a supported quantization format, or
+  loading-time conversion (`fp8-to-int8`, `bf16-to-int8`, `fp8-to-bf16`; see
+  [Online quantization](../user_guide/online_quantization.md)). Match the
+  model's metadata and the backend constraints in the feature matrix.
 - **Backend selection:** use the defaults first; the
   [configuration guide](../user_guide/configuration.md) describes explicit
   DeepGEMM, ACEXT and Triton selection.

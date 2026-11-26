@@ -207,7 +207,7 @@ def test_build_script_preserves_required_build_contract() -> None:
         "cargo --version",
         "--no-build-isolation --no-deps",
         'git -C "${VLLM_SRC}" fetch --tags',
-        "check_vllm_compatibility()",
+        "check_vllm_compatibility(strict=True)",
         "ppu_wheel_manifest.py",
         "VERBOSE=1",
         "build-manifest.txt",

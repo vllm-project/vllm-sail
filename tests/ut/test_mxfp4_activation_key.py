@@ -18,7 +18,9 @@ def test_ppu_w4a16_conversion_no_longer_reads_removed_marlin_activation_env(
     modules, gpt_oss
 ):
     def forbidden(name):
-        raise AssertionError("删除的 Marlin activation 变量不能再被读取: " + name)
+        raise AssertionError(
+            "Removed Marlin activation variable must not be read: " + name
+        )
 
     envs = modules("vllm.envs")
     envs.__getattr__ = forbidden

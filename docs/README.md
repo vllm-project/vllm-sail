@@ -19,16 +19,24 @@ guides for your workload.
   formats and model integration constraints.
 - [Configuration](user_guide/configuration.md): runtime backend selection and
   PPU-specific settings.
+- [Environment variables](user_guide/environment_variables.md): generated
+  reference of all runtime variables, defaults, choices and aliases.
+- [Online quantization](user_guide/online_quantization.md): loading-time
+  `fp8-to-int8`, `bf16-to-int8` and `fp8-to-bf16` conversion and recipes.
 
 ## Developer guides
 
-- [Contributing](../CONTRIBUTING.md): local setup, tests and code review.
+- [Contributing](../CONTRIBUTING.md): local setup, tests, PPU CI commands and
+  code review.
 - [Architecture](developer_guide/architecture.md): module responsibilities and
   plugin lifecycle.
 - [HGGC kernels](developer_guide/kernels.md): source manifests, generation and
   native extension builds.
 - [Runtime patch maintenance](../vllm_sail/patch/README.md): extension points,
   patch metadata and upstream drift checks.
-- [Kernel benchmarks](../benchmarks/README.md): device measurements and MoE tuning.
+- [PPU Recipe CI Matrix](../tests/ppu/README.md): generated PR `fast_sanity`
+  and Nightly accuracy matrix.
+- [Kernel benchmarks](../benchmarks/README.md): device measurements, MoE tuning
+  and profiling-aware serving benchmarks.
 
 [Return to the project overview](../README.md).

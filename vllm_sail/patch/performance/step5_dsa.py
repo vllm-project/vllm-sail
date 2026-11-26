@@ -34,7 +34,6 @@ _REASON = (
     "production shape. The plugin keeps blocks resident per row instead "
     "(3.188 -> 2.070 ms on ZW-M890P). Opt-in via VLLM_SAIL_STEP5_DSA_SCORES."
 )
-_AFFECTED = ">=0.32.0,<0.33.0"
 _REMOVE_WHEN = (
     "Step5's _paged_scores_sm90 itself strides over region tiles from a "
     "resident grid, making this replacement redundant."
@@ -81,7 +80,7 @@ def install() -> None:
 
     patch(
         _MODULE, _NAME, reason=_REASON,
-        affected_versions=_AFFECTED, remove_when=_REMOVE_WHEN,
+        remove_when=_REMOVE_WHEN,
     )(paged_mqa_logits_sm90)
     # The consumer imports lazily inside __init__ and normally holds no copy.
     # If it already does, replace that too, or its instances keep calling
@@ -91,7 +90,7 @@ def install() -> None:
         if loaded is not None and getattr(loaded, _NAME, None) is original:
             patch(
                 consumer, _NAME, reason=_REASON,
-                affected_versions=_AFFECTED, remove_when=_REMOVE_WHEN,
+                remove_when=_REMOVE_WHEN,
             )(paged_mqa_logits_sm90)
     _installed = True
 

@@ -53,6 +53,9 @@ def installed(modules):
         return "cuda-result"
 
     class Topk:
+        # The patch module snapshots both methods at import; the stub must
+        # provide every upstream attribute it reads.
+        takes_bf16_logits = original
         resolve_backend = original
 
     modules("torch", int32="int32")
@@ -149,7 +152,6 @@ def test_preloaded_consumers_get_all_matching_replacements(
                 module,
                 name,
                 reason=p._REASON,
-                affected_versions=p._AFFECTED,
                 remove_when=p._REMOVE_WHEN,
             )(lambda *args: None)
     with pytest.raises(RuntimeError, match="already"):
