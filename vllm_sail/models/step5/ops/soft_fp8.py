@@ -810,8 +810,9 @@ class DirectScoresLaunch(ByteFP8Launch):
             and args[0].dtype in (torch.float8_e4m3fn, torch.uint8)
             and args[2].dtype == torch.uint8
             and args[28] == 1
-            and args[0].shape[0] // 4 in (8, 16)
-            and args[23] >= 8192
+            and args[0].shape[0] > 0
+            and args[0].shape[0] % 4 == 0
+            and args[23] > 0
         )
 
     @staticmethod

@@ -13,6 +13,7 @@ from vllm.logger import init_logger
 from vllm.platforms import current_platform
 
 from vllm_sail import envs
+from vllm_sail.step5_sparse_cases import profiled
 
 logger = init_logger(__name__)
 
@@ -51,6 +52,7 @@ def can_use_deep_select(logits: torch.Tensor, topk: int) -> bool:
     )
 
 
+@profiled("topk", backend="deep_select", scope="kernel")
 def deep_select_topk(
     logits: torch.Tensor,
     topk: int,

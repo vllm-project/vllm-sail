@@ -13,15 +13,27 @@ from vllm.logger import init_logger
 
 from vllm_sail import envs
 from vllm_sail.patch.utils import PATCH_MARKER, patch
-from vllm_sail.step5_sparse_cases import make_label, profiled
+from vllm_sail.step5_sparse_cases import (
+    dump_output_names,
+    make_label,
+    normalize_values,
+    profiled,
+    tensor_metadata,
+)
+
+try:
+    from model_prof import prof_is_in_profiling
+
+    DUMP_TENSOR = True
+except Exception:
+    prof_is_in_profiling = None
+    DUMP_TENSOR = False
 
 logger = init_logger(__name__)
 _PHASE = ContextVar("sail_sparse_phase", default="unknown")
 _RANGES = ContextVar("sail_sparse_ranges", default=())
 _TOPK_CONTEXT = ContextVar("sail_sparse_topk_launch", default=None)
-_REASON = (
-    "Opt-in Step5 sparse op metadata ranges without data reads or dispatch changes."
-)
+_REASON = "Opt-in Step5 sparse metadata ranges and optional input tensor snapshots."
 _REMOVE = "Upstream Step5 emits versioned score/topk/attention metadata ranges."
 _TARGETS = (
     (
@@ -110,7 +122,9 @@ def phase(kind):
 
 
 @contextmanager
-def trace_range(op, impl, backend, values, *, scope="op", pd_type="unknown"):
+def trace_range(
+    op, impl, backend, values, *, scope="op", pd_type="unknown", topk_tensor=""
+):
     if not envs.VLLM_SAIL_NVTX_PROFILE:
         yield
         return
@@ -123,12 +137,13 @@ def trace_range(op, impl, backend, values, *, scope="op", pd_type="unknown"):
 
     try:
         torch = sys.modules.get("torch")
-        cuda_tensor = next(
-            (v for v in values.values() if getattr(v, "is_cuda", False)), None
-        )
         capture = (
             bool(torch.cuda.is_current_stream_capturing())
-            if torch and cuda_tensor is not None
+            if torch
+            and (
+                _has_cuda(normalize_values(values))
+                or (op == "attention" and _has_cuda(_attention_parameters(values)))
+            )
             else False
         )
         label = make_label(
@@ -138,6 +153,7 @@ def trace_range(op, impl, backend, values, *, scope="op", pd_type="unknown"):
             values,
             scope=scope,
             capture=capture,
+            topk_tensor=topk_tensor,
             pd_type=_PHASE.get() if pd_type == "unknown" else pd_type,
         )
     except (AttributeError, IndexError, TypeError, ValueError, RuntimeError):
@@ -154,10 +170,196 @@ def trace_range(op, impl, backend, values, *, scope="op", pd_type="unknown"):
         _RANGES.reset(token)
 
 
+def _attention_values(values):
+    values = dict(values)
+    if "requests" in values:
+        values["owners"] = values["requests"]
+    owner = values.get("self")
+    for name, attribute in (
+        ("pages", "pages"),
+        ("indptr", "indptr"),
+        ("topk", "region_count"),
+        ("block_size", "block_size"),
+        ("qo_indptr", "_qo_indptr_buf"),
+        ("indptr", "_kv_indptr_buf"),
+        ("indptr", "_paged_kv_indptr_buf"),
+        ("pages", "_paged_kv_indices_buf"),
+        ("last_page_len", "_paged_kv_last_page_len_buf"),
+        ("scale", "_sm_scale"),
+    ):
+        value = getattr(owner, attribute, None)
+        if value is not None and name not in values:
+            values[name] = value
+    return values
+
+
+def _attention_parameters(values):
+    chunks = values.get("prefill_chunks")
+    if chunks is None:
+        return {}
+    return {
+        "prefill_chunks": [
+            {
+                name: getattr(chunk, name)
+                for name in (
+                    "cu_q",
+                    "cu_k",
+                    "cu_k_device",
+                    "total_tokens",
+                    "max_length",
+                )
+            }
+            for chunk in chunks
+        ]
+    }
+
+
+def _has_cuda(value):
+    if isinstance(value, dict):
+        return any(_has_cuda(v) for v in value.values())
+    if isinstance(value, tuple | list):
+        return any(_has_cuda(v) for v in value)
+    return bool(getattr(value, "is_cuda", False))
+
+
+def _snapshot_parameter(torch, value):
+    if isinstance(value, torch.Tensor):
+        return {
+            "tensor": value.detach().to(device="cpu", copy=True),
+            "metadata": {**tensor_metadata(value), "device": str(value.device)},
+        }
+    if isinstance(value, dict):
+        return {name: _snapshot_parameter(torch, item) for name, item in value.items()}
+    if isinstance(value, tuple | list):
+        return [_snapshot_parameter(torch, item) for item in value]
+    if type(value) in (str, int, float, bool) or value is None:
+        return value
+    raise TypeError("Unsupported attention input parameter")
+
+
+def _dump_topk_tensors(torch, values, op="topk", impl=""):
+    tensors, metadata, scalars = {}, {}, {}
+    output_names = dump_output_names(op, impl)
+    for name, value in normalize_values(values).items():
+        if isinstance(value, torch.Tensor):
+            metadata[name] = {**tensor_metadata(value), "device": str(value.device)}
+            if name in output_names:
+                continue
+            tensors[name] = value.detach().to(device="cpu", copy=True)
+        elif type(value) in (str, int, float, bool) or value is None:
+            scalars[name] = value
+    return tensors, metadata, scalars
+
+
+def _log_topk_tensors(record, stage):
+    import json
+
+    tensors = record[stage]
+    preview = {
+        name: {
+            "shape": list(value.shape),
+            "dtype": str(value.dtype),
+            "first_values": value.reshape(-1)[:32].tolist(),
+            "truncated": value.numel() > 32,
+        }
+        for name, value in tensors.items()
+    }
+    logger.info(
+        "[SAIL_%s_DUMP] %s",
+        record.get("op", "topk").upper(),
+        json.dumps(
+            {
+                "id": record["id"],
+                "impl": record["impl"],
+                "backend": record["backend"],
+                "scope": record["scope"],
+                "pd_type": record["pd_type"],
+                "stage": stage,
+                "metadata": record["metadata"],
+                "scalars": record["scalars"],
+                "tensors": preview,
+            },
+            sort_keys=True,
+        ),
+    )
+
+
+def _dump_topk(impl, backend, values, *, scope="op", pd_type="unknown", op="topk"):
+    if not (
+        DUMP_TENSOR and envs.VLLM_SAIL_NVTX_PROFILE and envs.VLLM_SAIL_NVTX_DUMP_TOPK
+    ):
+        return ""
+    try:
+        if not prof_is_in_profiling():
+            return ""
+
+        import os
+        import uuid
+        from pathlib import Path
+        from tempfile import TemporaryDirectory
+
+        torch = sys.modules.get("torch")
+        parameters = _attention_parameters(values) if op == "attention" else {}
+        # A failed capture query must never permit a device-to-host copy.
+        capturing = torch is None or (
+            (_has_cuda(normalize_values(values)) or _has_cuda(parameters))
+            and torch.cuda.is_current_stream_capturing()
+        )
+        if capturing:
+            return ""
+        inputs, metadata, scalars = _dump_topk_tensors(torch, values, op, impl)
+        record = {
+            "schema": 1,
+            "op": op,
+            "id": f"{os.getpid()}-{uuid.uuid4().hex}",
+            "impl": impl,
+            "backend": backend,
+            "scope": scope,
+            "pd_type": _PHASE.get() if pd_type == "unknown" else pd_type,
+            "inputs": inputs,
+            "metadata": metadata,
+            "scalars": scalars,
+        }
+        if parameters:
+            record["parameters"] = _snapshot_parameter(torch, parameters)
+        _log_topk_tensors(record, "inputs")
+        directory = envs.VLLM_SAIL_NVTX_DUMP_TOPK_DIR
+        if not directory:
+            return ""
+        path = Path(directory)
+        path.mkdir(parents=True, exist_ok=True)
+        filename = f"{op}-{record['id']}.pt"
+        # Publish only after torch.save closes successfully; clean partial writes.
+        with TemporaryDirectory(prefix=f".{op}-", dir=path) as temporary:
+            staged = Path(temporary) / filename
+            with staged.open("wb") as saved:
+                torch.save(record, saved)
+            staged.replace(path / filename)
+        logger.info("[SAIL_%s_DUMP] saved=%s", op.upper(), path / filename)
+        return filename
+    except Exception as exc:
+        logger.warning("%s input dump/save skipped: %s", op, exc)
+        return ""
+
+
 def trace_call(op, impl, backend, values, call, *, scope="op", pd_type="unknown"):
     if not envs.VLLM_SAIL_NVTX_PROFILE:
         return call()
-    with trace_range(op, impl, backend, values, scope=scope, pd_type=pd_type):
+    if op == "attention":
+        try:
+            values = _attention_values(values)
+        except Exception as exc:
+            logger.warning("attention input metadata skipped: %s", exc)
+            with trace_range(op, impl, backend, values, scope=scope, pd_type=pd_type):
+                return call()
+    filename = (
+        _dump_topk(impl, backend, values, scope=scope, pd_type=pd_type, op=op)
+        if op in ("topk", "attention") and (op, scope) not in _RANGES.get()
+        else ""
+    )
+    with trace_range(
+        op, impl, backend, values, scope=scope, pd_type=pd_type, topk_tensor=filename
+    ):
         return call()
 
 
@@ -263,8 +465,16 @@ def _install_topk_factory():
                             + type(run).__qualname__
                             + ".forward"
                         )
+                        filename = _dump_topk(impl, actual, values, scope="kernel")
                         stack.enter_context(
-                            trace_range("topk", impl, actual, values, scope="kernel")
+                            trace_range(
+                                "topk",
+                                impl,
+                                actual,
+                                values,
+                                scope="kernel",
+                                topk_tensor=filename,
+                            )
                         )
                     return actual
 

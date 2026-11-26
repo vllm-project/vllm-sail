@@ -149,6 +149,19 @@ ppu_add_extension(_upstream_C SOURCES ${PPU_UPSTREAM_EXT_SRC})
 # Upstream guards both the declaration and schema/CUDA implementation binding.
 # The independently built HGGC corpus must enable them as well as compile the TU.
 target_compile_definitions(_upstream_C PRIVATE VLLM_ENABLE_FUSED_GDN_DECODE=1)
+# Tune the 16-head BF16 prefill pipeline independently of the decode and selector TUs.
+set_property(SOURCE csrc/plugin/step5/step5_native_prefill_h16.hg APPEND PROPERTY COMPILE_OPTIONS
+  -O3
+  -mllvm -ppu-max-vreg-count=256
+  -mllvm -ppu-sink-matrix-addr=true
+  -mllvm -ppu-max-alloca-byte-size=320
+  -mllvm -ppu-sink-async-addr=true
+  -mllvm -ppu-sink-load-addr=true
+  -mllvm -ppu-sink-store-addr=true
+  -mllvm -ppu-alloca-half-ldst-simplify=true
+  -mllvm -ppu-force-warpage=true
+  -mllvm -ppu-force-vregrr=true)
+
 ppu_add_extension(_upstream_moe_C SOURCES ${PPU_UPSTREAM_MOE_EXT_SRC})
 
 # Plugin-owned HGGC kernels and stable-ABI bindings, under private _ppu_* namespaces.

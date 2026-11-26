@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-// Ported from vllm-step5-dsa-890p-20261110/step5_sparse_decode.cu.
 #include <ATen/cuda/CUDAContext.h>
 #include <c10/cuda/CUDAGuard.h>
 #include <hggc_runtime.h>
 #include <algorithm>
+#include <cub/block/block_radix_sort.cuh>
 #include <cfloat>
 #include <cmath>
 #include <optional>
@@ -37,6 +37,7 @@ struct Decode {
   float scale;
 };
 #include "step5_native_decode_pairs.cuh"
+#include "step5_native_decode_prepared.cuh"
 
 // Kernel definitions stay visible to both architectures; the arch guards cover
 // device computation only.
@@ -365,6 +366,18 @@ void run(const at::Tensor& q, const at::Tensor& cache, const at::Tensor& regions
   p.qs = q.stride(0); p.qh = q.stride(1); p.os = out.stride(0); p.oh = out.stride(1); p.rs = regions.stride(0);
   p.gs = gate ? gate->stride(0) : 0; p.gh = gate ? gate->stride(1) : 0; p.clear_inactive = clear_inactive || gate.has_value(); p.scale = scale;
   const auto stream = get_current_cuda_stream(q.get_device());
+  if (allow_paired && can_prepare(p, query_len)) {
+    launch_stream<RegionLayout::Prepared>(p, options, stream);
+    step5_runtime::check(hggcGetLastError());
+    return;
+  }
+  if (allow_paired && rows == 64 && heads == 16 && slots == 513 && p.groups == 1 &&
+      p.kv.token_stride == 2 * kHeadDim) {
+    if (can_stream_compact(p)) launch_stream<RegionLayout::Compact>(p, options, stream);
+    else launch_stream<RegionLayout::Paged>(p, options, stream);
+    step5_runtime::check(hggcGetLastError());
+    return;
+  }
   if (allow_paired && rows == 64 && heads == 16 &&
       p.groups == 1 && query_len == 4 && slots == 513 &&
       p.qh == kHeadDim && p.qs % 64 == 0 &&

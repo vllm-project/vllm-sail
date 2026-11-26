@@ -32,7 +32,7 @@ def _submit_attention(op, kind, *args):
 
     if not envs.VLLM_SAIL_NVTX_PROFILE:
         return op(*args)
-    from vllm_sail.profiling.step5_sparse import trace_call, trace_range
+    from vllm_sail.profiling.step5_sparse import trace_call
 
     names = (
         (
@@ -65,8 +65,12 @@ def _submit_attention(op, kind, *args):
     )
     values = dict(zip(names, args, strict=False))
     impl = "step5_dsa_native_" + kind
-    with trace_range("attention", impl, "native_20261110", values, pd_type=kind):
-        return trace_call(
+    return trace_call(
+        "attention",
+        impl,
+        "native_20261110",
+        values,
+        lambda: trace_call(
             "attention",
             impl,
             "native_20261110",
@@ -74,7 +78,9 @@ def _submit_attention(op, kind, *args):
             lambda: op(*args),
             scope="kernel",
             pd_type=kind,
-        )
+        ),
+        pd_type=kind,
+    )
 
 
 def reject(reason):

@@ -799,7 +799,9 @@ def test_step5_kernel_launch_modes_are_lazy_on_cpu(monkeypatch, ppu, half):
         assert kw == {"sentinel": 3}
 
 
-def _joint_launch_fixture(*, tokens=32, ppu=True, capability=(8, 9)):
+def _joint_launch_fixture(
+    *, tokens=32, ppu=True, capability=(8, 9), logs=None, fp8_cache=True, optimized=True
+):
     from types import SimpleNamespace
 
     from vllm_sail import envs
@@ -825,8 +827,16 @@ def _joint_launch_fixture(*, tokens=32, ppu=True, capability=(8, 9)):
             return Tensor(dtype, self.shape)
 
     class Kernel:
+        def __init__(self, name):
+            self.__name__ = name
+            self.calls = []
+
         def __getitem__(self, grid):
-            return lambda *args, **kw: (grid, args, kw)
+            def run(*args, **kw):
+                self.calls.append((grid, args, kw))
+                return grid, args, kw
+
+            return run
 
     namespace = dict(
         torch=SimpleNamespace(
@@ -841,6 +851,11 @@ def _joint_launch_fixture(*, tokens=32, ppu=True, capability=(8, 9)):
         ),
         current_platform=SimpleNamespace(is_ppu=lambda: ppu),
         envs=envs,
+        logger=SimpleNamespace(
+            info=lambda message, *values: (
+                logs.append(message % values) if logs is not None else None
+            )
+        ),
     )
     _load_step5_soft_bodies(["ByteFP8Launch"], namespace)
     path = PACKAGE_ROOT / "vllm_sail/models/step5/ops/joint_prepare.py"
@@ -870,8 +885,8 @@ def _joint_launch_fixture(*, tokens=32, ppu=True, capability=(8, 9)):
         40: ("bf16", (tokens, 3072)),
         41: ("bf16", (tokens, 192)),
         42: ("bf16", (tokens, 192)),
-        43: ("fp8", (tokens + 2, 64, 1, 192)),
-        44: ("fp8", (tokens + 2, 64, 1, 192)),
+        43: ("fp8" if fp8_cache else "bf16", (tokens + 2, 64, 1, 192)),
+        44: ("fp8" if fp8_cache else "bf16", (tokens + 2, 64, 1, 192)),
         57: ("float", ()),
         58: ("float", ()),
     }
@@ -899,24 +914,80 @@ def _joint_launch_fixture(*, tokens=32, ppu=True, capability=(8, 9)):
         False,
     ]
     args[45:57] = [16, 1, 3456, 64, 64, tokens, 64, 12288, 192, 192, 1e-5, 1.0]
-    args[59] = True
-    launch = namespace["JointPrepareLaunch"](Kernel(), Kernel(), (8,))
+    args[59] = fp8_cache
+    launch = namespace["JointPrepareLaunch"](
+        Kernel("upstream"),
+        Kernel("baseline"),
+        (8,),
+        optimized=Kernel("lane_streaming") if optimized else None,
+    )
     return launch, args
 
 
-@pytest.mark.parametrize("tokens", [32, 64])
-def test_joint_switch_is_lazy_and_only_changes_warps(monkeypatch, tokens):
+@pytest.mark.parametrize(
+    "tokens,bf16_warps",
+    [
+        (8, 8),
+        (9, 8),
+        (10, 8),
+        (11, 8),
+        (12, 8),
+        (13, 8),
+        (14, 4),
+        (15, 4),
+        (16, 4),
+        (17, 4),
+        (22, 4),
+        (23, 8),
+        (24, 8),
+        (25, 8),
+        (26, 4),
+        (31, 4),
+        (32, 4),
+        (48, 4),
+        (62, 4),
+        (63, 8),
+        (64, 8),
+        (65, 8),
+        (66, 4),
+        (96, 4),
+        (128, 4),
+        (191, 4),
+        (192, 4),
+        (193, 4),
+        (256, 4),
+        (512, 4),
+        (1023, 4),
+        (1024, 4),
+    ],
+)
+@pytest.mark.parametrize("fp8_cache", [False, True])
+def test_joint_switch_is_lazy_and_preserves_arguments(
+    monkeypatch, tokens, bf16_warps, fp8_cache
+):
     monkeypatch.delenv("VLLM_SAIL_STEP5_JOINT_PREPARE", raising=False)
     monkeypatch.delenv("VLLM_PPU_STEP5_JOINT_PREPARE", raising=False)
-    launch, args = _joint_launch_fixture(tokens=tokens)
+    launch, args = _joint_launch_fixture(tokens=tokens, fp8_cache=fp8_cache)
     run = launch[(tokens, 12)]
-    for enabled in (0, 1, 0, 1):
-        monkeypatch.setenv("VLLM_SAIL_STEP5_JOINT_PREPARE", str(enabled))
+    for raw in (None, "0", "1", "0", "1", None):
+        if raw is None:
+            monkeypatch.delenv("VLLM_SAIL_STEP5_JOINT_PREPARE", raising=False)
+        else:
+            monkeypatch.setenv("VLLM_SAIL_STEP5_JOINT_PREPARE", raw)
+        enabled = raw != "0"
         grid, actual, kwargs = run(*args, num_warps=4, enable_fp_fusion=False)
         assert grid == (tokens, 12)
         assert actual[8].dtype == "byte"
         assert all(actual[i] is args[i] for i in range(60) if i != 8)
-        assert kwargs == {"num_warps": 8 if enabled else 4, "enable_fp_fusion": False}
+        selected = (8 if fp8_cache else bf16_warps) if enabled else 4
+        assert launch._eligible(
+            grid, tuple(args), dict(num_warps=4, enable_fp_fusion=False)
+        ) is bool(enabled)
+        assert kwargs == {"num_warps": selected, "enable_fp_fusion": False}
+        kernel = launch.optimized.ppu if enabled else launch.ppu
+        assert kernel.calls[-1] == (grid, actual, kwargs)
+    assert len(launch.optimized.ppu.calls) == 4
+    assert len(launch.ppu.calls) == 2
 
 
 @pytest.mark.parametrize(
@@ -942,15 +1013,17 @@ def test_joint_switch_is_lazy_and_only_changes_warps(monkeypatch, tokens):
         "slots",
     ],
 )
-def test_joint_unvalidated_contract_keeps_baseline(monkeypatch, invalid):
+@pytest.mark.parametrize("fp8_cache", [False, True])
+def test_joint_unvalidated_contract_keeps_baseline(monkeypatch, invalid, fp8_cache):
     monkeypatch.setenv("VLLM_SAIL_STEP5_JOINT_PREPARE", "1")
     launch, args = _joint_launch_fixture(
         ppu=invalid != "platform",
         capability=(8, 0) if invalid == "capability" else (8, 9),
+        fp8_cache=fp8_cache,
     )
     grid, options = (32, 12), dict(num_warps=4, enable_fp_fusion=False)
     if invalid == "tokens":
-        grid = (16, 12)
+        grid = (7, 12)
     elif invalid == "grid":
         grid = (32, 14)
     elif invalid == "count":
@@ -985,11 +1058,145 @@ def test_joint_unvalidated_contract_keeps_baseline(monkeypatch, invalid):
     _, actual, kwargs = launch[grid](*args, **options)
     assert kwargs == options
     assert actual[43] is args[43] and actual[44] is args[44]
+    assert not launch.optimized.ppu.calls
+    assert len((launch.ppu if invalid != "platform" else launch.upstream).calls) == 1
 
 
-def test_joint_launch_errors_propagate(monkeypatch):
+@pytest.mark.parametrize("fp8_cache", [False, True])
+@pytest.mark.parametrize(
+    "invalid", ["mode", "mixed", "half", "float", "byte", "layout", "device"]
+)
+def test_joint_main_cache_contract_keeps_baseline(monkeypatch, fp8_cache, invalid):
+    monkeypatch.setenv("VLLM_SAIL_STEP5_JOINT_PREPARE", "1")
+    launch, args = _joint_launch_fixture(fp8_cache=fp8_cache)
+    if invalid == "mode":
+        args[59] = not fp8_cache
+    elif invalid == "mixed":
+        args[44].dtype = "bf16" if fp8_cache else "fp8"
+    elif invalid in ("half", "float", "byte"):
+        args[43].dtype = args[44].dtype = invalid
+    elif invalid == "layout":
+        args[44].strides[-1] = 2
+    elif invalid == "device":
+        args[44].device = "cuda:1"
+    options = dict(num_warps=4, enable_fp_fusion=False)
+    assert not launch._eligible((32, 12), tuple(args), options)
+    _, actual, kwargs = launch[(32, 12)](*args, **options)
+    assert kwargs == options
+    assert actual[43] is args[43] and actual[44] is args[44]
+
+
+@pytest.mark.parametrize("mode", [None, 0, 1, "False", "True"])
+def test_joint_main_cache_mode_requires_bool(monkeypatch, mode):
     monkeypatch.setenv("VLLM_SAIL_STEP5_JOINT_PREPARE", "1")
     launch, args = _joint_launch_fixture()
+    args[59] = mode
+    options = dict(num_warps=4, enable_fp_fusion=False)
+    assert (
+        launch._fallback_reason((32, 12), tuple(args), options)
+        == "main_rope_or_cache_mode"
+    )
+    assert launch[(32, 12)](*args, **options)[2] == options
+
+
+@pytest.mark.parametrize("tokens", [0, 1, 7, 1025, 4096, True, 32.0])
+def test_joint_out_of_range_tokens_keep_baseline(monkeypatch, tokens):
+    monkeypatch.setenv("VLLM_SAIL_STEP5_JOINT_PREPARE", "1")
+    launch, args = _joint_launch_fixture()
+    options = dict(num_warps=4, enable_fp_fusion=False)
+    assert launch._fallback_reason((tokens, 12), tuple(args), options) == "tokens"
+    assert launch[(tokens, 12)](*args, **options)[2] == options
+
+
+@pytest.mark.parametrize("sail", [None, "0", "", "1"])
+@pytest.mark.parametrize("fp8_cache", [False, True])
+def test_joint_sail_switch_overrides_ppu_alias(monkeypatch, sail, fp8_cache):
+    monkeypatch.setenv("VLLM_PPU_STEP5_JOINT_PREPARE", "1")
+    if sail is None:
+        monkeypatch.delenv("VLLM_SAIL_STEP5_JOINT_PREPARE", raising=False)
+    else:
+        monkeypatch.setenv("VLLM_SAIL_STEP5_JOINT_PREPARE", sail)
+    launch, args = _joint_launch_fixture(tokens=192, fp8_cache=fp8_cache)
+    _, _, options = launch[(192, 12)](*args, num_warps=4, enable_fp_fusion=False)
+    assert options["num_warps"] == (8 if fp8_cache and sail in (None, "1") else 4)
+    assert launch._eligible(
+        (192, 12), tuple(args), dict(num_warps=4, enable_fp_fusion=False)
+    ) is (sail in (None, "1"))
+
+
+def test_joint_reports_selection_once_and_disabled_is_silent(monkeypatch):
+    monkeypatch.setenv("VLLM_SAIL_STEP5_JOINT_PREPARE", "0")
+    logs = []
+    launch, args = _joint_launch_fixture(tokens=192, logs=logs)
+    run = launch[(192, 12)]
+    run(*args, num_warps=4, enable_fp_fusion=False)
+    assert not logs
+    monkeypatch.setenv("VLLM_SAIL_STEP5_JOINT_PREPARE", "1")
+    for _ in range(3):
+        run(*args, num_warps=4, enable_fp_fusion=False)
+    assert len(logs) == 1
+    assert "wrapper=JointPrepareLaunch" in logs[0]
+    assert "grid=(192, 12) route=tuned reason=eligible" in logs[0]
+    assert "selected_num_warps=8 compiled_num_warps=None" in logs[0]
+    args[8].dtype = "half"
+    for _ in range(3):
+        run(*args, num_warps=4, enable_fp_fusion=False)
+    assert len(logs) == 2
+    assert "route=baseline reason=dtype_or_device_8" in logs[1]
+    assert "selected_num_warps=4" in logs[1]
+
+
+@pytest.mark.parametrize("tokens", [8, 192])
+def test_joint_logs_distinguish_cache_dtypes_at_the_same_grid(monkeypatch, tokens):
+    monkeypatch.setenv("VLLM_SAIL_STEP5_JOINT_PREPARE", "1")
+    logs = []
+    launch, args = _joint_launch_fixture(tokens=tokens, logs=logs)
+    run = launch[(tokens, 12)]
+    for fp8_cache in (True, False, True, False):
+        args[59] = fp8_cache
+        args[43].dtype = args[44].dtype = "fp8" if fp8_cache else "bf16"
+        _, _, options = run(*args, num_warps=4, enable_fp_fusion=False)
+        assert options["num_warps"] == (8 if fp8_cache or tokens == 8 else 4)
+    assert len(logs) == 2
+    assert "route=tuned reason=eligible" in logs[0]
+    assert "route=tuned reason=eligible" in logs[1]
+    assert "main_cache=fp8" in logs[0]
+    assert "main_cache=bf16" in logs[1]
+
+
+def test_joint_reports_actual_compiled_warps(monkeypatch):
+    from types import SimpleNamespace
+
+    monkeypatch.setenv("VLLM_SAIL_STEP5_JOINT_PREPARE", "1")
+    logs = []
+    launch, args = _joint_launch_fixture(logs=logs)
+    compiled = SimpleNamespace(metadata=SimpleNamespace(num_warps=8))
+
+    class CompiledKernel:
+        __name__ = "_joint_prepare"
+
+        def __getitem__(self, grid):
+            return lambda *args, **kwargs: compiled
+
+    launch.optimized.ppu = CompiledKernel()
+    assert launch[(32, 12)](*args, num_warps=4, enable_fp_fusion=False) is compiled
+    assert "kernel=_joint_prepare" in logs[0]
+    assert "selected_num_warps=8 compiled_num_warps=8" in logs[0]
+
+
+def test_joint_selection_log_is_bounded(monkeypatch):
+    monkeypatch.setenv("VLLM_SAIL_STEP5_JOINT_PREPARE", "1")
+    logs = []
+    launch, args = _joint_launch_fixture(logs=logs)
+    for tokens in range(80):
+        launch[(tokens, 12)](*args, num_warps=4, enable_fp_fusion=False)
+    assert len(logs) == len(launch._reported) == 64
+
+
+@pytest.mark.parametrize("optimized", [False, True])
+def test_joint_launch_errors_propagate(monkeypatch, optimized):
+    monkeypatch.setenv("VLLM_SAIL_STEP5_JOINT_PREPARE", "1")
+    launch, args = _joint_launch_fixture(optimized=optimized)
 
     class Broken:
         def __getitem__(self, grid):
@@ -998,9 +1205,45 @@ def test_joint_launch_errors_propagate(monkeypatch):
 
             return run
 
-    launch.ppu = Broken()
+    if optimized:
+        launch.optimized.ppu = Broken()
+    else:
+        launch.ppu = Broken()
     with pytest.raises(RuntimeError, match="JIT failure"):
         launch[(32, 12)](*args, num_warps=4, enable_fp_fusion=False)
+    assert not launch._reported
+
+
+@pytest.mark.upstream_source
+@pytest.mark.parametrize("name", ["_prepare_main", "_joint_prepare"])
+def test_joint_borrowed_bodies_preserve_unmodified_upstream(upstream_source_root, name):
+    from tests.support.source import definition
+
+    local = definition(
+        PACKAGE_ROOT / "vllm_sail/models/step5/ops/joint_prepare.py", name
+    )
+    original = definition(
+        upstream_source_root / "vllm/models/step5/nvidia/ops/qkv_indexer_norm_rope.py",
+        name,
+    )
+    if name == "_prepare_main":
+        for body in (local, original):
+            body.body = [
+                node
+                for node in body.body
+                if not (
+                    isinstance(node, ast.Assign)
+                    and any(
+                        isinstance(t, ast.Name) and t.id in ("raw", "x")
+                        for t in node.targets
+                    )
+                )
+                and not (
+                    isinstance(node, ast.For)
+                    and ast.unparse(node.iter) == "tl.static_range(VALUES)"
+                )
+            ]
+    assert ast.dump(local) == ast.dump(original)
 
 
 def _direct_launch_fixture(
@@ -1217,7 +1460,7 @@ def test_direct_unsupported_contract_falls_back(monkeypatch, change, mode):
 
 
 @pytest.mark.parametrize("override", [None, False, True])
-@pytest.mark.parametrize("requests", [7, 8])
+@pytest.mark.parametrize("requests", [1, 7, 8, 17, 48])
 def test_decode_mtp_mode_and_offline_override_keep_geometry_gates(
     monkeypatch, override, requests
 ):
@@ -1231,7 +1474,7 @@ def test_decode_mtp_mode_and_offline_override_keep_geometry_gates(
     for mode in ("v0", "v1", "v2", "v1", "v0"):
         monkeypatch.setenv("VLLM_SAIL_STEP5_DSA_SCORE_DECODE", mode)
         guarded = (mode == "v2") if override is None else override
-        eligible = mode != "v0" and (not guarded or requests == 8)
+        eligible = mode != "v0"
         name, actual_grid, _, kwargs = run(*args, num_warps=4)
         assert name == ("direct" if eligible else "software")
         assert actual_grid == (
@@ -1244,13 +1487,15 @@ def test_decode_mtp_mode_and_offline_override_keep_geometry_gates(
         )
 
 
-@pytest.mark.parametrize("requests", [1, 7, 8, 16, 17, 32])
+@pytest.mark.parametrize("requests", [1, 7, 8, 16, 17, 32, 48])
 @pytest.mark.parametrize("query_len", [1, 2, 3, 4])
-@pytest.mark.parametrize("groups,capacity", [(1, 8191), (1, 131072), (2, 131072)])
+@pytest.mark.parametrize(
+    "groups,capacity", [(1, 0), (1, 1), (1, 513), (1, 8191), (1, 131072), (2, 131072)]
+)
 def test_direct_guarded_mtp_falls_back_to_original_without_device_reads(
     monkeypatch, requests, query_len, groups, capacity
 ):
-    """Unproven geometries use the original path without reading seq/slots or attempting a second launch."""
+    """Only safety contracts gate MTP; seq/slots are not read by the host launcher."""
     monkeypatch.setenv("VLLM_SAIL_STEP5_DSA_SCORE_DECODE", "v2")
     launch, args, _ = _direct_launch_fixture(monkeypatch)
     tokens = requests * query_len
@@ -1259,9 +1504,7 @@ def test_direct_guarded_mtp_falls_back_to_original_without_device_reads(
     args[23], args[28], args[29] = capacity, groups, query_len
     grid = (2, tokens * groups)
     name, actual_grid, actual, kwargs = launch[grid](*args, enable_fp_fusion=False)
-    eligible = (
-        requests in (8, 16) and query_len == 4 and groups == 1 and capacity >= 8192
-    )
+    eligible = query_len == 4 and groups == 1 and capacity > 0
     assert name == ("direct" if eligible else "software")
     assert actual_grid == grid
     assert actual[0].dtype == "byte"

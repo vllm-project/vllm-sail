@@ -54,6 +54,8 @@ TENSORS = {
     "lse",
     "key",
     "value",
+    "qo_indptr",
+    "last_page_len",
 }
 INTS = {
     "max_seq_len",
@@ -80,6 +82,7 @@ INTS = {
 }
 BOOLS = {"sort", "clear_inactive", "capture", "packed_mode"}
 FLOATS = {"scale"}
+ENUMS = {"output_index_dtype": {"torch.int32", "torch.int64"}}
 FIXED = {
     "v",
     "op",
@@ -90,6 +93,7 @@ FIXED = {
     "impl",
     "backend",
     "requested_backend",
+    "topk_tensor",
 }
 ALIASES = {
     "q": "query",
@@ -103,6 +107,13 @@ ALIASES = {
     "table": "block_table",
     "block_tables": "block_table",
     "seq_lens": "lengths",
+    "logits": "scores",
+    "input": "scores",
+    "end": "topk_lengths",
+    "topk_tokens": "topk",
+    "topk_indices": "indices",
+    "output_idx": "indices",
+    "indices_dtype": "output_index_dtype",
     "out": "output",
     "region_count": "topk",
     "capacity": "max_seq_len",
@@ -165,20 +176,7 @@ def storage_elements(item):
     return span
 
 
-def make_label(
-    op, impl, backend, values, *, pd_type="unknown", scope="op", capture=False
-):
-    fields = [
-        f"{PREFIX}op:{op}",
-        "v:1",
-        "fw:vllm",
-        "model:step5",
-        f"pd_type:{pd_type}",
-        f"scope:{scope}",
-        f"impl:{impl}",
-        f"backend:{backend}",
-        f"capture:{int(capture)}",
-    ]
+def normalize_values(values):
     normalized = {}
     for key, value in values.items():
         if (
@@ -189,6 +187,14 @@ def make_label(
             normalized["key"], normalized["value"] = value
             continue
         name = ALIASES.get(key, key)
+        if (
+            key == "capacity"
+            and "current" in values
+            and values.keys() <= {"self", "current", "capacity"}
+        ):
+            name = "topk"
+        if name in ENUMS and value is not None:
+            value = str(value)
         if key == "regions":
             name = (
                 "indices"
@@ -197,6 +203,8 @@ def make_label(
             )
         if key == "pages" and getattr(value, "shape", None) is not None:
             name = "pages"
+        if key == "packed" and type(value) is bool:
+            name = "packed_mode"
         if key == "paged_prefill" and value is not None:
             for attr in (
                 "owners",
@@ -209,8 +217,53 @@ def make_label(
                 normalized[attr if attr != "indices" else "pages"] = getattr(
                     value, attr, None
                 )
-        elif name in TENSORS | INTS | BOOLS | FLOATS | {"requested_backend"}:
+        elif name in TENSORS | INTS | BOOLS | FLOATS | ENUMS.keys() | {
+            "requested_backend"
+        }:
             normalized[name] = value
+    return normalized
+
+
+def dump_output_names(op, impl):
+    if op == "topk":
+        return {"indices", "starts", "workspace", "pages", "output"}
+    outputs = {"output", "workspace"}
+    if not impl.endswith("_sparse_decode_combine"):
+        outputs.update(("partial", "lse"))
+    return outputs
+
+
+def make_label(
+    op,
+    impl,
+    backend,
+    values,
+    *,
+    pd_type="unknown",
+    scope="op",
+    capture=False,
+    topk_tensor="",
+):
+    fields = [
+        f"{PREFIX}op:{op}",
+        "v:1",
+        "fw:vllm",
+        "model:step5",
+        f"pd_type:{pd_type}",
+        f"scope:{scope}",
+        f"impl:{impl}",
+        f"backend:{backend}",
+        f"capture:{int(capture)}",
+    ]
+    if op in ("topk", "attention"):
+        if topk_tensor and not re.fullmatch(
+            r"[A-Za-z0-9][A-Za-z0-9_.-]*\.pt", topk_tensor
+        ):
+            raise ValueError("topk_tensor must be a plain .pt filename")
+        fields.append(f"topk_tensor:{topk_tensor}")
+    if op == "attention" and "requests" in values:
+        values = {**values, "owners": values["requests"]}
+    normalized = normalize_values(values)
     for name in sorted(normalized):
         value = normalized[name]
         if name == "capture":
@@ -233,6 +286,8 @@ def make_label(
                 fields.append(f"{name}:{value}")
         elif value is None:
             fields.append(f"{name}:None")
+        elif name in ENUMS and value in ENUMS[name]:
+            fields.append(f"{name}:{value}")
         elif name in BOOLS and type(value) is bool:
             fields.append(f"{name}:{int(value)}")
         elif name in INTS and type(value) is int:
@@ -268,7 +323,17 @@ def parse_label(label):
         pattern = r"(?:[\w.-]|<locals>|<lambda>)+" if name == "impl" else r"[\w.-]+"
         if not re.fullmatch(pattern, raw.get(name, "")):
             raise ValueError(f"invalid {name}")
-    case = {key: raw[key] for key in FIXED if key in raw}
+    filename = raw.get("topk_tensor", "")
+    if "topk_tensor" in raw and (
+        raw["op"] not in ("topk", "attention")
+        or (filename and not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*\.pt", filename))
+    ):
+        raise ValueError("invalid topk_tensor filename")
+    case = {
+        key: raw[key]
+        for key in FIXED
+        if key in raw and (key != "topk_tensor" or filename)
+    }
     case.update(schema=1, tensors={}, scalars={})
     for key, value in raw.items():
         if key in FIXED:
@@ -300,6 +365,10 @@ def parse_label(label):
             base = key.rsplit("_", 1)[0]
             if base not in raw:
                 raise ValueError("orphan tensor metadata")
+        elif key in ENUMS:
+            if value != "None" and value not in ENUMS[key]:
+                raise ValueError("invalid enum scalar")
+            case["scalars"][key] = None if value == "None" else value
         elif key in INTS | BOOLS | FLOATS:
             if value == "None" and key != "capture":
                 case["scalars"][key] = None
@@ -321,6 +390,8 @@ def parse_label(label):
         raise ValueError("missing capture flag")
     canonical = json.dumps(case, sort_keys=True, separators=(",", ":"))
     case["id"] = hashlib.sha256(canonical.encode()).hexdigest()[:16]
+    if case["op"] in ("topk", "attention"):
+        case["topk_tensor"] = filename
     case["raw_label"] = label
     return case
 
@@ -348,7 +419,7 @@ def extract_cases(paths):
             )
     return {
         "schema": 1,
-        "synthetic": True,
+        "synthetic": not any(c.get("topk_tensor") for c in unique.values()),
         "frequency_note": "Exported ranges are not graph replay invocation counts.",
         "cases": sorted(unique.values(), key=lambda item: item["id"]),
     }
@@ -384,13 +455,15 @@ def profiled(op, *, backend="dispatch", scope="op", pd_type="unknown", names=Non
                         signature = inspect.signature(original)
                     bound = signature.bind(*args, **kwargs)
                     bound.apply_defaults()
-                    values = bound.arguments
+                    values = dict(bound.arguments)
                 except (TypeError, ValueError):
                     return original(*args, **kwargs)
             else:
                 values = dict(zip(names, args, strict=False))
                 values.update(kwargs)
-            owner = values.get("self")
+            owner = values.get("self", getattr(original, "__self__", None))
+            if op == "attention" and owner is not None:
+                values["self"] = owner
             qualname = getattr(original, "__qualname__", type(original).__qualname__)
             if owner is not None and "Step5FlashInferSparse." in qualname:
                 from vllm_sail.profiling.step5_sparse import instrument_adapter

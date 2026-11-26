@@ -214,6 +214,24 @@ python -m pytest tests/ut/test_gdn_mtp_reference.py -q
 CPU oracle tests and device-test collection do not establish native accuracy.
 Record actual execution counts and skips from the PPU command above.
 
+### Step5 sparse operator replay
+
+`tests/nvtx_based_ut/step5/run_step5_dsa_nvtx_ut.py` checks GPU occupancy at
+startup. If other compute processes are present, the runner prints one console
+warning and continues correctness checks and timing. Result files and per-case
+output do not include additional occupancy markers. Performance measurements
+under contention may be inaccurate and must not be used for exclusive-device
+performance acceptance. Numerical errors, compilation or execution failures
+still fail the UT, and device-query failures at startup are not ignored.
+
+Copy the entire `tests/nvtx_based_ut/step5/` directory to a device environment
+with matching vLLM 0.33.x, vLLM SAIL and the selected backend dependencies
+installed. Preserve the relative locations of all five Python files and provide
+the complete input TXT/caselist files and their referenced tensor dumps. Existing
+standalone copies must be synchronized to obtain this behavior. Direct calls to
+`benchmark_step5_sparse_nvtx.py compare` still reject occupied devices by
+default; pass `--allow-busy-device` explicitly to warn and continue instead.
+
 ## 4. Run a model
 
 ### Quick serving sanity

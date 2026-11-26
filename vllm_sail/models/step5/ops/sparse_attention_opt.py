@@ -242,13 +242,13 @@ def _direct_scores_resident(
         tl.static_assert(Q.dtype.element_ty != tl.float16)
         request = tl.program_id(1).to(tl.int64) // (ROW_GROUPS * QUERY_LEN)
         seq = tl.load(SeqLens + request * SEQ_STRIDE).to(tl.int64)
-        use_mtp = (seq >= 65536) & (seq <= 69632)
+        use_mtp = seq >= QUERY_LEN
         if use_mtp:
             for offset in tl.static_range(QUERY_LEN):
                 use_mtp &= (
                     tl.load(Slots + (request * QUERY_LEN + offset) * SLOT_STRIDE) >= 0
                 )
-        # Cover only measured long-context windows; all CTAs for a request must select the same path.
+        # A complete active query group is required; all request CTAs select the same path.
         if use_mtp:
             _direct_scores_mtp(
                 Q,

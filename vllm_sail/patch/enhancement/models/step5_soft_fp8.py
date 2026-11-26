@@ -38,7 +38,7 @@ from vllm.models.step5.nvidia.ops import (
 )
 
 from vllm_sail.models.step5.ops import soft_fp8
-from vllm_sail.models.step5.ops.joint_prepare import JointPrepareLaunch
+from vllm_sail.models.step5.ops.joint_prepare import JointPrepareLaunch, _joint_prepare
 from vllm_sail.patch.utils import patch
 
 _AFFECTED = ">=0.33.0,<0.34.0"
@@ -47,12 +47,14 @@ _REASON = (
     "mode 0 stores E4M3 as bytes with software conversion, and mode 1 stores "
     "E4M3-quantized values as FP16. An independent opt-in direct scorer retains "
     "the original dot and four FP32 FMA chains on PPU SM89. Joint preparation "
-    "also supports opt-in eight-warps tuning for validated TP4 MTP geometry."
+    "also supports opt-in lane-streaming norm and cache/token-aware warps for "
+    "validated TP4 MTP geometry."
 )
 _REMOVE_WHEN = (
     "Step5 DSA ships a software-E4M3 path for targets without hardware FP8, "
     "or PPU 1.0 Triton supports fp8e4nv, and upstream provides an equivalent "
-    "resident direct scorer launch hook and configurable joint launch geometry."
+    "resident direct scorer launch hook and a byte-equivalent lane-streaming "
+    "joint norm with configurable launch geometry."
 )
 
 
@@ -98,6 +100,7 @@ _install(
         _joint._joint_prepare,
         _joint._joint_prepare,
         byte_args=(8,),
+        optimized=_joint_prepare,
     ),
 )
 _install(

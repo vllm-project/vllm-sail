@@ -58,7 +58,7 @@ if TYPE_CHECKING:
     VLLM_SAIL_STEP5_DSA_SCORES: str = "v0"
     VLLM_SAIL_STEP5_DSA_SCORE_MAX_BYTES: int = 1 << 30
     VLLM_SAIL_STEP5_DSA_SCORE_DECODE: str = "v0"
-    VLLM_SAIL_STEP5_JOINT_PREPARE: bool = False
+    VLLM_SAIL_STEP5_JOINT_PREPARE: bool = True
     VLLM_SAIL_STEP5_QKNORM_ROPE_CACHEKV: bool = True
     VLLM_SAIL_STEP5_FUSED_ROUTER: bool = True
     VLLM_SAIL_STEP5_INDEXER_PER_TOKEN: bool = True
@@ -76,6 +76,7 @@ if TYPE_CHECKING:
     VLLM_SAIL_NVTX_PROFILE: bool = False
     VLLM_SAIL_NVTX_DUMP_DICT: bool = False
     VLLM_SAIL_NVTX_DUMP_TOPK: bool = False
+    VLLM_SAIL_NVTX_DUMP_TOPK_DIR: str = ""
     VLLM_SAIL_NVTX_VFA_DUMP_SEQLEN: bool = False
     VLLM_SAIL_FUSED_NORM_ROPE_ATTN: bool = False
     VLLM_SAIL_PPU_KV_MXFP8: bool = False
@@ -103,7 +104,7 @@ if TYPE_CHECKING:
     VLLM_PPU_STEP5_DSA_SCORES: str = "v0"
     VLLM_PPU_STEP5_DSA_SCORE_MAX_BYTES: int = 1 << 30
     VLLM_PPU_STEP5_DSA_SCORE_DECODE: str = "v0"
-    VLLM_PPU_STEP5_JOINT_PREPARE: bool = False
+    VLLM_PPU_STEP5_JOINT_PREPARE: bool = True
     VLLM_PPU_STEP5_QKNORM_ROPE_CACHEKV: bool = True
     VLLM_PPU_STEP5_FUSED_ROUTER: bool = True
     VLLM_PPU_STEP5_INDEXER_PER_TOKEN: bool = True
@@ -117,6 +118,7 @@ if TYPE_CHECKING:
     VLLM_PPU_NVTX_PROFILE: bool = False
     VLLM_PPU_NVTX_DUMP_DICT: bool = False
     VLLM_PPU_NVTX_DUMP_TOPK: bool = False
+    VLLM_PPU_NVTX_DUMP_TOPK_DIR: str = ""
     VLLM_PPU_NVTX_VFA_DUMP_SEQLEN: bool = False
     VLLM_PPU_FUSED_NORM_ROPE_ATTN: bool = False
     VLLM_PPU_PPU_KV_MXFP8: bool = False
@@ -331,7 +333,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_SAIL_STEP5_DSA_SCORE_DECODE": _choice(
         "VLLM_SAIL_STEP5_DSA_SCORE_DECODE", "v0", STEP5_DSA_SCORE_DECODE_MODES
     ),
-    "VLLM_SAIL_STEP5_JOINT_PREPARE": _bool("VLLM_SAIL_STEP5_JOINT_PREPARE", False),
+    "VLLM_SAIL_STEP5_JOINT_PREPARE": _bool("VLLM_SAIL_STEP5_JOINT_PREPARE", True),
     # per_row stays the default; the new selector is opt-in only.
     "VLLM_SAIL_STEP5_DSA_SELECTOR_PPU": _bool(
         "VLLM_SAIL_STEP5_DSA_SELECTOR_PPU", False
@@ -409,9 +411,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
         "VLLM_SAIL_NVTX_PROFILE",
         False,
     ),
-    # Step5 forward dict arguments expand only tensor shape/dtype; no device reads.
+    # dump expand only tensor shape/dtype; no device reads.
     "VLLM_SAIL_NVTX_DUMP_DICT": _bool("VLLM_SAIL_NVTX_DUMP_DICT", False),
     "VLLM_SAIL_NVTX_DUMP_TOPK": _bool("VLLM_SAIL_NVTX_DUMP_TOPK", False),
+    "VLLM_SAIL_NVTX_DUMP_TOPK_DIR": lambda: (
+        _read_env("VLLM_SAIL_NVTX_DUMP_TOPK_DIR")[1] or ""
+    ),
     "VLLM_SAIL_NVTX_VFA_DUMP_SEQLEN": _bool(
         "VLLM_SAIL_NVTX_VFA_DUMP_SEQLEN",
         False,

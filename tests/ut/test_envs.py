@@ -31,7 +31,7 @@ BOOL_DEFAULTS = {
     "DISABLE_MEGA_MHC": False,
     "USE_TRITON_INT8_QUANT": True,
     "ENABLE_FP8_TO_INT8": False,
-    "STEP5_JOINT_PREPARE": False,
+    "STEP5_JOINT_PREPARE": True,
     "STEP5_DSA_SELECTOR_PPU": False,
     "STEP5_QKNORM_ROPE_CACHEKV": True,
     "STEP5_FUSED_ROUTER": True,
@@ -65,6 +65,7 @@ STRING_DEFAULTS = {
     "MEGA_MOE_MMA_TYPE": "fp8xmxfp4",
     "STEP5_DSA_SCORES": "v0",
     "STEP5_DSA_SCORE_DECODE": "v0",
+    "NVTX_DUMP_TOPK_DIR": "",
 }
 
 
@@ -80,7 +81,7 @@ def clean_plugin_environment(monkeypatch: pytest.MonkeyPatch) -> None:
         ("VLLM_SAIL_STEP5_DSA_SCORES", " V3 ", "v3"),
         ("VLLM_SAIL_STEP5_DSA_SCORE_DECODE", " V2 ", "v2"),
         ("VLLM_SAIL_STEP5_DSA_SCORE_MAX_BYTES", "0", 0),
-        ("VLLM_SAIL_STEP5_JOINT_PREPARE", "1", True),
+        ("VLLM_SAIL_STEP5_JOINT_PREPARE", "0", False),
         ("VLLM_SAIL_STEP5_DSA_SELECTOR_PPU", "1", True),
         ("VLLM_SAIL_STEP5_DSA_PREFILL_PPU", "1", True),
         ("VLLM_SAIL_STEP5_DSA_PREFILL_BACKEND", "NATIVE", "native"),
@@ -372,6 +373,20 @@ def test_is_set_recognizes_either_name_even_when_empty(
     monkeypatch.setenv(f"{prefix}_{suffix}", "")
     assert envs.is_set(sail) is True
     assert envs.is_set(ppu) is True
+
+
+def test_topk_dump_directory_is_lazy_and_preserves_alias_precedence(monkeypatch):
+    sail = "VLLM_SAIL_NVTX_DUMP_TOPK_DIR"
+    ppu = "VLLM_PPU_NVTX_DUMP_TOPK_DIR"
+    assert getattr(envs, sail) == ""
+    monkeypatch.setenv(ppu, "/tmp/TopK data")
+    assert getattr(envs, sail) == getattr(envs, ppu) == "/tmp/TopK data"
+    for raw in ("", "/tmp/NewTopK"):
+        monkeypatch.setenv(sail, raw)
+        assert getattr(envs, sail) == getattr(envs, ppu) == raw
+        assert envs.snapshot()[sail] == raw
+    monkeypatch.delenv(sail)
+    assert getattr(envs, sail) == "/tmp/TopK data"
 
 
 def test_sdk_path_is_lazy(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -103,24 +103,56 @@ fall back to FlashInfer before launch.
 
 ## Step5 joint preparation
 
-`VLLM_SAIL_STEP5_JOINT_PREPARE=1` enables experimental eight-warps launch
-configuration for the unchanged joint indexer/main-attention preparation kernel.
-It defaults to `0`; the `VLLM_PPU_STEP5_JOINT_PREPARE` alias remains supported,
+`VLLM_SAIL_STEP5_JOINT_PREPARE=1` enables an experimental lane-streaming main
+norm kernel and cache-dtype/token-aware launch tuning for joint preparation.
+The norm streams each lane's FMA inputs before loading the full norm/RoPE tile,
+reducing its live register footprint. Sequential FMA, ascending XOR reduction,
+activation rounding and RoPE arithmetic remain unchanged.
+It defaults to `1` (enabled); the `VLLM_PPU_STEP5_JOINT_PREPARE` alias remains supported,
 with the SAIL name taking precedence. The switch is read lazily when selecting
 the launch configuration; set it before startup and CUDA graph capture.
 Changing it does not alter an already-captured graph.
 
-Only PPU SM89, 32/64 tokens, TP4 local main QH16/KH1 with dimension 192 and
+Only PPU SM89, 8–1024 tokens, TP4 local main QH16/KH1 with dimension 192 and
 RoPE64, indexer H4 padded to H8 with dimension 256 and RoPE32, BF16 activations,
-FP32 main norm weights, FP8 query/cache storage and no fused CSA update qualify.
-Other shapes, dtypes, layouts or launch options retain the original configuration.
-Set the switch to `0` to restore the original four-warps launch. This does not
-change the direct scorer switches, kernel math, output allocation or cache layout.
+FP32 main norm weights, E4M3 indexer query storage, BF16 or E4M3 main KV cache
+storage and no fused CSA update qualify. Both main K/V caches must match the
+launch's cache mode; tuning does not cast them or change their scale semantics.
+Within that contract, E4M3 main KV caches select eight warps. BF16 main KV caches
+select eight warps for 8–13, 23–25 or 63–65 tokens and four warps otherwise.
+These small BF16 intervals are measured tuning regions, not a general rule for
+nearby unmeasured token counts. In particular, BF16 at 192 or 1024 tokens keeps
+four warps. Both cache dtypes remain eligible; choosing four warps for BF16 is
+not an unsupported-contract fallback.
+Other shapes, dtypes, layouts or launch options retain the original kernel and
+configuration. Set the switch to `0` to restore the original four-warps kernel.
+This does not change the direct scorer switches, output allocation, cache layout
+or indexer helper. The original helper remains separate from the tuned body.
+
+The main KV cache setting defaults to `--kv-cache-dtype auto`, which normally
+follows the model's activation dtype: BF16 Step5 models use BF16 main KV caches
+unless the user or checkpoint KV quantization configuration selects FP8.
+`VLLM_STEP5_INDEXER_FP8_AS_FP16` controls separate indexer query/summary storage,
+not the main KV cache dtype. FP16 indexer storage retains the four-warps launch.
+
+The kernel name remains `_joint_prepare` in both configurations. When enabled,
+`JointPrepareLaunch` logs each distinct grid/reason/warps/main-cache-dtype selection
+once, up to 64 records per wrapper. Check `route=tuned`, `reason=eligible`,
+`implementation=lane_streaming`, `main_cache` and matching
+`selected_num_warps`/`compiled_num_warps` to confirm selection. Eligible BF16 launches can correctly report four warps.
+`route=baseline` includes the first unsupported contract reason. Disabled launches
+are silent. Logs describe eager launches or capture, not subsequent graph replays.
+The installed worker must include this wrapper and its general-plugin patch;
+setting an environment variable alone cannot update an older installation.
+An explicit SAIL value of `0` or an empty string overrides a PPU alias of `1`.
 
 The measured benefit is a single-launch warm-cache graph-event diagnostic on
-configuration-derived shapes, not captured serving inputs. ACU counters,
-cold-cache performance, whole-model accuracy and HTTP throughput are not accepted
-by that comparison. The switch remains opt-in.
+configuration-derived shapes, not captured serving inputs. Correctness is checked
+byte-for-byte against the original PPU kernel, including offset views and cache
+writes; this is not a model accuracy oracle. ACU counters are separate profiler
+evidence and are not inferred from event timing. Cold-cache performance,
+whole-model accuracy and HTTP throughput remain unverified. The switch defaults
+to enabled within the contract above; set it to `0` to disable tuning.
 
 ## Step5 QK Norm, RoPE and KV Cache
 
@@ -212,11 +244,16 @@ query_len=4, groups=1 layout and its exact shape/stride/capacity contract.
 Other admitted layouts retain the existing resident launch parameters.
 
 `v2` does not apply that launch tuning. It additionally requires query_len=4,
-groups=1, 8 or 16 local requests and score capacity >= 8192 regions. Within the
-guarded kernel, K is shared only when actual sequence length is 65536–69632
-and all four slots of the request are active. Other requests use original direct
-score computation, not the `v1` resident candidate. Device-side fallback still
-has branch overhead. Local requests are not a measured HTTP batch-size mapping.
+groups=1, a positive multiple of four query tokens and positive score capacity.
+There is no request-count whitelist or long-context window restriction. Within
+the guarded kernel, K is shared when actual sequence length is at least four
+tokens and all four slots of the request are active. Other requests use original
+direct score computation, not the `v1` resident candidate. Device-side fallback
+still has branch overhead. Sequence length is in tokens; score capacity is in
+summary regions. Input 128K plus output 4K spans decode lengths 131072–135168;
+query_len=4 is one MTP step, not the total output length. Synthetic device UTs
+cover 48 requests in this window, but do not establish full-model accuracy or
+HTTP throughput. Fixed FP32 oracle failures remain acceptance failures.
 
 ```bash
 export VLLM_SAIL_STEP5_DSA_SCORES=v3       # chunked prefill with grouped H4
@@ -403,6 +440,7 @@ the guide describes legacy opt-in variable precedence and source-format limits.
 | --- | --- | --- |
 | `VLLM_SAIL_NVTX_PROFILE` | `0` | Enable optional NVTX instrumentation |
 | `VLLM_SAIL_NVTX_DUMP_TOPK` | `0` | Include top-k details in NVTX labels |
+| `VLLM_SAIL_NVTX_DUMP_TOPK_DIR` | Empty string | Save complete input CPU snapshots as `.pt` and record their filenames in TopK/Attention NVTX; empty means print only |
 | `VLLM_SAIL_NVTX_VFA_DUMP_SEQLEN` | `0` | Include sequence lengths in FlashAttention NVTX labels |
 
 `SAIL_NVTX_PROFILE` is also accepted, after `VLLM_PPU_NVTX_PROFILE` in precedence.
@@ -418,13 +456,71 @@ An `op` range includes the operator's device preparation; a nested `kernel`
 range identifies an observed launch. `backend:dispatch` is not execution
 proof: use the actual leaf backend, not `requested_backend:auto/native`.
 Tensor fields contain shape, dtype, stride and storage offset only; optional
-inputs are `None`. No tensor values or pointers are read. `capture:1` records
-host graph capture, not the number of subsequent graph replays.
+inputs are `None`. With tensor dumping disabled, no tensor values or pointers
+are read. `capture:1` records host graph capture, not the number of subsequent
+graph replays.
+
+### Selector and Attention input dump
+
+```bash
+export VLLM_SAIL_NVTX_PROFILE=1
+export VLLM_SAIL_NVTX_DUMP_TOPK=1
+export VLLM_SAIL_NVTX_DUMP_TOPK_DIR=/path/to/topk-dumps # Optional; unset means print only
+```
+
+Tensor preview and saving require both switches above and a successful import of
+`prof_is_in_profiling` from `model_prof`. Its live state is queried before each
+dump: only `prof_is_in_profiling()` returning true permits reading input values.
+If the import fails, `DUMP_TENSOR` is false. An inactive profiler or a failed
+state query skips copying, previews and saving, including print-only mode.
+Ordinary NVTX ranges remain enabled with `topk_tensor:` empty; `model_prof` is
+not required for these metadata-only ranges.
+
+This switch covers instrumented Step5 selectors (`per_row`, `selector_v2`,
+`select_all`) and SAIL's public DeepSelect entry point. `[SAIL_TOPK_DUMP]` logs
+include implementation, backend, phase, original shape/dtype/stride/offset,
+scalar parameters and the first 32 flattened input values (`truncated` marks
+longer tensors). Only inputs are copied, before the selector runs. Outputs and
+workspace carry metadata only; their contents are never read or saved. Nested
+operator and raw kernel records have different `impl`/`scope` contracts;
+`backend:dispatch` is not proof of the actual backend.
+
+The same switches also cover instrumented DSA Attention prefill/decode entries,
+including native op/kernel submissions, upstream decode split/combine, paged
+prefill and FlashInfer `run`. `[SAIL_ATTENTION_DUMP]` uses the same input preview
+format. Attention's final `indices` is an input and is saved, unlike selector
+output indices. Decode split's `partial`/`lse` are output buffers (metadata only);
+combine reads them as initialized inputs and saves their values. Prepared plan
+page indices/indptr and ragged `prefill_chunks` are captured at execution, not
+while allocating uninitialized buffers. Structured chunks live in `parameters`,
+with independent CPU tensors and their original metadata. Full KV-cache inputs
+can be large; budget host memory and disk space accordingly.
+
+With a directory set, each input record is saved to a unique `topk-*.pt` or
+`attention-*.pt` before NVTX range push. Both labels reuse `topk_tensor:<filename>`
+only after a successful save. Dump disabled, print-only, capture or save failure leaves
+`topk_tensor:` empty. The file contains `schema`, `op`, `id`, `impl`, `backend`, `scope`,
+`pd_type`, `metadata`, `scalars` and `inputs`; there is no `outputs` field. Tensor
+names are normalized like the NVTX metadata (`logits` becomes `scores`, `end`
+becomes `topk_lengths`). DeepSelect's optional `indices_dtype` is recorded as
+`output_index_dtype`, without reading an output buffer. Full logical values are
+independent CPU snapshots;
+original device layout lives in `metadata`, not necessarily the CPU strides.
+Read only trusted files with `torch.load(path, map_location="cpu", weights_only=True)`.
+The directory also accepts `VLLM_PPU_NVTX_DUMP_TOPK_DIR`, with SAIL taking
+precedence even for an explicitly empty value.
+
+CUDA graph capture or an unavailable capture-state query skips copying/saving;
+graph replay does not execute Python dump again. Selector exceptions propagate
+unchanged and may leave their already-saved input record for diagnosis. Dump/save
+failures only warn. Dump synchronizes devices and adds host memory and I/O, so it
+must be disabled for performance validation. Files/logs may contain sensitive
+model data: restrict directory access and turn dumping off after diagnosis.
 
 Export one complete label per TXT line (an arbitrary text prefix is accepted):
 
 ```text
-[FW_SPARSE] op:topk,v:1,fw:vllm,model:step5,pd_type:decode,scope:op,impl:select_regions,backend:dispatch,capture:0,scores:(2, 64),scores_dtype:torch.float32,scores_stride:(64, 1),scores_offset:0,current:(2,),current_dtype:torch.int64,current_stride:(1,),current_offset:0,topk:4,sort:1
+[FW_SPARSE] op:topk,v:1,fw:vllm,model:step5,pd_type:decode,scope:op,impl:select_regions,backend:dispatch,capture:0,topk_tensor:,scores:(2, 64),scores_dtype:torch.float32,scores_stride:(64, 1),scores_offset:0,current:(2,),current_dtype:torch.int64,current_stride:(1,),current_offset:0,topk:4,sort:1
 ```
 
 The standalone UT does not start a model/server and is not part of the default
@@ -433,24 +529,54 @@ library; malformed candidate labels report the source file and line. Sources,
 SHA256, line numbers and observation counts survive deduplication. Old forward
 labels cannot reconstruct these operator contracts.
 
+For replayable TopK and Attention entries, a nonempty `topk_tensor` automatically loads the recorded input rather
+than generating scores or applying synthetic workload overrides. Both entry
+points accept `--topk-tensor-dir /path/to/topk-dumps`; without it, the file must
+exist beside the source TXT. Copy the `.pt` files together with the trace when
+moving between hosts. A missing file emits a warning and continues with synthetic
+input, using the configured workload or geometry-derived capacity-causal defaults.
+This applies to both dry-run and execution, including files removed before loading.
+Reports mark this fallback as `synthetic:true` and record `topk_tensor_fallback`
+with the original filename and reason; the original case ID is unchanged.
+Ambiguous, corrupt or mismatched files still fail explicitly. Empty or absent
+`topk_tensor` keeps the previous synthetic behavior. Different dump filenames remain distinct
+cases. Reports mark recorded input as `synthetic:false` and include the dump path
+and SHA256 in the normalized workload. Dry-run checks filenames and metadata
+without importing torch; content validation happens before device execution.
+Replay restores input values into recorded device strides/offsets, including
+lengths and paged-prefill metadata. Replay a dump at its recorded scope; raw
+`selector_v2` requires `--scope kernel --backends selector_v2`, while a direct
+DeepSelect dump requires the `deep_select` backend. Unsupported contracts fail
+admission without substituting a different backend.
+
+Attention replay restores standard fixed-selection inputs (query, KV cache,
+indices, block table, positions, owners/active, gate and quantization scales).
+Native prefill also restores recorded tiles, `max_seq_len` and `query_tile`.
+Raw split/combine and FlashInfer prepared key/value/page boundaries are saved but
+are not supported by this standalone fixed-selection replay. Structured ragged
+`prefill_chunks` likewise remain diagnostic snapshots, not replayable plans;
+these contracts report unsupported rather than substituting synthetic inputs or
+another backend. A missing file alone still uses the warning/synthetic fallback.
+
 ```bash
-python nvx_ut/benchmark_step5_sparse_nvtx.py extract \
+python tests/nvtx_based_ut/step5/benchmark_step5_sparse_nvtx.py extract \
   --nvtx trace-a.txt trace-b.txt --output cases.json
-python nvx_ut/benchmark_step5_sparse_nvtx.py compare \
+python tests/nvtx_based_ut/step5/benchmark_step5_sparse_nvtx.py compare \
   --nvtx trace-a.txt --op topk --workload-config workload.json \
   --dry-run --output-dir sparse-dry-run
 VLLM_SAIL_NVTX_PROFILE=0 VLLM_PPU_NVTX_PROFILE=0 SAIL_NVTX_PROFILE=0 \
-python nvx_ut/benchmark_step5_sparse_nvtx.py compare \
+python tests/nvtx_based_ut/step5/benchmark_step5_sparse_nvtx.py compare \
   --nvtx trace-a.txt --op topk --backends per_row deep_select selector_v2 \
   --workload-config workload.json --scope prepared-op \
   --timer graph-events --output-dir sparse-comparison
 ```
 
-For per-case GPU UTs, copy `nvx_ut/` to an environment with matching vLLM 0.33.x
-and vLLM SAIL, then run its self-contained entry point:
+For per-case GPU UTs, copy `tests/nvtx_based_ut/step5/` to an environment with
+matching vLLM 0.33.x and vLLM SAIL, preserving the relative path used below,
+then run its self-contained entry point:
 
 ```bash
-python nvx_ut/run_step5_dsa_nvtx_ut.py \
+python tests/nvtx_based_ut/step5/run_step5_dsa_nvtx_ut.py \
   --nvtx trace-a.txt trace-b.txt --op topk --backends deep_select
 ```
 
@@ -480,7 +606,8 @@ provide the content-dependent fields reported by dry-run in each case mapping:
 score; `seq_lens`, `positions`, `active`, `block_table`, `indices` and prefill
 `owners` for attention. Quantized KV also needs explicit positive `k_scale` and
 `v_scale`. Packed score uses explicit `summary_scale` (default synthetic 1.0).
-Actual tensor contents are never recovered from a trace. Named comparison arms
+For empty `topk_tensor` and other operators, tensor contents are not recovered
+from trace metadata. Named comparison arms
 and their actual leaf backend are recorded separately: the original paged
 baseline on PPU may execute the existing `software_paged` compatibility kernel.
 This is reported explicitly, not presented as an upstream CUDA kernel launch.
