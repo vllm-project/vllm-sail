@@ -151,11 +151,11 @@ were produced, even when a failed recipe did not write a result summary.
 
 ### Upstream test reuse
 
-Upstream reuse runs on a single M890 card in the authorized PPU pipeline, not
-automatically on PRs or a nightly schedule. It uses the runner-configured Docker
-runtime and the validated CI wheels with the SAIL plugin enabled, preserves the
-image's torch/torchvision stack and installs only the dedicated
-`requirements/upstream-reuse.txt` tooling. `requirements/dev.txt` stays unchanged.
+The authorized PPU pipeline runs upstream reuse on a single M890 card. The
+runner-configured Docker runtime supplies pytest, tblib, Numba and Transformers
+along with its torch/torchvision stack. The job installs the validated CI wheels
+from the build artifact with dependency resolution disabled and runs the tests
+with the SAIL plugin enabled.
 
 The container reads `HF_HOME=/nas_aisw/datasets/hf_cache` in offline mode. The
 cache and `/nas_aisw/datasets/checkpoints/LLM` are mounted read-only at their host
@@ -165,9 +165,9 @@ downloaded or modified. Missing model files still fail strict reuse, including
 cache entries whose snapshot directory exists but is empty. Diagnostics record
 the cache and checkpoint paths.
 
-For a local diagnostic in a prepared CPU environment with the exact upstream
-checkout, run the CPU entries with plugin loading disabled. This checks upstream
-behavior only and is not PPU qualification:
+For a local diagnostic, install `requirements/upstream-reuse.txt` in a prepared
+CPU environment with the exact upstream checkout. Run the CPU entries with
+plugin loading disabled. Use the M890 lane for PPU qualification.
 
 ```bash
 VLLM_PLUGINS='' VLLM_TARGET_DEVICE=cpu VLLM_SOURCE_ROOT=/path/to/pinned/vllm \
