@@ -1498,6 +1498,8 @@ def test_recipe_evalscope_install_preserves_runtime_numpy(
         "    print('import evalscope')\n"
         "else:\n"
         "    assert sys.argv[1:4] == ['-m', 'pip', 'install']\n"
+        "    if '--dry-run' in sys.argv:\n"
+        "        sys.exit(1)\n"
         "    print(sys.argv[-1], Path(os.environ['PIP_CONSTRAINT']).read_text().split())\n"
     )
     python.chmod(0o755)
@@ -1511,6 +1513,7 @@ def test_recipe_evalscope_install_preserves_runtime_numpy(
             "PIP_CONSTRAINT": str(constraints),
             "TIER": tier,
             "ROOT_DIR": str(ROOT),
+            "CI_SCRIPT_DIR": str(CI_DIR),
             "SKIP_WHEEL_INSTALL": "false",
             "vllm_wheel": "vllm.whl",
             "sail_wheel": "sail.whl",

@@ -1685,7 +1685,7 @@ def test_ci_reuse_files_cover_controller_and_reachable_reusable_workflows():
         "scripts/ci/ppu_upstream_reuse.sh",
         "scripts/ci/ppu_runtime_container.sh",
         "scripts/ci/ppu_image_stack.py",
-        "requirements/upstream-reuse.txt",
+        "scripts/ci/ppu_ci_deps.sh",
         "tests/upstream_reuse/REUSE_MANIFEST.toml",
         "tests/upstream_reuse/conftest.py",
         "tests/upstream_reuse/_reuse_harness.py",
