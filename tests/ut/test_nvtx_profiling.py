@@ -19,6 +19,7 @@ import importlib.util
 import logging
 import sys
 import types
+from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -258,20 +259,21 @@ def profiling_pkg(fake_vllm: SimpleNamespace, monkeypatch: pytest.MonkeyPatch):
     return module
 
 
-@pytest.fixture(params=[False, True], ids=["plain", "dp-scope-first"])
-def installed(
+@contextmanager
+def _install_profiling(
     profiling_pkg,
     nvtx_stub: dict[str, list],
     monkeypatch: pytest.MonkeyPatch,
     fake_vllm: SimpleNamespace,
-    request: pytest.FixtureRequest,
+    *,
+    dp_scope_first: bool,
 ):
     """Run install() with the gate on and return the faked targets."""
     monkeypatch.setenv("VLLM_PPU_NVTX_PROFILE", "1")
     saved_registry = PATCH_REGISTRY[:]
     PATCH_REGISTRY.clear()
     try:
-        if request.param:
+        if dp_scope_first:
             from vllm_sail.patch.bugfix import dp_idle_mtp_dummy_batch
 
             dp_idle_mtp_dummy_batch._install_execute_model_scope()
@@ -288,6 +290,23 @@ def installed(
         )
     finally:
         PATCH_REGISTRY[:] = saved_registry
+
+
+@pytest.fixture(params=[False, True], ids=["plain", "dp-scope-first"])
+def installed(profiling_pkg, nvtx_stub, monkeypatch, fake_vllm, request):
+    with _install_profiling(
+        profiling_pkg, nvtx_stub, monkeypatch, fake_vllm, dp_scope_first=request.param
+    ) as targets:
+        yield targets
+
+
+@pytest.fixture
+def installed_with_dp_scope(profiling_pkg, nvtx_stub, monkeypatch, fake_vllm):
+    # Use a separate fixture instead of overriding the parametrized fixture.
+    with _install_profiling(
+        profiling_pkg, nvtx_stub, monkeypatch, fake_vllm, dp_scope_first=True
+    ) as targets:
+        yield targets
 
 
 def _records_for(targets) -> dict[str, Any]:
@@ -425,8 +444,7 @@ def test_drifted_target_degrades_to_warning(
 # ---------------------------------------------------------------------------
 
 
-@pytest.fixture
-def recording_nvtx(installed, monkeypatch: pytest.MonkeyPatch):
+def _record_nvtx(monkeypatch: pytest.MonkeyPatch):
     """Swap the helper backends for recorders after install imported them."""
     prof_nvtx = importlib.import_module("vllm_sail.profiling.nvtx")
     pushes: list[str] = []
@@ -438,6 +456,11 @@ def recording_nvtx(installed, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(prof_nvtx, "_torch_range_pop", lambda: pops.append(1))
     monkeypatch.setattr(prof_nvtx, "_model_prof_iter", lambda it: iters.append(it))
     return SimpleNamespace(pushes=pushes, pops=pops, iters=iters)
+
+
+@pytest.fixture
+def recording_nvtx(installed, monkeypatch: pytest.MonkeyPatch):
+    return _record_nvtx(monkeypatch)
 
 
 def test_v2_execute_model_wraps_iteration_range(installed, recording_nvtx) -> None:
@@ -479,15 +502,15 @@ def test_v2_execute_model_forwards_dummy_runs_unprofiled(
     assert not hasattr(runner, "iteration")
 
 
-@pytest.mark.parametrize("installed", [True], indirect=True, ids=["dp-scope-first"])
 @pytest.mark.parametrize("dummy_run", [False, True])
 @pytest.mark.parametrize("raises", [False, True])
 def test_v2_profiling_preserves_dp_scope(
-    installed, recording_nvtx, dummy_run, raises
+    installed_with_dp_scope, monkeypatch, dummy_run, raises
 ) -> None:
     from vllm_sail.patch.bugfix import dp_idle_mtp_dummy_batch as dp
 
-    runner = installed.fakes.GPUModelRunnerV2()
+    recording_nvtx = _record_nvtx(monkeypatch)
+    runner = installed_with_dp_scope.fakes.GPUModelRunnerV2()
 
     def execute():
         assert dp._get_uniform_token_count() is None
