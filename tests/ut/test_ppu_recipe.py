@@ -2666,3 +2666,82 @@ def test_short_layer_dummy_empty_stream_content_falls_back_to_full_layers(
             ppu_recipe_diagnostics.failure_reason(priv_dir, "fast_sanity")
             == expected_diag
         )
+
+
+def test_qwen38_flash_next_tp4_and_dp_ep_match_legacy_contracts() -> None:
+    recipe = RECIPES_DIR / "Qwen" / "Qwen3.8-Flash-Next.yaml"
+    tp4_policy_path = POLICY_DIR / "models" / "qwen3.8-flash-next.yaml"
+    dpep_policy_path = POLICY_DIR / "models" / "qwen3.8-flash-next-dp-ep.yaml"
+    catalog = {
+        case["key"]: case
+        for case in json.loads((CI_DIR / "ppu_e2e_models.json").read_text())
+    }
+
+    def flags(args: list[str]) -> dict[str, str | None]:
+        return {name: value for name, value, _ in ppu_recipe._parse_flag_entries(args)}
+
+    # TP4 Fast Sanity uses auto layer override without --enforce-eager or MTP disable.
+    resolved_fs = ppu_recipe.resolve_recipe(
+        recipe, policy_path=tp4_policy_path, tier="fast_sanity"
+    )
+    assert resolved_fs["ppu_count"] == 4
+    assert resolved_fs["preset"] is None
+    assert resolved_fs["layer_override"] == "auto"
+    assert resolved_fs["dummy_weights"] is True
+    assert "--enforce-eager" not in resolved_fs["flags"]
+    assert "--load-format" in resolved_fs["flags"]
+    assert "--speculative-config" in resolved_fs["flags"]
+
+    # TP4 Model Sanity strictly matches legacy qwen3.8-flash-next-tp4.
+    tp4_legacy = catalog["qwen3.8-flash-next-tp4"]
+    resolved_tp4 = ppu_recipe.resolve_recipe(
+        recipe, policy_path=tp4_policy_path, tier="model_sanity"
+    )
+    assert resolved_tp4["ppu_count"] == tp4_legacy["ppu_count"] == 4
+    assert resolved_tp4["hf_model_id"] == tp4_legacy["model_id"]
+    assert resolved_tp4["golden_model_key"] == tp4_legacy["model_key"]
+    assert resolved_tp4["served_name"] == tp4_legacy["served_name"]
+    assert resolved_tp4["server_env"] == tp4_legacy["server_env"]
+    tp4_flags = flags(resolved_tp4["flags"])
+    for key, value in flags(tp4_legacy["server_cmd"][9:]).items():
+        if key.endswith("-config"):
+            assert json.loads(tp4_flags[key]) == json.loads(value)
+        else:
+            assert tp4_flags[key] == value
+
+    # DP8+EP Model Sanity strictly matches legacy qwen3.8-flash-next-dp-ep.
+    dpep_legacy = catalog["qwen3.8-flash-next-dp-ep"]
+    dpep_matrix = ppu_e2e_select.build_recipe_matrix(
+        "qwen3.8-flash-next-dp-ep", "model_sanity"
+    )
+    (dpep_entry,) = dpep_matrix["include"]
+    resolved_dpep = ppu_recipe.resolve_recipe(
+        recipe,
+        policy_path=dpep_policy_path,
+        tier="model_sanity",
+        preset=dpep_entry["preset"],
+    )
+    assert dpep_entry["ppu_count"] == resolved_dpep["ppu_count"] == 8
+    assert dpep_entry["preset"] == resolved_dpep["preset"] == "dp_ep_low_latency"
+    assert (
+        dpep_entry["config_digest"]
+        == resolved_dpep["config_digest"]
+        != resolved_tp4["config_digest"]
+    )
+    assert set(dpep_legacy["server_env"].items()) <= set(
+        resolved_dpep["server_env"].items()
+    )
+    assert "--tensor-parallel-size" not in resolved_dpep["flags"]
+    assert "--max-num-seqs" not in resolved_dpep["flags"]
+    assert resolved_dpep["flags"].count("--gpu-memory-utilization") == 1
+    dpep_flags = flags(resolved_dpep["flags"])
+    for key, value in flags(dpep_legacy["server_cmd"][9:]).items():
+        if key.endswith("-config"):
+            assert json.loads(dpep_flags[key]) == json.loads(value)
+        else:
+            assert dpep_flags[key] == value
+
+    fast_matrix = ppu_e2e_select.build_recipe_matrix("", "fast_sanity")["include"]
+    fast_keys = {item["key"] for item in fast_matrix}
+    assert "qwen3.8-flash-next" in fast_keys
+    assert "qwen3.8-flash-next-dp-ep" not in fast_keys
