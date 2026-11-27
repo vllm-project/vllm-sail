@@ -44,6 +44,7 @@ PHASES = (
     "startup",
     "gsm8k_score vs golden",
     "micro_e2e",
+    "lightweight performance regression",
     "cleanup",
     "private_retention",
     "model_cache_check",

@@ -1773,6 +1773,7 @@ def test_recipe_model_sanity_has_one_scheduled_entry():
         ("workflow_dispatch", "recipe:all", "true", [], "", ""),
         ("workflow_dispatch", "recipe:all ", "true", [], "", ""),
         ("workflow_dispatch", " recipe:all ", "true", [], "", ""),
+        ("workflow_dispatch", " light_perf:deepseek-v4.1-flash ", "true", [], None, ""),
         (
             "workflow_dispatch",
             " recipe:all ",
@@ -1896,6 +1897,7 @@ def test_accuracy_nightly_routes_selected_models(
         "needs.resolve-image.result": "skipped",
         "needs.select.outputs.recipe_models": values.get("recipe_models", ""),
         "needs.select.outputs.run_recipe": values.get("run_recipe", "false"),
+        "needs.select.outputs.run_light_perf": values.get("run_light_perf", ""),
         "needs.select.outputs.matrix": legacy_matrix,
     }
     context.update(
@@ -1908,6 +1910,9 @@ def test_accuracy_nightly_routes_selected_models(
     assert values["full_run"] == str(full_selection).lower()
     assert bool(expression(jobs["notify-summary"]["if"], context)) == full_selection
     assert expression(jobs["accuracy"]["if"], context) == (legacy_cases != [])
+    assert bool(expression(jobs["recipe-light-perf"]["if"], context)) == (
+        models.strip() == "light_perf:deepseek-v4.1-flash"
+    )
     if legacy_cases is None:
         catalog = json.loads((ROOT / "scripts/ci/ppu_e2e_models.json").read_text())
         expected = [
@@ -1934,6 +1939,7 @@ def test_accuracy_nightly_routes_selected_models(
     [
         (" recipe:all ", False, False, True),
         (" recipe:glm-5.3 ", False, False, True),
+        (" light_perf:deepseek-v4.1-flash ", False, False, True),
         (" \t", False, True, True),
         ("glm-5.3-mxfp4-tp4", False, False, False),
         (" \t", False, False, False),
@@ -1979,6 +1985,27 @@ def test_accuracy_nightly_recipe_dependencies_follow_normalized_input(
     )
     for step in (setup, install):
         assert bool(expression(step["if"], context)) == required
+
+
+def test_light_perf_artifact_upload_precedes_failed_verdict():
+    job = workflow("_ppu-recipe-model-sanity.yaml")["jobs"]["sanity"]
+    steps = job["steps"]
+    publish = next(step for step in steps if step.get("id") == "publish-light-perf")
+    upload = next(
+        step for step in steps if step.get("name") == "Upload public light perf summary"
+    )
+    gate = next(
+        step for step in steps if step.get("name") == "Enforce light perf verdict"
+    )
+    assert steps.index(publish) < steps.index(upload) < steps.index(gate)
+    assert gate["run"] == "exit 1"
+    context = {"steps.publish-light-perf.outcome": "success"}
+    for status in ("pass", "fail"):
+        context["steps.publish-light-perf.outputs.status"] = status
+        assert expression(upload["if"], context)
+        assert expression(gate["if"], context) == (status == "fail")
+    assert expression(job["timeout-minutes"], {"inputs.light_perf": True}) == 60
+    assert expression(job["timeout-minutes"], {"inputs.light_perf": False}) == 240
 
 
 @pytest.mark.parametrize(
@@ -2863,7 +2890,8 @@ def test_recipe_workflow_refuses_arbitrary_wheel_run(
 def test_recipe_retention_and_publication(
     tmp_path, leaf_name, tier, exit_code, status, retention_case
 ):
-    steps = workflow(leaf_name)["jobs"]["sanity"]["steps"]
+    config = workflow(leaf_name)
+    steps = config["jobs"]["sanity"]["steps"]
     runtime = next(step for step in steps if step.get("id") == "recipe")
     retain = next(step for step in steps if step.get("id") == "retain")
     publish = next(step for step in steps if step.get("id") == "publish")
@@ -2873,7 +2901,18 @@ def test_recipe_retention_and_publication(
     assert upload["with"]["path"] == "${{ steps.runtime.outputs.public }}/summary.json"
     assert steps.index(runtime) < steps.index(retain) < steps.index(publish)
     assert retain["if"] == "always() && steps.runtime.outcome == 'success'"
-    assert retain["env"]["TIER"] == tier
+    if tier == "model_sanity":
+        light_perf = config[True]["workflow_call"]["inputs"]["light_perf"]
+        assert light_perf["type"] == "boolean"
+        assert light_perf["default"] is False
+        context = {"inputs.light_perf": light_perf["default"]}
+        assert expression(retain["env"]["TIER"], context) == tier
+        assert (
+            expression(retain["env"]["TIER"], {"inputs.light_perf": True})
+            == "light_perf"
+        )
+    else:
+        assert retain["env"]["TIER"] == tier
     assert all(
         "PPU_CI_PRIVATE_RESULTS_ROOT" not in step.get("env", {}) for step in steps
     )

@@ -8,6 +8,19 @@ accuracy_gate:
   golden_source: framework_repo
   save_per_question: true
 tiers:
+  light_perf:
+    groups:
+      prefill:
+        max_model_len: 102528
+        max_num_batched_tokens: 102528
+        max_num_seqs: 1
+        # Leave room for long-sequence Engram all-gather and graph workspace.
+        kv_cache_memory_bytes: 17179869184
+        cases:
+          - prefill_4k=4096
+          - prefill_16k=16384
+          - prefill_64k=65536
+          - prefill_100k=102400
   fast_sanity:
     dummy_weights: true
     # Segmented 40-layer stack (20 encoder + 20 decoder): `auto` infers full layers via `deepseek_v41`.

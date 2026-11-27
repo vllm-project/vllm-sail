@@ -42,6 +42,10 @@ on:
         description: Skip wheel download/install and run directly inside the prebuilt runtime image
         type: boolean
         default: false
+      light_perf:
+        description: Run the lightweight performance regression tier
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -85,7 +89,7 @@ jobs:
         id: select
         env:
           MODELS: ${{ inputs.models }}
-          TIER: model_sanity
+          TIER: ${{ inputs.light_perf && 'light_perf' || 'model_sanity' }}
           PR_MODE: ${{ inputs.pr_mode }}
           BUILD_RUN_ID: ${{ inputs.build_run_id }}
           SELECTED_MATRIX: ${{ inputs.selected_matrix }}
@@ -94,6 +98,11 @@ jobs:
           SKIP_WHEEL_BUILD: ${{ inputs.skip_wheel_build }}
         run: |
           test "$PR_MODE" != true
+          if [[ "$TIER" == light_perf ]]; then
+            test "${SKIP_WHEEL_BUILD:-false}" = false
+            test -n "$MODELS"
+            test -z "$SELECTED_MATRIX"
+          fi
           if [[ -n "${IMAGE_TAG:-}" ]]; then
             if [[ "$IMAGE_TAG" == *".."* || ! "$IMAGE_TAG" =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$ ]]; then
               echo "Invalid image_tag input: tag only, no registry or repository prefix." >&2
@@ -137,10 +146,10 @@ jobs:
           printf 'ready_epoch=%s\n' "$(date +%s)" >> "$GITHUB_OUTPUT"
 
   sanity:
-    name: Model sanity & micro-E2E ${{ matrix.model.key }}
+    name: ${{ inputs.light_perf && 'Light perf' || 'Model sanity & micro-E2E' }} ${{ matrix.model.key }}
     needs: prepare
     runs-on: 8-ppu-m890p
-    timeout-minutes: 240
+    timeout-minutes: ${{ inputs.light_perf && 60 || 240 }}
     strategy:
       fail-fast: false
       max-parallel: 2
@@ -254,7 +263,7 @@ jobs:
           MODEL_ID: ${{ matrix.model.model_id }}
           RECIPE_PATH: ${{ matrix.model.recipe_path }}
           POLICY_PATH: ${{ matrix.model.policy_path }}
-          TIER: model_sanity
+          TIER: ${{ inputs.light_perf && 'light_perf' || 'model_sanity' }}
           PRESET: ${{ matrix.model.preset || '' }}
           PPU_CI_QUEUE_S: ${{ steps.runtime.outputs.queue_s }}
         run: |
@@ -284,7 +293,7 @@ jobs:
           PPU_CI_SOURCE_DIR: ${{ steps.runtime.outputs.source }}
           PPU_CI_SOURCE_SHA: ${{ inputs.pr_head_sha || github.sha }}
           PPU_CI_ARTIFACT_DIR: ${{ steps.runtime.outputs.artifacts }}
-          TIER: model_sanity
+          TIER: ${{ inputs.light_perf && 'light_perf' || 'model_sanity' }}
           MODEL_KEY: ${{ matrix.model.key }}
           RECIPE_OUTCOME: ${{ steps.recipe.outcome }}
         run: |
@@ -293,7 +302,7 @@ jobs:
 
       - name: Publish public recipe sanity summary
         id: publish
-        if: always() && steps.runtime.outcome == 'success'
+        if: always() && steps.runtime.outcome == 'success' && !inputs.light_perf
         env:
           RECIPE_OUTCOME: ${{ steps.recipe.outcome }}
           RETENTION_OUTCOME: ${{ steps.retain.outcome }}
@@ -488,3 +497,29 @@ jobs:
           path: ${{ steps.runtime.outputs.public }}/summary.json
           if-no-files-found: error
           retention-days: 14
+
+      - name: Publish public light perf summary
+        id: publish-light-perf
+        if: always() && steps.runtime.outcome == 'success' && inputs.light_perf
+        env:
+          RECIPE_OUTCOME: ${{ steps.recipe.outcome }}
+          RETENTION_OUTCOME: ${{ steps.retain.outcome }}
+          TRUSTED_CI_DIR: ${{ steps.runtime.outputs.trusted }}
+          PRIVATE_DIR: ${{ steps.runtime.outputs.artifacts }}
+          PUBLIC_DIR: ${{ steps.runtime.outputs.public }}
+        run: |
+          python3 --version
+          python3 -I "${TRUSTED_CI_DIR}/scripts/ci/ppu_recipe_light_perf.py" publish
+
+      - name: Upload public light perf summary
+        if: always() && steps.publish-light-perf.outcome == 'success'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ppu-recipe-light_perf-${{ matrix.model.key }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ steps.runtime.outputs.public }}/summary.json
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Enforce light perf verdict
+        if: always() && steps.publish-light-perf.outcome == 'success' && steps.publish-light-perf.outputs.status != 'pass'
+        run: exit 1

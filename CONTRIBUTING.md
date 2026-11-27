@@ -225,6 +225,26 @@ default image repository unless the runner sets the respective
 release image on all eligible runners and merge the release workflow before
 enabling the default-branch cron fan-out.
 
+### On-demand lightweight performance regression
+
+In the **PPU accuracy nightly** Action, set `models` to
+`light_perf:deepseek-v4.1-flash` and build wheels from the selected ref. This runs
+the DeepSeek-V4.1-Flash TP8 prefill cases on eight M890 devices. Future decode
+coverage belongs to DP+EP recipes using the `deepep_low_latency` backend.
+The Actions summary shows the measured latency, baseline and change for every
+shape. The performance job fails if any case's median latency is more than
+5% above its checked-in baseline. The scheduled lane is controlled by
+`SCHEDULED_LIGHT_PERF_ENABLED` in `ppu-accuracy-nightly.yaml`.
+
+The recipe container entrypoint can capture a replacement baseline on a
+matching PPU runtime. Set `TIER=light_perf` and
+`PPU_LIGHT_PERF_CAPTURE_BASELINE=true` with the verified wheels, model cache and
+recipe paths. Keep the raw results under the run directory and commit the
+generated baseline JSON under `tests/e2e/perf/baselines/890p/`.
+`PPU_LIGHT_PERF_LOCAL_CHECKPOINT` can point to the mounted checkpoint export for
+this capture. The baseline records content hashes so Nightly can verify the
+matching model and tokenizer files from its offline cache.
+
 ## Reporting issues
 
 Use the bug or feature request template in the repository's Issues tab. Bug

@@ -1,0 +1,116 @@
+{
+  "config": {
+    "benchmark_args": {
+      "prefill": [
+        "bench",
+        "forward",
+        "--model",
+        "T-HEAD/DeepSeek-V4.1-Flash-1017-MXFP4-FP8-Engram-MXFP8",
+        "--trust-remote-code",
+        "--tensor-parallel-size",
+        "8",
+        "--block-size",
+        "128",
+        "--gpu-memory-utilization",
+        "0.9",
+        "--mm-encoder-tp-mode",
+        "data",
+        "--engram-config",
+        "{\"cpu_offload\":true}",
+        "--distributed-timeout-seconds",
+        "3600",
+        "--cpu-distributed-timeout-seconds",
+        "3600",
+        "--tokenizer-mode",
+        "deepseek_v41",
+        "--no-enable-prefix-caching",
+        "--load-format",
+        "dummy",
+        "--max-model-len=102528",
+        "--max-num-batched-tokens=102528",
+        "--max-num-seqs=1",
+        "--kv-cache-memory-bytes=17179869184",
+        "--seed",
+        "0",
+        "--kv-len-jitter",
+        "0",
+        "--routing",
+        "zipf",
+        "--iters",
+        "20",
+        "--samples",
+        "5",
+        "--case",
+        "prefill_4k=4096",
+        "--case",
+        "prefill_16k=16384",
+        "--case",
+        "prefill_64k=65536",
+        "--case",
+        "prefill_100k=102400"
+      ]
+    },
+    "checkpoint_files_sha256": {
+      "config.json": "102d5e5862e77618b88f589febae523f3d3ac743a3dc5c72c1756aedc760b58d",
+      "model.safetensors.index.json": "a94e452343136142985952b107ed1e9751671cc81a1054f4aad2e4b580869b2f",
+      "tokenizer.json": "c90dfa01249db1be4245780a052ede752e1361c612ac6d08e2bdada7d599476b",
+      "tokenizer_config.json": "6ac8c8dc065ed118161d02dd532749ae3f52c243deac27872134fae2f50d8547"
+    },
+    "devices": [
+      "ZW-M890P",
+      "ZW-M890P",
+      "ZW-M890P",
+      "ZW-M890P",
+      "ZW-M890P",
+      "ZW-M890P",
+      "ZW-M890P",
+      "ZW-M890P"
+    ],
+    "groups": {
+      "prefill": {
+        "cases": [
+          "prefill_4k=4096",
+          "prefill_16k=16384",
+          "prefill_64k=65536",
+          "prefill_100k=102400"
+        ],
+        "kv_cache_memory_bytes": 17179869184,
+        "max_model_len": 102528,
+        "max_num_batched_tokens": 102528,
+        "max_num_seqs": 1
+      }
+    },
+    "recipe_config_digest": "f84863908f8cbac43a834b89d34d1d90b9e2ad54eeb51e4e6fa5f0f570759d3f",
+    "sdk_sha256": "c0c8a191879ad8f18ca4132b728773b7be51ff82edf1abda8c1c66ea2ed87a45",
+    "torch_sha256": "96f32f544250ae4aadcaad3956e4fef7ff2779807a211a8c2bc1190ccbf12db8"
+  },
+  "metrics": {
+    "prefill_100k": {
+      "cv": 0.0001434492248469746,
+      "median_us": 2780285.0
+    },
+    "prefill_16k": {
+      "cv": 0.0002380200137035089,
+      "median_us": 432487.25
+    },
+    "prefill_4k": {
+      "cv": 0.0005346692252805342,
+      "median_us": 128799.75
+    },
+    "prefill_64k": {
+      "cv": 0.00019195069752097002,
+      "median_us": 1721236.375
+    }
+  },
+  "provenance": {
+    "checkpoint_revision": null,
+    "checkpoint_source": "local_export",
+    "commits": {
+      "vllm": "047f6bfbb22cf4815162125f107e6dd90c72478a",
+      "vllm-sail": "69c51ee1778ba8095f6f2f3a0395b41d89e9c71e"
+    },
+    "runtime_image_digest": "@sha256:2537e1a4f8b52be77fed0384b94cc2d76899ccb24c8e2ba7fc05cfebf1e9a152",
+    "runtime_image_id": "sha256:5d8190e243dcb76eba6c7f9cff2b776a5a3e3809bc9c742d33875e43795a6ca2"
+  },
+  "schema_version": 1
+}
