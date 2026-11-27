@@ -19,6 +19,7 @@ import importlib.util
 import logging
 import sys
 import types
+from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -115,6 +116,9 @@ def fake_vllm(monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
         def execute_model(
             self, scheduler_output, intermediate_tensors=None, dummy_run=False, **kw
         ):
+            callback = getattr(self, "execute_callback", None)
+            if callback is not None:
+                return callback()
             return ("execute_model", scheduler_output, dummy_run)
 
     class EngineCore:
@@ -229,20 +233,21 @@ def profiling_pkg(fake_vllm: SimpleNamespace, monkeypatch: pytest.MonkeyPatch):
     return module
 
 
-@pytest.fixture(params=[False, True], ids=["plain", "dp-scope-first"])
-def installed(
+@contextmanager
+def _install_profiling(
     profiling_pkg,
     nvtx_stub: dict[str, list],
     monkeypatch: pytest.MonkeyPatch,
     fake_vllm: SimpleNamespace,
-    request: pytest.FixtureRequest,
+    *,
+    dp_scope_first: bool,
 ):
     """Run install() with the gate on and return the faked targets."""
     monkeypatch.setenv("VLLM_PPU_NVTX_PROFILE", "1")
     saved_registry = PATCH_REGISTRY[:]
     PATCH_REGISTRY.clear()
     try:
-        if request.param:
+        if dp_scope_first:
             from vllm_sail.patch.bugfix import dp_idle_mtp_dummy_batch
 
             dp_idle_mtp_dummy_batch._install_execute_model_scope()
@@ -259,6 +264,23 @@ def installed(
         )
     finally:
         PATCH_REGISTRY[:] = saved_registry
+
+
+@pytest.fixture(params=[False, True], ids=["plain", "dp-scope-first"])
+def installed(profiling_pkg, nvtx_stub, monkeypatch, fake_vllm, request):
+    with _install_profiling(
+        profiling_pkg, nvtx_stub, monkeypatch, fake_vllm, dp_scope_first=request.param
+    ) as targets:
+        yield targets
+
+
+@pytest.fixture
+def installed_with_dp_scope(profiling_pkg, nvtx_stub, monkeypatch, fake_vllm):
+    # Use a separate fixture instead of overriding the parametrized fixture.
+    with _install_profiling(
+        profiling_pkg, nvtx_stub, monkeypatch, fake_vllm, dp_scope_first=True
+    ) as targets:
+        yield targets
 
 
 def _records_for(targets) -> dict[str, Any]:
@@ -398,8 +420,7 @@ def test_drifted_target_degrades_to_warning(
 # ---------------------------------------------------------------------------
 
 
-@pytest.fixture
-def recording_nvtx(installed, monkeypatch: pytest.MonkeyPatch):
+def _record_nvtx(monkeypatch: pytest.MonkeyPatch):
     """Swap the helper backends for recorders after install imported them."""
     prof_nvtx = importlib.import_module("vllm_sail.profiling.nvtx")
     pushes: list[str] = []
@@ -411,6 +432,11 @@ def recording_nvtx(installed, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(prof_nvtx, "_torch_range_pop", lambda: pops.append(1))
     monkeypatch.setattr(prof_nvtx, "_model_prof_iter", lambda it: iters.append(it))
     return SimpleNamespace(pushes=pushes, pops=pops, iters=iters)
+
+
+@pytest.fixture
+def recording_nvtx(installed, monkeypatch: pytest.MonkeyPatch):
+    return _record_nvtx(monkeypatch)
 
 
 @pytest.fixture
@@ -567,6 +593,38 @@ def test_v2_execute_model_forwards_dummy_runs_unprofiled(
     assert recording_nvtx.iters == []
     # Memory profiling and CUDA-graph capture must not consume iteration numbers.
     assert not hasattr(runner, "iteration")
+
+
+@pytest.mark.parametrize("dummy_run", [False, True])
+@pytest.mark.parametrize("raises", [False, True])
+def test_v2_profiling_preserves_dp_scope(
+    installed_with_dp_scope, monkeypatch, dummy_run, raises
+) -> None:
+    from vllm_sail.patch.bugfix import dp_idle_mtp_dummy_batch as dp
+
+    recording_nvtx = _record_nvtx(monkeypatch)
+    runner = installed_with_dp_scope.fakes.GPUModelRunnerV2()
+
+    def execute():
+        assert dp._get_uniform_token_count() is None
+        dp._set_uniform_token_count(3)
+        if raises:
+            raise ValueError("model failed")
+        return "done"
+
+    runner.execute_callback = execute
+    dp._set_uniform_token_count(32)
+    try:
+        if raises:
+            with pytest.raises(ValueError, match="model failed"):
+                runner.execute_model(_sched_output(), dummy_run=dummy_run)
+        else:
+            assert runner.execute_model(_sched_output(), dummy_run=dummy_run) == "done"
+        assert dp._get_uniform_token_count() is None
+        expected_ranges = 0 if dummy_run else 2
+        assert len(recording_nvtx.pushes) == len(recording_nvtx.pops) == expected_ranges
+    finally:
+        dp._set_uniform_token_count(None)
 
 
 def test_v2_sample_wraps_sampler_range(installed, recording_nvtx) -> None:
