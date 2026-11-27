@@ -41,7 +41,7 @@ from vllm.utils.async_utils import make_async
 from vllm.utils.func_utils import supports_kw
 
 
-def _qwen4_template_kwargs(
+def _qwen4exp_template_kwargs(
     tokenizer: HfTokenizer, kwargs: dict[str, Any]
 ) -> dict[str, Any]:
     """Keep only the kwargs the native Qwen4Exp encoder accepts.
@@ -69,10 +69,10 @@ def _qwen4_template_kwargs(
     return filtered
 
 
-class Qwen4Renderer(BaseRenderer[HfTokenizer]):
+class Qwen4ExpRenderer(BaseRenderer[HfTokenizer]):
     """Render chat prompts for the Qwen4Exp architectures.
 
-    Registered out-of-tree for the ``qwen4`` renderer/tokenizer mode, which the
+    Registered out-of-tree for the ``qwen4exp`` renderer/tokenizer mode, which the
     PPU platform selects for ``Qwen4ExpForCausalLM`` and
     ``Qwen4ExpForConditionalGeneration``. Uses the standard HF tokenizer (loaded
     via ``trust_remote_code`` when the checkpoint ships remote code). Checkpoints
@@ -105,10 +105,10 @@ class Qwen4Renderer(BaseRenderer[HfTokenizer]):
 
         if kwargs.get("continue_final_message"):
             raise VLLMValidationError(
-                "Qwen4 renderer does not support continue_final_message"
+                "Qwen4Exp renderer does not support continue_final_message"
             )
 
-        template_kwargs = _qwen4_template_kwargs(tokenizer, kwargs)
+        template_kwargs = _qwen4exp_template_kwargs(tokenizer, kwargs)
         try:
             return tokenizer.apply_chat_template(conversation, **template_kwargs)
         except (TypeError, ValueError) as e:

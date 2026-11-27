@@ -5,13 +5,13 @@
 Upstream exposes ``RendererRegistry.register`` and ``_TokenizerRegistry.register``
 (``vllm/renderers/registry.py``, ``vllm/tokenizers/registry.py``), which add a
 mode -> (module, class) entry resolved lazily by ``resolve_obj_by_qualname``. So
-the ``qwen4`` mode needs **no patch**: the tokenizer stays the standard cached HF
-tokenizer and only the renderer (template stage) is replaced, exactly like the
+the ``qwen4exp`` mode needs **no patch**: the tokenizer stays the standard cached
+HF tokenizer and only the renderer (template stage) is replaced, exactly like the
 in-tree ``kimi_k3`` / ``inkling`` modes.
 
-The PPU platform selects ``tokenizer_mode="qwen4"`` for the Qwen4Exp architectures
-in ``PPUPlatform.apply_config_platform_defaults``; this module makes that mode
-resolvable.
+The PPU platform selects ``tokenizer_mode="qwen4exp"`` for the Qwen4Exp
+architectures in ``PPUPlatform.apply_config_platform_defaults``; this module makes
+that mode resolvable.
 """
 
 from __future__ import annotations
@@ -23,11 +23,11 @@ logger = init_logger(__name__)
 _registered = False
 
 #: Renderer/tokenizer mode contributed by this plugin.
-MODE = "qwen4"
+MODE = "qwen4exp"
 
 
 def register() -> None:
-    """Register the ``qwen4`` renderer and tokenizer mode. Idempotent."""
+    """Register the ``qwen4exp`` renderer and tokenizer mode. Idempotent."""
     global _registered
     if _registered:
         return
@@ -41,7 +41,9 @@ def register() -> None:
         logger.warning("Tokenizer mode %r already exists; keeping its owner.", MODE)
 
     if MODE not in RENDERER_REGISTRY.renderers:
-        RENDERER_REGISTRY.register(MODE, "vllm_sail.renderers.qwen4", "Qwen4Renderer")
+        RENDERER_REGISTRY.register(
+            MODE, "vllm_sail.renderers.qwen4exp", "Qwen4ExpRenderer"
+        )
     else:
         logger.warning("Renderer mode %r already exists; keeping its owner.", MODE)
 

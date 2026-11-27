@@ -18,7 +18,7 @@ import pytest
 pytestmark = pytest.mark.requires_runtime
 
 
-class StubQwen4Tokenizer:
+class StubQwen4ExpTokenizer:
     """Mimics the remote-code Qwen4Exp tokenizer's native Python encoder.
 
     Like the real encoder it names the kwargs it understands, consumes
@@ -116,10 +116,10 @@ def runtime():
     from vllm.tokenizers.registry import TokenizerRegistry
 
     from vllm_sail.registry import renderers as renderers_registry
-    from vllm_sail.renderers.qwen4 import Qwen4Renderer
+    from vllm_sail.renderers.qwen4exp import Qwen4ExpRenderer
 
     return SimpleNamespace(
-        Qwen4Renderer=Qwen4Renderer,
+        Qwen4ExpRenderer=Qwen4ExpRenderer,
         ChatParams=ChatParams,
         VLLMValidationError=VLLMValidationError,
         RENDERER_REGISTRY=RENDERER_REGISTRY,
@@ -128,24 +128,25 @@ def runtime():
     )
 
 
-def _make_renderer(runtime, tokenizer: StubQwen4Tokenizer):
+def _make_renderer(runtime, tokenizer: StubQwen4ExpTokenizer):
     config = MockVllmConfig(MockModelConfig(), MockParallelConfig())
-    return runtime.Qwen4Renderer(config, tokenizer)
+    return runtime.Qwen4ExpRenderer(config, tokenizer)
 
 
-def test_qwen4_mode_registered(runtime):
+def test_qwen4exp_mode_registered(runtime):
     runtime.renderers_registry.register()
     assert (
-        runtime.RENDERER_REGISTRY.load_renderer_cls("qwen4").__name__ == "Qwen4Renderer"
+        runtime.RENDERER_REGISTRY.load_renderer_cls("qwen4exp").__name__
+        == "Qwen4ExpRenderer"
     )
     assert (
-        runtime.TokenizerRegistry.load_tokenizer_cls("qwen4").__name__
+        runtime.TokenizerRegistry.load_tokenizer_cls("qwen4exp").__name__
         == "CachedHfTokenizer"
     )
 
 
 def test_native_encoder_forces_tokenize_and_pins_return_dict(runtime):
-    tokenizer = StubQwen4Tokenizer([7, 8, 9])
+    tokenizer = StubQwen4ExpTokenizer([7, 8, 9])
     renderer = _make_renderer(runtime, tokenizer)
     params = runtime.ChatParams(chat_template_kwargs={"tokenize": False})
 
@@ -162,7 +163,7 @@ def test_native_encoder_forces_tokenize_and_pins_return_dict(runtime):
 
 
 def test_native_encoder_drops_jinja_and_api_only_kwargs(runtime):
-    tokenizer = StubQwen4Tokenizer([1, 2])
+    tokenizer = StubQwen4ExpTokenizer([1, 2])
     renderer = _make_renderer(runtime, tokenizer)
     # chat_template / continue_final_message / documents are not understood by
     # the native encoder and must be filtered out, not forwarded.
@@ -182,7 +183,7 @@ def test_native_encoder_drops_jinja_and_api_only_kwargs(runtime):
 
 
 def test_native_encoder_forwards_thinking_and_tools(runtime):
-    tokenizer = StubQwen4Tokenizer([1, 2, 3])
+    tokenizer = StubQwen4ExpTokenizer([1, 2, 3])
     renderer = _make_renderer(runtime, tokenizer)
     tools = [{"type": "function", "function": {"name": "search"}}]
     params = runtime.ChatParams(
@@ -203,7 +204,7 @@ def test_native_encoder_forwards_thinking_and_tools(runtime):
 
 
 def test_native_encoder_rejects_continue_final_message(runtime):
-    tokenizer = StubQwen4Tokenizer([1])
+    tokenizer = StubQwen4ExpTokenizer([1])
     renderer = _make_renderer(runtime, tokenizer)
     params = runtime.ChatParams(chat_template_kwargs={"continue_final_message": True})
 
@@ -214,7 +215,7 @@ def test_native_encoder_rejects_continue_final_message(runtime):
 
 
 def test_render_messages_returns_token_prompt(runtime):
-    renderer = _make_renderer(runtime, StubQwen4Tokenizer([1, 2, 3]))
+    renderer = _make_renderer(runtime, StubQwen4ExpTokenizer([1, 2, 3]))
 
     conversation, prompt = renderer.render_messages(
         [{"role": "user", "content": "hi"}], runtime.ChatParams()
@@ -228,7 +229,7 @@ def test_render_messages_returns_token_prompt(runtime):
 def test_render_messages_async_returns_token_prompt(runtime):
     import asyncio
 
-    renderer = _make_renderer(runtime, StubQwen4Tokenizer([4, 5]))
+    renderer = _make_renderer(runtime, StubQwen4ExpTokenizer([4, 5]))
 
     async def scenario():
         return await renderer.render_messages_async(
