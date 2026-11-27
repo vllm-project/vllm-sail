@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Filter and report exact upstream definitions inside the pytest subprocess."""
+"""Filter and report exact upstream pytest node IDs."""
 
 import json
 import os
@@ -15,12 +15,11 @@ def _emit(event):
 
 @pytest.hookimpl(trylast=True)
 def pytest_collection_modifyitems(config, items):
-    selected = set(json.loads(os.environ["SAIL_ASSET_DEFINITIONS"]))
+    selected = set(json.loads(os.environ["SAIL_ASSET_NODEIDS"]))
     kept = []
     dropped = []
     for item in items:
-        definition = item.nodeid.partition("::")[2].split("[", 1)[0]
-        if definition in selected:
+        if item.nodeid in selected:
             kept.append(item)
         else:
             dropped.append(item)

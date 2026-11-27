@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Collect evidence for model-asset candidates on one M890 CI shard."""
+"""Run verified model-asset pytest nodes on one M890 CI shard."""
 
 from __future__ import annotations
 
@@ -23,20 +23,25 @@ SHARD_SECONDS = 110 * 60
 
 def load_modules(manifest: Path, pin: str) -> dict[str, list[str]]:
     plan = json.loads(manifest.read_text(encoding="utf-8"))
-    if plan["schema"] != 1 or plan["upstream_sha"] != pin:
-        raise ValueError("model-asset probe manifest must match the CI upstream pin")
+    if plan["schema"] != 2 or plan["upstream_sha"] != pin:
+        raise ValueError(
+            "model-asset probe manifest must use schema 2 and match the CI upstream pin"
+        )
     modules = plan["modules"]
-    for module, definitions in modules.items():
+    if not modules:
+        raise ValueError("model-asset probe manifest must select at least one module")
+    for module, nodeids in modules.items():
         path = PurePosixPath(module)
         if path.parts[:1] != ("tests",) or ".." in path.parts or path.suffix != ".py":
             raise ValueError(f"invalid upstream test path: {module}")
-        if not definitions or len(set(definitions)) != len(definitions):
+        if not nodeids or len(set(nodeids)) != len(nodeids):
             raise ValueError(f"empty or duplicated selection: {module}")
-        if any(
-            not all(part.isidentifier() for part in name.split("::"))
-            for name in definitions
-        ):
-            raise ValueError(f"invalid upstream test definition: {module}")
+        for nodeid in nodeids:
+            definition, params, _ = nodeid.partition("[")
+            if not all(part.isidentifier() for part in definition.split("::")) or (
+                params and not nodeid.endswith("]")
+            ):
+                raise ValueError(f"invalid module-relative pytest node ID: {module}")
     return modules
 
 
@@ -66,19 +71,43 @@ def _kill_process_tree(proc: subprocess.Popen) -> None:
     proc.wait()
 
 
+def _passed_nodeids(events: Path) -> set[str]:
+    phases: dict[str, set[str]] = {}
+    nonpassing = set()
+    if not events.is_file():
+        return set()
+    with events.open(encoding="utf-8") as stream:
+        for line in stream:
+            report = json.loads(line)
+            if report["event"] != "test_report":
+                continue
+            nodeid = report["nodeid"]
+            if report["outcome"] == "passed" and not report["xfail"]:
+                phases.setdefault(nodeid, set()).add(report["phase"])
+            else:
+                nonpassing.add(nodeid)
+    return {
+        nodeid
+        for nodeid, passed in phases.items()
+        if passed == {"setup", "call", "teardown"} and nodeid not in nonpassing
+    }
+
+
 def run_module(
     view: Path,
     module: str,
-    definitions: list[str],
+    nodeids: list[str],
     output: Path,
     timeout: float,
 ) -> dict:
+    expected_nodeids = {f"{module}::{nodeid}" for nodeid in nodeids}
+    events = output / "events.jsonl"
     env = os.environ.copy()
     env.update(
         PYTHONPATH=os.pathsep.join((str(view), str(HERE))),
         HF_HUB_DISABLE_IMPLICIT_TOKEN="1",
-        SAIL_ASSET_DEFINITIONS=json.dumps(definitions),
-        SAIL_ASSET_EVENTS=str(output / "events.jsonl"),
+        SAIL_ASSET_NODEIDS=json.dumps(sorted(expected_nodeids)),
+        SAIL_ASSET_EVENTS=str(events),
     )
     # ppu_upstream_reuse.sh verifies the wheels and device in a separate process.
     # Leave CUDA uninitialized here for upstream tests that fork before using it.
@@ -114,6 +143,10 @@ def run_module(
         finally:
             if proc.poll() is None:
                 _kill_process_tree(proc)
+    if code == 0:
+        missing_passes = expected_nodeids - _passed_nodeids(events)
+        if missing_passes:
+            return {"status": "not_passed", "nodeids": sorted(missing_passes)}
     return {"status": "completed", "exit_code": code}
 
 
@@ -134,7 +167,7 @@ def main() -> int:
         "shard": args.shard,
         "shards": args.shards,
         "modules": [
-            {"module": module, "definitions": modules[module], "artifact": str(index)}
+            {"module": module, "nodeids": modules[module], "artifact": str(index)}
             for index, module in enumerate(assigned)
         ],
     }
@@ -160,7 +193,7 @@ def main() -> int:
                     result = run_module(
                         view,
                         module,
-                        row["definitions"],
+                        row["nodeids"],
                         output / row["artifact"],
                         min(MODULE_SECONDS, remaining),
                     )
