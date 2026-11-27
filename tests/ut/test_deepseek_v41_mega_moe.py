@@ -619,10 +619,6 @@ def test_expert_forward_uses_sail_dispatch_and_main_shared_contract(
         assert mma_type == mode
         return api
 
-    def transform_weights(actual_api):
-        assert actual_api is api
-        calls.append("transform")
-
     def kernel_weights(name):
         assert name in ("w13", "w2")
         return l1 if name == "w13" else l2
@@ -662,7 +658,6 @@ def test_expert_forward_uses_sail_dispatch_and_main_shared_contract(
         activation=SimpleNamespace(name=activation, alpha=1.7, beta=-0.2, clamp=7.0),
         fast_math=False,
         _kernel_weights=kernel_weights,
-        _transform_weights=transform_weights,
     )
     expert._kernel_kwargs = lambda: kernel_kwargs(expert)
     assert (
@@ -671,7 +666,6 @@ def test_expert_forward_uses_sail_dispatch_and_main_shared_contract(
     assert calls == [
         "sync",
         ("capture", ids),
-        "transform",
         ("dtype", "i32"),
         ("dtype", "fp32"),
         "dispatch",
@@ -680,6 +674,50 @@ def test_expert_forward_uses_sail_dispatch_and_main_shared_contract(
     expert.max_num_tokens = -1
     with pytest.raises(ValueError, match="exceeds capacity"):
         forward(expert, hidden, weights, ids)
+
+
+@pytest.mark.parametrize(
+    ("meta", "pre_processed", "expected_calls", "expected_transformed"),
+    [
+        (False, False, ["transform"], False),
+        (False, True, [], True),
+        (True, False, [], False),
+    ],
+)
+def test_expert_processes_weights_after_loading(
+    meta, pre_processed, expected_calls, expected_transformed
+):
+    calls = []
+    api = object()
+
+    def get_api(mma_type):
+        assert mma_type == "fp8xfp4"
+        return api
+
+    def transform_weights(actual_api):
+        assert actual_api is api
+        calls.append("transform")
+
+    process = function(
+        _MEGAMOE_IMPL,
+        f"{_MEGAMOE_CLASS}.process_weights_after_loading",
+        {
+            "mega_moe_api": get_api,
+            "is_weights_pre_processed": lambda: pre_processed,
+        },
+    )
+    expert = SimpleNamespace(
+        w13_weight=SimpleNamespace(is_meta=meta),
+        mma_type="fp8xfp4",
+        mma_format=SimpleNamespace(transform="transform"),
+        _transform_weights=transform_weights,
+        _transformed=False,
+    )
+
+    process(expert)
+
+    assert calls == expected_calls
+    assert expert._transformed is expected_transformed
 
 
 def test_expert_rejects_reload_after_in_place_transform():

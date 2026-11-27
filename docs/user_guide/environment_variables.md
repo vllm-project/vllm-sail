@@ -41,6 +41,7 @@ python tools/render_env_docs.py --check
 | `VLLM_SAIL_DEEPGEMM_MOE_FUSED_ACT_QUANT` | `0` | `0`, `1` | `VLLM_PPU_DEEPGEMM_MOE_FUSED_ACT_QUANT` | Fuse activation and the second MoE GEMM's input quantization into DeepGEMM's SiLU/SiTU kernel for FP8 and MXFP4 experts; BF16 experts, unquantized dense MLPs and shared experts use its values-only epilogue. |
 | `VLLM_SAIL_USE_PLA` | `1` | `0`, `1` | `VLLM_PPU_USE_PLA` | Allow PLA linear-attention paths where available. |
 | `VLLM_SAIL_USE_DEEPSELECT` | `1` | `0`, `1` | `VLLM_PPU_USE_DEEPSELECT` | Allow the SAIL DeepSelect top-k backend for sparse indexers on Zhenwu M890. |
+| `VLLM_SAIL_KIMI_K3_MOE_SEQUENCE_PARALLEL` | `1` | `0`, `1` | `VLLM_PPU_KIMI_K3_MOE_SEQUENCE_PARALLEL` | Shard MoE input tokens across TP ranks for Kimi K3 MegaMoE PP>1 configurations instead of replicating the full sequence on every rank; `0` restores the replicated-token path. |
 | `VLLM_GDN_DECODE_KERNEL` | `auto` | `auto`, `cuda`, `pla`, `triton` | — | Select the GDN decode kernel independently of prefill and KDA (shared upstream name). |
 | `VLLM_SAIL_QSA_KERNEL` | `auto` | `auto`, `cuda`, `triton` | `VLLM_PPU_QSA_KERNEL` | Select the Qwen4Exp QSA sparse-attention kernel (`cuda` selects FA3's QSA path when supported). |
 | `VLLM_SAIL_FUSED_RMSNORM_QUANT` | `0` | `0`, `1` | `VLLM_PPU_FUSED_RMSNORM_QUANT` | Enable supported fused RMSNorm and quantization paths. |
