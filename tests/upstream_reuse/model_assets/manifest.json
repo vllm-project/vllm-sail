@@ -55,8 +55,7 @@
     ],
     "tests/compile/dynamic_shapes/test_dynamic_shapes_compilation.py": [
       "test_dynamic_shapes_compilation[Qwen3-0.6B-backed-aot0-hook1]",
-      "test_dynamic_shapes_compilation[Qwen3-0.6B-backed-aot1-hook0]",
-      "test_dynamic_shapes_compilation[Qwen3-0.6B-unbacked-aot0-hook0]"
+      "test_dynamic_shapes_compilation[Qwen3-0.6B-backed-aot1-hook0]"
     ],
     "tests/compile/fullgraph/test_full_graph.py": [
       "test_full_graph[facebook/opt-125m-model_kwargs0-2]",
@@ -373,9 +372,6 @@
       "test_seed_length_is_independent_of_prompt_length[wordpiece-False]",
       "test_seed_length_is_independent_of_prompt_length[wordpiece-True]"
     ],
-    "tests/detokenizer/test_disable_detokenization.py": [
-      "test_computed_prefix_blocks[distilbert/distilgpt2]"
-    ],
     "tests/detokenizer/test_min_tokens.py": [
       "test_min_tokens_with_stop[0-None- is Lee, and I'm a student in the college of engineering]",
       "test_min_tokens_with_stop[0-e- is L]",
@@ -628,15 +624,6 @@
     "tests/entrypoints/multimodal/llm/test_chat.py": [
       "test_chat_multi_image[image_urls0]"
     ],
-    "tests/entrypoints/multimodal/llm/test_mm_cache_external_injection.py": [
-      "test_inject_into_mm_cache[lru-image_urls0]",
-      "test_inject_into_mm_cache[shm-image_urls0]",
-      "test_inject_into_mm_cache_without_cache[image_urls0]"
-    ],
-    "tests/entrypoints/multimodal/llm/test_mm_cache_stats.py": [
-      "test_mm_cache_stats[lru-image_urls0]",
-      "test_mm_cache_stats[shm-image_urls0]"
-    ],
     "tests/entrypoints/multimodal/llm/test_mm_embeds_only.py": [
       "test_generate_with_embedding",
       "test_raw_image_rejected",
@@ -649,7 +636,6 @@
       "TestChatAddSpecialTokensDefault::test_generate_keeps_processor_default"
     ],
     "tests/entrypoints/openai/decisions/test_decisions_e2e.py": [
-      "test_decisions_benchmark_rejects_invalid_requests[batched-prompts-openai-decisions-/v1/decisions]",
       "test_decisions_benchmark_rejects_invalid_requests[batched-prompts-vllm-systemone-/v1/systemone]",
       "test_decisions_benchmark_rejects_invalid_requests[missing-endpoint-openai-decisions-/v1/decisions]",
       "test_decisions_benchmark_rejects_invalid_requests[missing-endpoint-vllm-systemone-/v1/systemone]",
@@ -1213,8 +1199,7 @@
       "test_models[5-64-tiiuae/falcon-mamba-tiny-dev]"
     ],
     "tests/models/language/generation/test_mistral.py": [
-      "test_mistral_format[5-64-bfloat16-mistralai/Ministral-8B-Instruct-2410]",
-      "test_mistral_symbolic_languages[bfloat16-mistralai/Ministral-8B-Instruct-2410]"
+      "test_mistral_format[5-64-bfloat16-mistralai/Ministral-8B-Instruct-2410]"
     ],
     "tests/models/language/generation/test_nemotron_dllm.py": [
       "test_ar_mode_config[False]",
@@ -1244,7 +1229,6 @@
     ],
     "tests/models/language/pooling/test_colbert.py": [
       "TestColbertSharedEngine::test_colbert_embed_task_not_supported[bert]",
-      "TestColbertSharedEngine::test_colbert_embed_task_not_supported[modernbert]",
       "TestColbertSharedEngine::test_colbert_late_interaction_1_to_1[bert]",
       "TestColbertSharedEngine::test_colbert_late_interaction_1_to_1[modernbert]",
       "TestColbertSharedEngine::test_colbert_late_interaction_1_to_N[bert]",
@@ -1351,13 +1335,6 @@
       "test_processing_correctness[1.0-32-0.3-llava-hf/llava-onevision-qwen2-0.5b-ov-hf]",
       "test_processing_correctness[1.0-32-0.3-llava-hf/llava-v1.6-mistral-7b-hf]",
       "test_processing_correctness[1.0-32-0.3-meta-llama/Llama-4-Scout-17B-16E-Instruct]",
-      "test_processing_correctness[1.0-32-0.5-HuggingFaceM4/Idefics3-8B-Llama3]",
-      "test_processing_correctness[1.0-32-0.5-Qwen/Qwen2.5-VL-3B-Instruct]",
-      "test_processing_correctness[1.0-32-0.5-Qwen/Qwen3-VL-4B-Instruct]",
-      "test_processing_correctness[1.0-32-0.5-Qwen/Qwen3.5-0.8B]",
-      "test_processing_correctness[1.0-32-0.5-Qwen/Qwen3.5-4B]",
-      "test_processing_correctness[1.0-32-0.5-llava-hf/llava-onevision-qwen2-0.5b-ov-hf]",
-      "test_processing_correctness[1.0-32-0.5-llava-hf/llava-v1.6-mistral-7b-hf]",
       "test_processor_cache_preserves_hits_when_request_exceeds_capacity[order0]",
       "test_processor_cache_preserves_hits_when_request_exceeds_capacity[order1]",
       "test_processor_cache_preserves_hits_when_request_exceeds_capacity[order2]"
@@ -1916,16 +1893,10 @@
     ],
     "tests/samplers/test_beam_search.py": [
       "test_beam_search_single_input[4-64-half-TinyLlama/TinyLlama-1.1B-Chat-v1.0]",
-      "test_beam_search_stops_at_context_limit_per_prompt[TinyLlama/TinyLlama-1.1B-Chat-v1.0]",
-      "test_beam_search_structured_output[4-half-TinyLlama/TinyLlama-1.1B-Chat-v1.0]",
-      "test_beam_search_with_concurrency_limit[4-64-half-TinyLlama/TinyLlama-1.1B-Chat-v1.0]"
+      "test_beam_search_stops_at_context_limit_per_prompt[TinyLlama/TinyLlama-1.1B-Chat-v1.0]"
     ],
     "tests/samplers/test_ignore_eos.py": [
-      "test_ignore_eos[512-half-distilbert/distilgpt2]",
-      "test_ignore_eos[512-half-meta-llama/Llama-3.2-1B]"
-    ],
-    "tests/samplers/test_logprobs.py": [
-      "test_ranks[True-True-half-distilbert/distilgpt2]"
+      "test_ignore_eos[512-half-distilbert/distilgpt2]"
     ],
     "tests/samplers/test_no_bad_words.py": [
       "TestTwoTokenBadWord::test_two_token_bad_word"
@@ -1953,9 +1924,6 @@
       "test_nixl_dcp_check_rejects_non_mla_model_with_dcp[NixlConnector]",
       "test_nixl_dcp_check_rejects_non_mla_model_with_dcp[NixlPullConnector]",
       "test_nixl_dcp_check_skipped_for_submodel_config"
-    ],
-    "tests/test_regression.py": [
-      "test_max_tokens_none[distilbert/distilgpt2]"
     ],
     "tests/test_tensorizer_revision_pin.py": [
       "test_serialize_vllm_model_forwards_model_revision"
@@ -3051,9 +3019,7 @@
     "tests/v1/spec_decode/test_max_len.py": [
       "test_ngram_max_len[ngram-10]",
       "test_ngram_max_len[ngram-1]",
-      "test_ngram_max_len[ngram-3]",
-      "test_ngram_max_len[ngram_gpu-1]",
-      "test_ngram_max_len[ngram_gpu-3]"
+      "test_ngram_max_len[ngram-3]"
     ],
     "tests/v1/spec_decode/test_mtp_structured_output.py": [
       "test_bitmask_engine_reasoner_ends_midwindow_with_padding[guidance]",
