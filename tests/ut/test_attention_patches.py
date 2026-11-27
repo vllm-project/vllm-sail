@@ -590,6 +590,5 @@ def test_sparse_fp8_decode_patch_registration_contract(installed):
             plugin._MODULE,
             target,
             reason="Exercise the sparse FP8 double-install guard.",
-            affected_versions=plugin._AFFECTED,
             remove_when="This test completes.",
         )(replacement)

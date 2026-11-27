@@ -173,7 +173,6 @@ def builder_init(
         "Bypass that padding at the kernel boundary so the upstream metadata "
         "builder and its DCP validation remain unchanged."
     ),
-    affected_versions=_AFFECTED,
     remove_when=(
         "upstream FlashMLASparseImpl._fp8_flash_mla_kernel skips query head "
         "padding on PPU or exposes a platform hook at the kernel boundary."

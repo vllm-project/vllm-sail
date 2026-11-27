@@ -9,6 +9,7 @@ from unittest.mock import Mock
 
 import pytest
 
+from tests.support.modules import load_patch
 from tests.support.source import (
     ROOT,
     assert_accepts_upstream_keywords,
@@ -87,6 +88,45 @@ def test_flashmla_consumer_inventory_against_source_without_vllm_imports(
 
 
 _SPARSE_PATCH = "vllm_sail/patch/enhancement/attention/flashmla_sparse_backend.py"
+
+
+def test_sparse_backend_import_registers_fp8_patch(modules, patch_utils_module):
+    """Exercise decorators too: extracting function bodies misses startup errors."""
+
+    class Backend:
+        @classmethod
+        def supports_compute_capability(cls, capability):
+            return True
+
+        @classmethod
+        def supports_combination(cls, *args):
+            return None
+
+    class Builder:
+        def __init__(self, *args):
+            pass
+
+    class Impl:
+        def _fp8_flash_mla_kernel(self, *args, **kwargs):
+            pass
+
+    original = Impl._fp8_flash_mla_kernel
+    modules("torch")
+    modules("vllm.platforms", current_platform=SimpleNamespace(is_ppu=lambda: True))
+    modules("vllm.platforms.interface", DeviceCapability=SimpleNamespace)
+    modules("vllm.utils.platform_utils", num_compute_units=lambda index: 1)
+    backend = modules(
+        "vllm.v1.attention.backends.mla.flashmla_sparse",
+        FlashMLASparseBackend=Backend,
+        FlashMLASparseMetadataBuilder=Builder,
+        FlashMLASparseImpl=Impl,
+    )
+    plugin = load_patch(_SPARSE_PATCH)
+    target = f"{backend.__name__}.FlashMLASparseImpl._fp8_flash_mla_kernel"
+    replacement = Impl._fp8_flash_mla_kernel
+    assert replacement is plugin.fp8_flash_mla_kernel
+    assert patch_utils_module.original_of(replacement, target) is original
+    assert target in {record.target for record in patch_utils_module.PATCH_REGISTRY}
 
 
 @pytest.mark.parametrize("heads", [1, 8, 16, 32, 48, 64, 96, 128])
