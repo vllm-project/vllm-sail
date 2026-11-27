@@ -271,6 +271,41 @@ def test_scheduled_recipe_replaces_only_the_glm53_flash_legacy_case(
     assert remaining == [case for case in without_flash if case != legacy]
 
 
+@pytest.mark.parametrize(
+    ("policy_file", "legacy_case"),
+    [
+        ("qwen3.8-flash-next.yaml", "qwen3.8-flash-next-tp4"),
+        ("qwen3.8-flash-next-dp-ep.yaml", "qwen3.8-flash-next-dp-ep"),
+    ],
+)
+def test_scheduled_recipe_replaces_qwen38_flash_next_legacy_cases(
+    tmp_path, monkeypatch, policy_file: str, legacy_case: str
+) -> None:
+    select = _load_select()
+    selected = select.build_accuracy_matrix(_catalog(), "")["include"]
+    remaining = select.scheduled_legacy_accuracy_cases(selected)
+    claimed = {
+        case_id
+        for path in (ROOT / "tests/ppu/policy/models").glob("*.yaml")
+        for case_id in yaml.safe_load(path.read_text()).get("replaces_legacy_cases", [])
+    }
+    assert legacy_case in claimed
+    assert legacy_case not in remaining
+    assert remaining == [
+        entry["case_id"] for entry in selected if entry["case_id"] not in claimed
+    ]
+
+    shutil.copytree(ROOT / "tests/ppu", tmp_path / "tests/ppu")
+    (tmp_path / "tests/ppu/policy/models" / policy_file).unlink()
+    monkeypatch.setattr(select, "REPO_ROOT", tmp_path)
+    import ppu_recipe
+
+    monkeypatch.setattr(ppu_recipe, "REPO_ROOT", tmp_path)
+    restored = select.scheduled_legacy_accuracy_cases(selected)
+    assert legacy_case in restored
+    assert remaining == [case for case in restored if case != legacy_case]
+
+
 def test_accuracy_catalog_keeps_model_ids_and_per_model_card_count() -> None:
     accuracy = {
         entry["key"]: entry for entry in _catalog() if entry["category"] == "accuracy"
