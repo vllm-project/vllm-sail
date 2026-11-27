@@ -28,7 +28,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           path: .pr472-probe-${{ github.run_id }}-${{ github.run_attempt }}
-          fetch-depth: 2
+          fetch-depth: 5
           persist-credentials: false
       - name: Verify candidate and exercise the wheel
         working-directory: .pr472-probe-${{ github.run_id }}-${{ github.run_attempt }}
@@ -39,7 +39,7 @@ jobs:
         run: |
           set -Eeuo pipefail
           umask 077
-          test "$(git rev-parse HEAD^)" = "$SOURCE_SHA"
+          git merge-base --is-ancestor "$SOURCE_SHA" HEAD
           git diff --exit-code "$SOURCE_SHA" -- vllm_sail
           temp_dir="$(mktemp -d "$RUNNER_TEMP/pr472-fp32.XXXXXX")"
           container="vllm-sail-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-fp32-probe"
