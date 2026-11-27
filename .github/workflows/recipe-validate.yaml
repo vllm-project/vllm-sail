@@ -1,0 +1,65 @@
+name: Recipe CI Validate
+
+on:
+  pull_request:
+    branches: [main, 'releases/**']
+    paths:
+      - "*.yaml"
+      - "*.yml"
+      - "**/*.yaml"
+      - "**/*.yml"
+      - "tests/ppu/**"
+      - "tests/e2e/models/**"
+      - "scripts/ci/ppu_e2e_models.json"
+      - "scripts/ci/ppu_recipe.py"
+      - "tests/ut/test_ppu_recipe.py"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: recipe-validate-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    name: Recipe validate & command diff
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install PyYAML
+        run: python -m pip install --no-cache-dir PyYAML
+
+      - name: Validate PPU recipes, matrix doc, and render Resolved Command Diff
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -euo pipefail
+          python3 scripts/ci/ppu_recipe.py validate --all --vllm-parser skip
+          python3 scripts/ci/ppu_recipe.py render-matrix --check
+          python3 scripts/ci/ppu_recipe.py diff \
+            --base-ref "${BASE_SHA}" \
+            --only-when-changed \
+            --include-signoff-hint >> "$GITHUB_STEP_SUMMARY"
+
+          changed_model_paths="$(git diff --name-only "${BASE_SHA}...HEAD" -- \
+            tests/ppu/recipes tests/ppu/policy tests/e2e/models scripts/ci/ppu_e2e_models.json)"
+          if [ -n "$changed_model_paths" ]; then
+            echo "::notice title=Model Recipe Sign-off Checklist::Model recipe/policy/E2E paths changed. Complete the 3-item Model Recipe Sign-off checklist in .github/pull_request_template.md (see tests/ppu/AUTHORING.md)."
+            if ! grep -qE '^tests/ppu/(recipes|policy)/' <<< "$changed_model_paths"; then
+              {
+                echo "### Model Recipe Sign-off Reminder"
+                echo ""
+                echo "Legacy model paths changed without \`tests/ppu/\` updates. Complete the 3-item Model Recipe Sign-off checklist in \`.github/pull_request_template.md\` and see \`tests/ppu/AUTHORING.md\`."
+              } >> "$GITHUB_STEP_SUMMARY"
+            fi
+          fi

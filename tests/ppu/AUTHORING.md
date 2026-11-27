@@ -15,6 +15,8 @@ CI matrix and full serving preset catalog, see [README.md](README.md).
 
 Every serving parameter belongs in exactly one place: the model's recipe YAML.
 Every CI execution and dataset switch belongs in `tests/ppu/policy/`.
+Repository-wide validation rejects any `schema_version: ppu-serving/v1` file
+created outside `tests/ppu/recipes/**/*.yaml`.
 
 ## 2. Recipe Boundaries (What Must Never Appear in Recipes)
 
@@ -65,10 +67,13 @@ hardware-specific quantized precisions:
   native quantized precisions (`mxfp4`/`fp8` on `zhenwu_m890`, `int8` on
   `zhenwu_810e`) for serving and performance presets.
 - A single model recipe YAML can host `bf16` and multiple quantized variants
-  across both hardware families. Use variant-level `hardware`, `assets`,
-  `hf_model_id`, `golden_model_key`, `served_name`, and optional `topology`
-  overrides so each checkpoint resolves cleanly without duplicating the recipe
-  file.
+  across both hardware families. Non-default variants in a multi-variant recipe
+  must explicitly declare distinct `assets`, `hf_model_id`, `golden_model_key`,
+  and `served_name` (unless a field is explicitly listed in
+  `allow_shared_fields`) so a second precision never silently inherits the
+  default checkpoint. Use variant-level `hardware`, `assets`, `hf_model_id`,
+  `golden_model_key`, `served_name`, and optional `topology` overrides so each
+  checkpoint resolves cleanly without duplicating the recipe file.
 - Every preset must match at least one compatible variant by hardware (and optional
   `variants:` allowlist). Cross-binding a `zhenwu_m890` preset/policy to an `int8`
   variant or a `zhenwu_810e` preset/policy to an `mxfp4`/`fp8` variant is rejected.
@@ -148,6 +153,9 @@ python3 scripts/ci/ppu_recipe.py validate --all --require-vllm-parser
 python3 scripts/ci/ppu_recipe.py render-matrix --output tests/ppu/README.md
 python3 scripts/ci/ppu_recipe.py render-matrix --check
 
-# 4. Run CPU unit tests covering recipes, selector, and workflows
+# 4. Preview base -> head Resolved Command Diff (posted automatically on PRs)
+python3 scripts/ci/ppu_recipe.py diff --base-ref origin/releases/v0.34.0
+
+# 5. Run CPU unit tests covering recipes, selector, and workflows
 python3 -m pytest tests/ut/test_ppu_recipe.py tests/ut/test_e2e_ppu_pipeline.py -q
 ```

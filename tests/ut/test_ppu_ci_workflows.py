@@ -4,6 +4,7 @@ import itertools
 import json
 import os
 import re
+import shutil
 import stat
 import subprocess
 import sys
@@ -4059,3 +4060,165 @@ def test_ppu_gate_avoids_hosted_runner_queue_except_when_skip_ppu_is_set(build_j
     assert expression(gate_runs_on, {"inputs.skip_ppu": False}) == "8-ppu-m890p"
     assert expression(gate_runs_on, {}) == "8-ppu-m890p"
     assert expression(gate_runs_on, {"inputs.skip_ppu": True}) == "ubuntu-latest"
+
+
+def test_recipe_validate_workflow_runs_guardrails_and_command_diff(tmp_path):
+    cfg = workflow("recipe-validate.yaml")
+    assert cfg["permissions"] == {"contents": "read"}
+    pr_trigger = cfg[True]["pull_request"]
+    assert pr_trigger["branches"] == ["main", "releases/**"]
+    assert "tests/ppu/**" in pr_trigger["paths"]
+    assert "tests/e2e/models/**" in pr_trigger["paths"]
+    assert "scripts/ci/ppu_e2e_models.json" in pr_trigger["paths"]
+    assert "scripts/ci/ppu_recipe.py" in pr_trigger["paths"]
+
+    def _matches_actions_glob(rel_path: str, pattern: str) -> bool:
+        escaped = re.escape(pattern)
+        regex_str = (
+            escaped.replace(r"\*\*/", "(?:.*/)?")
+            .replace(r"\*\*", ".*")
+            .replace(r"\*", "[^/]*")
+            .replace(r"\?", "[^/]")
+        )
+        return re.fullmatch(regex_str, rel_path) is not None
+
+    def _matches_pr_paths(rel_path: str) -> bool:
+        return any(_matches_actions_glob(rel_path, pat) for pat in pr_trigger["paths"])
+
+    for should_match in (
+        "configs/copied-model.yaml",
+        "configs/copied-model.yml",
+        "copied-model.yaml",
+        ".github/workflows/recipe-validate.yaml",
+        "tests/ppu/recipes/Qwen/Qwen3.8-27B.yaml",
+        "tests/e2e/models/test_dummy.py",
+        "scripts/ci/ppu_recipe.py",
+    ):
+        assert _matches_pr_paths(should_match), should_match
+    for should_skip in ("README.md", "vllm_sail/platform.py"):
+        assert not _matches_pr_paths(should_skip), should_skip
+
+    job = cfg["jobs"]["validate"]
+    assert job["runs-on"] == "ubuntu-latest"
+    checkout = checkouts(job)[0]
+    assert checkout["with"]["fetch-depth"] == 0
+    assert checkout["with"]["persist-credentials"] is False
+
+    step = next(s for s in job["steps"] if "ppu_recipe.py diff" in s.get("run", ""))
+    assert "ppu_recipe.py validate --all --vllm-parser skip" in step["run"]
+    assert "ppu_recipe.py render-matrix --check" in step["run"]
+    assert "--only-when-changed" in step["run"]
+    assert "--include-signoff-hint" in step["run"]
+    assert "$GITHUB_STEP_SUMMARY" in step["run"]
+    assert "Model Recipe Sign-off Checklist" in step["run"]
+
+    # Smoke-execute the workflow step shell block against a synthetic git repo with legacy-only change.
+    repo = tmp_path / "repo"
+    (repo / "scripts/ci").mkdir(parents=True)
+    (repo / "tests/e2e/models").mkdir(parents=True)
+    shutil.copytree(ROOT / "tests/ppu", repo / "tests/ppu")
+    shutil.copy2(ROOT / "scripts/ci/ppu_recipe.py", repo / "scripts/ci/ppu_recipe.py")
+    shutil.copy2(
+        ROOT / "scripts/ci/ppu_e2e_select.py", repo / "scripts/ci/ppu_e2e_select.py"
+    )
+    shutil.copy2(
+        ROOT / "scripts/ci/ppu_e2e_models.json",
+        repo / "scripts/ci/ppu_e2e_models.json",
+    )
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=repo, check=True)
+    subprocess.run(
+        ["git", "config", "user.email", "test@example.com"], cwd=repo, check=True
+    )
+    subprocess.run(["git", "add", "."], cwd=repo, check=True)
+    subprocess.run(
+        ["git", "commit", "-q", "--no-verify", "-m", "base"], cwd=repo, check=True
+    )
+    base_sha = subprocess.check_output(
+        ["git", "rev-parse", "HEAD"], cwd=repo, text=True
+    ).strip()
+
+    (repo / "tests/e2e/models/test_dummy.py").write_text("# changed\n")
+    subprocess.run(
+        ["git", "add", "tests/e2e/models/test_dummy.py"], cwd=repo, check=True
+    )
+    subprocess.run(
+        ["git", "commit", "-q", "--no-verify", "-m", "legacy change"],
+        cwd=repo,
+        check=True,
+    )
+
+    summary_file = tmp_path / "summary.md"
+    res = subprocess.run(
+        ["bash", "-euo", "pipefail", "-c", step["run"]],
+        cwd=repo,
+        env={
+            **os.environ,
+            "BASE_SHA": base_sha,
+            "GITHUB_STEP_SUMMARY": str(summary_file),
+            "PATH": f"{Path(sys.executable).parent}:{os.environ['PATH']}",
+        },
+        capture_output=True,
+        text=True,
+    )
+    assert res.returncode == 0, res.stderr
+    assert "::notice title=Model Recipe Sign-off Checklist::" in res.stdout
+    assert "Model Recipe Sign-off Reminder" in summary_file.read_text()
+
+    # Positive control: ordinary non-recipe YAML under configs/ passes with empty summary.
+    ordinary_base = subprocess.check_output(
+        ["git", "rev-parse", "HEAD"], cwd=repo, text=True
+    ).strip()
+    (repo / "configs").mkdir(parents=True, exist_ok=True)
+    (repo / "configs/ordinary.yaml").write_text("kind: ordinary_config\n")
+    subprocess.run(["git", "add", "configs/ordinary.yaml"], cwd=repo, check=True)
+    subprocess.run(
+        ["git", "commit", "-q", "--no-verify", "-m", "ordinary yaml"],
+        cwd=repo,
+        check=True,
+    )
+    ordinary_summary = tmp_path / "ordinary-summary.md"
+    ordinary_res = subprocess.run(
+        ["bash", "-euo", "pipefail", "-c", step["run"]],
+        cwd=repo,
+        env={
+            **os.environ,
+            "BASE_SHA": ordinary_base,
+            "GITHUB_STEP_SUMMARY": str(ordinary_summary),
+            "PATH": f"{Path(sys.executable).parent}:{os.environ['PATH']}",
+        },
+        capture_output=True,
+        text=True,
+    )
+    assert ordinary_res.returncode == 0, ordinary_res.stderr
+    assert ordinary_summary.read_text() == ""
+
+    # Counterexample: stray ppu-serving/v1 YAML copied under configs/ fails the workflow step.
+    shutil.copy2(
+        repo / "tests/ppu/recipes/Qwen/Qwen3.8-27B.yaml",
+        repo / "configs/copied-model.yaml",
+    )
+    subprocess.run(["git", "add", "configs/copied-model.yaml"], cwd=repo, check=True)
+    subprocess.run(
+        ["git", "commit", "-q", "--no-verify", "-m", "stray copied recipe"],
+        cwd=repo,
+        check=True,
+    )
+    stray_summary = tmp_path / "stray-summary.md"
+    stray_res = subprocess.run(
+        ["bash", "-euo", "pipefail", "-c", step["run"]],
+        cwd=repo,
+        env={
+            **os.environ,
+            "BASE_SHA": ordinary_base,
+            "GITHUB_STEP_SUMMARY": str(stray_summary),
+            "PATH": f"{Path(sys.executable).parent}:{os.environ['PATH']}",
+        },
+        capture_output=True,
+        text=True,
+    )
+    assert stray_res.returncode != 0
+    assert (
+        "stray 'ppu-serving/v1' recipe file(s) outside tests/ppu/recipes/*.yaml: "
+        "configs/copied-model.yaml"
+    ) in (stray_res.stdout + stray_res.stderr)
