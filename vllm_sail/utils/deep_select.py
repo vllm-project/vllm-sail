@@ -44,16 +44,12 @@ def _wheel_supports_fp32() -> bool:
         try:
             data = Path(backend_file).read_bytes()
         except OSError:
-            pass
-        else:
-            if b"PPU DeepSelect currently supports bfloat16 input only" in data:
-                return False
-            if b"float32" in data:
-                return True
+            return False
+        if b"PPU DeepSelect currently supports bfloat16 input only" in data:
+            return False
+        return b"float32" in data
     doc = getattr(getattr(interface, "topk", None), "__doc__", None)
-    if isinstance(doc, str):
-        return "FP32" in doc
-    return True
+    return isinstance(doc, str) and "FP32" in doc
 
 
 def is_deep_select_available() -> bool:

@@ -69,11 +69,43 @@ def test_wheel_supports_fp32_probes_binary_and_doc(tmp_path):
 
     assert not probe(str(old_so), "BF16 or FP32 matrix")
     assert probe(str(new_so), "BF16 matrix")
-    assert not probe(str(neutral_so), "BF16 matrix")
-    assert probe(str(tmp_path / "missing.so"), "BF16 or FP32 matrix")
+    assert not probe(str(neutral_so), "BF16 or FP32 matrix")
+    assert not probe(str(tmp_path / "missing.so"), "BF16 or FP32 matrix")
     assert not probe(None, "Select from a BF16 matrix.")
     assert probe(None, "Select from a BF16 or FP32 matrix.")
-    assert probe(None, None)
+    assert not probe(None, None)
+
+
+def test_unreadable_wheel_binary_fails_closed_for_fp32_consumers(tmp_path):
+    def fail_topk(*args, **kwargs):
+        raise RuntimeError("PPU DeepSelect currently supports bfloat16 input only")
+
+    unreadable_wheel = NS(
+        _backend=NS(__file__=str(tmp_path / "missing.so")),
+        topk=fail_topk,
+    )
+    unreadable_wheel.topk.__doc__ = "BF16 or FP32 matrix"
+    supports_fp32 = function(
+        DEEP_SELECT,
+        "_wheel_supports_fp32",
+        {"Path": Path, "_wheel": lambda: unreadable_wheel},
+    )
+    can_use = function(
+        DEEP_SELECT,
+        "can_use_deep_select",
+        {
+            "torch": NS(bfloat16="bf16", float32="fp32"),
+            "is_deep_select_available": lambda: True,
+            "_wheel_supports_fp32": supports_fp32,
+        },
+    )
+    use_deep_select = function(
+        INDEXER, "_use_deep_select", {"can_use_deep_select": can_use}
+    )
+    assert use_deep_select(Tensor((2, 4096), "bf16"), 512, "auto") is True
+    assert use_deep_select(Tensor((2, 4096), "fp32"), 512, "auto") is False
+    with pytest.raises(RuntimeError, match="never rounded"):
+        use_deep_select(Tensor((2, 4096), "fp32"), 512, "deep_select")
 
 
 @pytest.mark.parametrize("dtype", ["fp16", "fp64", "int32"])
