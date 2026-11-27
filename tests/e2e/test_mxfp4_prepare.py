@@ -3,7 +3,7 @@
 
 import pytest
 
-pytestmark = pytest.mark.ppu
+pytestmark = [pytest.mark.ppu, pytest.mark.cap89]
 
 
 @pytest.mark.parametrize("dtype_name", ["bfloat16", "float16", "float32"])
@@ -101,6 +101,7 @@ def test_downcast_to_mxfp4_small_magnitudes_match_across_scale_formats(dtype_nam
     import torch
 
     from vllm_sail.model_executor.layers.quantization.utils.mxfp4_utils import (
+        DequantScaleRoundingMode,
         ScaleFormat,
         downcast_to_mxfp4,
     )
@@ -108,13 +109,22 @@ def test_downcast_to_mxfp4_small_magnitudes_match_across_scale_formats(dtype_nam
     dtype = getattr(torch, dtype_name)
     levels = (0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0)
 
-    for exp, expected_scale_byte in ((-40, 85), (-32, 93)):
-        inputs = [2.0**exp] * 32 + [-(2.0**exp)] * 32
+    cases = (
+        (2.0**-40, DequantScaleRoundingMode.ROUND_UP, 85),
+        (2.0**-32, DequantScaleRoundingMode.ROUND_UP, 93),
+        (2.0**-126, DequantScaleRoundingMode.ROUND_UP, 0),
+        (6.0 * (2.0**-127), DequantScaleRoundingMode.ROUND_DOWN, 0),
+    )
+    for mag, mode, expected_scale_byte in cases:
+        inputs = [mag] * 32 + [-mag] * 32
         x = torch.tensor(inputs, dtype=dtype, device="cuda").reshape(1, 64)
 
-        q_u16, s_u16 = downcast_to_mxfp4(x, axis=1)
+        q_u16, s_u16 = downcast_to_mxfp4(x, axis=1, DEQUANT_SCALE_ROUNDING_MODE=mode)
         q_u8, s_u8 = downcast_to_mxfp4(
-            x, axis=1, scale_format=ScaleFormat.UINT8_ROW_MAJOR
+            x,
+            axis=1,
+            DEQUANT_SCALE_ROUNDING_MODE=mode,
+            scale_format=ScaleFormat.UINT8_ROW_MAJOR,
         )
         torch.cuda.synchronize()
 

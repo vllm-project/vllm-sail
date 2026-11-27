@@ -203,6 +203,9 @@ class _FakeTensor:
     def __lt__(self, other):
         return self._binop(other, lambda a, b: a < b, out_dtype="bool")
 
+    def __gt__(self, other):
+        return self._binop(other, lambda a, b: a > b, out_dtype="bool")
+
     def __eq__(self, other):
         return self._binop(other, lambda a, b: a == b, out_dtype="bool")
 
@@ -515,7 +518,8 @@ def test_padding_mask_and_saturation_with_round_down() -> None:
         (-40, 85, 6),  # 2^-40 / 2^-42 == 4.0 (code 6)
         (-32, 93, 6),  # 2^-32 / 2^-34 == 4.0 (code 6)
         (-120, 5, 6),  # 2^-120 / 2^-122 == 4.0 (code 6)
-        (-126, 1, 2),  # 2^-126 / 2^-126 == 1.0 (code 2)
+        (-126, 0, 4),  # 2^-126 / 2^-127 == 2.0 (code 4)
+        (-128, 0, 1),  # 2^-128 / 2^-127 == 0.5 (code 1)
     ],
 )
 def test_issue_397_u16_small_magnitudes_match_u8(
@@ -536,6 +540,30 @@ def test_issue_397_u16_small_magnitudes_match_u8(
 
     codes = _unpack_e2m1_codes(q_u16)
     assert codes == [expected_code_mag] * 32 + [expected_code_mag | 0x8] * 32
+    decoded = [
+        (-1 if code & 8 else 1) * E2M1_TABLE[code & 7] * (2.0 ** (s_u16[i // 32] - 127))
+        for i, code in enumerate(codes)
+    ]
+    assert decoded == row
+
+
+def test_min_e8m0_scale_round_down_exact_decoding() -> None:
+    """ROUND_DOWN with 6 * 2^-127 must use E8M0 byte 0 (2^-127) and decode exactly."""
+    compute_fn, tl = _load_compute_quant_and_scale()
+    val = 6.0 * (2.0**-127)
+    row = [val] * 32 + [-val] * 32
+
+    q_u16, s_u16 = _run_downcast_u16([row], rounding_mode=1)
+    src = _FakeTensor(row, (1, 64), "float32")
+    mask = _FakeTensor([True] * 64, (1, 64), "bool")
+    q_u8, s_u8 = compute_fn(src, mask, tl.uint8, DEQUANT_SCALE_ROUNDING_MODE=1)
+
+    assert s_u16 == [0, 0]
+    assert s_u8.data == [0, 0]
+    assert q_u16 == q_u8.data
+
+    codes = _unpack_e2m1_codes(q_u16)
+    assert codes == [7] * 32 + [15] * 32
     decoded = [
         (-1 if code & 8 else 1) * E2M1_TABLE[code & 7] * (2.0 ** (s_u16[i // 32] - 127))
         for i, code in enumerate(codes)

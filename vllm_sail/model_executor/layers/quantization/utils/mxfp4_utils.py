@@ -85,23 +85,37 @@ def _compute_quant_and_scale(
         abs_tensor, [BLOCK_SIZE_OUT_DIM, BLOCK_SIZE_QUANT_MX_SCALE, MXFP_BLOCK_SIZE]
     )
     max_val = tl.max(abs_tensor, axis=2, keep_dims=True)
+    max_val = tl.maximum(max_val, 0.0)
     dequant_scale = max_val / _get_max_quant_val(mx_tensor_dtype)
+    dequant_scale_bits = dequant_scale.to(tl.uint32, bitcast=True)
     if DEQUANT_SCALE_ROUNDING_MODE == 0:
         # DequantScaleRoundingMode.ROUND_UP
-        # compute 2 ** ceil(log2(dequant_scale))
-        # Adding 0x007FFFFF adds exponent by 1 unless mantissa is all zeros
+        # compute 2 ** ceil(log2(dequant_scale)), floored at E8M0 byte 0 (2^-127).
+        # Adding 0x007FFFFF adds exponent by 1 unless mantissa is all zeros;
+        # values <= 2^-127 (0x00400000) stay at E8M0 byte 0.
         # A corner case: exponent is 0xFF that will overflow but that's already
         # NaN so assume we don't care.
-        dequant_scale_exponent = (
-            dequant_scale.to(tl.uint32, bitcast=True) + 0x007FFFFF
-        ) & 0x7F800000
+        dequant_scale_exponent = tl.where(
+            dequant_scale_bits > 0x00400000,
+            (dequant_scale_bits + 0x007FFFFF) & 0x7F800000,
+            0,
+        )
     else:
         # DequantScaleRoundingMode.ROUND_DOWN
-        # compute 2 ** floor(log2(dequant_scale))
+        # compute 2 ** floor(log2(dequant_scale)), floored at E8M0 byte 0 (2^-127).
         assert DEQUANT_SCALE_ROUNDING_MODE == 1
-        dequant_scale_exponent = dequant_scale.to(tl.uint32, bitcast=True) & 0x7F800000
+        dequant_scale_exponent = dequant_scale_bits & 0x7F800000
     dequant_scale_rounded = dequant_scale_exponent.to(tl.float32, bitcast=True)
-    quant_scale = tl.where(dequant_scale_rounded == 0, 0, 1.0 / dequant_scale_rounded)
+    # E8M0 byte 0 represents 2^-127 (reciprocal 2^127, exact normal FP32).
+    quant_scale = tl.where(
+        max_val == 0.0,
+        0.0,
+        tl.where(
+            dequant_scale_rounded == 0,
+            2.0**127,
+            1.0 / dequant_scale_rounded,
+        ),
+    )
 
     f32_tensor = tl.reshape(
         f32_tensor, [BLOCK_SIZE_OUT_DIM, BLOCK_SIZE_QUANT_MX_SCALE, MXFP_BLOCK_SIZE]
@@ -395,19 +409,30 @@ def _downcast_to_mxfp4_u16(
     # clamping valid small magnitudes.
     max_val = tl.maximum(max_val, 0.0)
 
+    dequant_scale = max_val / 6.0
+    dequant_scale_bits = dequant_scale.to(tl.uint32, bitcast=True)
     if DEQUANT_SCALE_ROUNDING_MODE == 0:
-        # ROUND_UP: 2 ** ceil(log2(max / 6.0))
-        dequant_scale = max_val / 6.0
-        dequant_scale_exponent = (
-            dequant_scale.to(tl.uint32, bitcast=True) + 0x007FFFFF
-        ) & 0x7F800000
+        # ROUND_UP: 2 ** ceil(log2(max / 6.0)), floored at E8M0 byte 0 (2^-127).
+        dequant_scale_exponent = tl.where(
+            dequant_scale_bits > 0x00400000,
+            (dequant_scale_bits + 0x007FFFFF) & 0x7F800000,
+            0,
+        )
     else:
-        # ROUND_DOWN: 2 ** floor(log2(max / 6.0))
-        dequant_scale = max_val / 6.0
-        dequant_scale_exponent = dequant_scale.to(tl.uint32, bitcast=True) & 0x7F800000
+        # ROUND_DOWN: 2 ** floor(log2(max / 6.0)), floored at E8M0 byte 0 (2^-127).
+        dequant_scale_exponent = dequant_scale_bits & 0x7F800000
 
     dequant_scale_rounded = dequant_scale_exponent.to(tl.float32, bitcast=True)
-    quant_scale = tl.where(dequant_scale_rounded == 0, 0.0, 1.0 / dequant_scale_rounded)
+    # E8M0 byte 0 represents 2^-127 (reciprocal 2^127, exact normal FP32).
+    quant_scale = tl.where(
+        max_val == 0.0,
+        0.0,
+        tl.where(
+            dequant_scale_rounded == 0,
+            2.0**127,
+            1.0 / dequant_scale_rounded,
+        ),
+    )
 
     # Apply per-group scale
     f32_tensor = tl.reshape(
