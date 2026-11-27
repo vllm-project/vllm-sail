@@ -269,8 +269,8 @@ def test_fp4_avg_logits_call_shape(monkeypatch):
 
     ``clean_logits`` is not a parameter of the FP4 average entry points, so it
     must not be forwarded; ``max_seqlen_k`` is mandatory and must be the caller's
-    real bound; and the logits must not come back bf16, which is the FP4 entry
-    points' own default.
+    real bound; and an omitted ``logits_dtype`` must not be forwarded either, so
+    the FP4 entry points' own bf16 default applies.
     """
     torch = pytest.importorskip("torch")
     pytest.importorskip("vllm", reason="requires vLLM")
@@ -291,12 +291,16 @@ def test_fp4_avg_logits_call_shape(monkeypatch):
     assert args == (q, kv, ks, ke)
     assert "clean_logits" not in kwargs
     assert kwargs["max_seqlen_k"] == 96
-    assert kwargs["logits_dtype"] is torch.float32
+    assert "logits_dtype" not in kwargs
     assert "q_scale" not in kwargs
 
     calls.clear()
     deep_gemm.fp4_mqa_avg_logits(q, kv, ks, ke, 96, q_scale="scale")
     assert calls[0][1]["q_scale"] == "scale"
+
+    calls.clear()
+    deep_gemm.fp4_mqa_avg_logits(q, kv, ks, ke, 96, logits_dtype=torch.float32)
+    assert calls[0][1]["logits_dtype"] is torch.float32
 
 
 def test_fp4_avg_metadata_extra_matches_the_schedule_assert():
