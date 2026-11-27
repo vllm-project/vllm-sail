@@ -1,0 +1,78 @@
+# SPDX-License-Identifier: Apache-2.0
+
+import json
+
+import pytest
+
+from tests.upstream_reuse.model_assets import run
+
+
+def test_asset_probe_shards_cover_each_module_once():
+    modules = {
+        f"tests/test_{i}.py": [f"test_{j}" for j in range(i)] for i in range(1, 20)
+    }
+    shards = [run.shard_modules(modules, 3, i) for i in range(3)]
+    assert sorted(path for shard in shards for path in shard) == sorted(modules)
+    assert shards == [
+        run.shard_modules(dict(reversed(list(modules.items()))), 3, i) for i in range(3)
+    ]
+
+
+def test_asset_probe_requires_pinned_manifest():
+    assert run.load_modules(
+        run.HERE / "manifest.json", "047f6bfbb22cf4815162125f107e6dd90c72478a"
+    )
+    with pytest.raises(ValueError, match="upstream pin"):
+        run.load_modules(run.HERE / "manifest.json", "0" * 40)
+
+
+def test_asset_probe_keeps_parameter_ids_and_reasons(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        run,
+        "RUNTIME_BOOTSTRAP",
+        "import pytest, sys; sys.exit(pytest.main(sys.argv[1:]))",
+    )
+    test_dir = tmp_path / "tests"
+    test_dir.mkdir()
+    (test_dir / "conftest.py").write_text(
+        "def pytest_addoption(parser):\n"
+        '    parser.addoption("--optional", action="store_true")\n',
+        encoding="utf-8",
+    )
+    (test_dir / "test_assets.py").write_text(
+        "import pytest\n"
+        "class TestModel:\n"
+        '    @pytest.mark.parametrize("model", ["cached", "missing"])\n'
+        "    def test_load(self, model):\n"
+        '        assert model == "cached", "missing model"\n'
+        "def test_skip():\n"
+        '    pytest.skip("requires another backend")\n'
+        "def test_unselected():\n"
+        '    raise RuntimeError("must be deselected")\n',
+        encoding="utf-8",
+    )
+    output = tmp_path / "out"
+    result = run.run_module(
+        tmp_path,
+        "tests/test_assets.py",
+        ["TestModel::test_load", "test_skip"],
+        output,
+        30,
+    )
+    assert result == {"status": "completed", "exit_code": 1}
+    events = [
+        json.loads(line) for line in (output / "events.jsonl").read_text().splitlines()
+    ]
+    collected = next(
+        event["nodeids"] for event in events if event["event"] == "collected"
+    )
+    assert collected == [
+        "tests/test_assets.py::TestModel::test_load[cached]",
+        "tests/test_assets.py::TestModel::test_load[missing]",
+        "tests/test_assets.py::test_skip",
+    ]
+    reasons = {
+        event["outcome"]: event["reason"] for event in events if event.get("reason")
+    }
+    assert "missing model" in reasons["failed"]
+    assert "requires another backend" in reasons["skipped"]
