@@ -527,9 +527,6 @@
       "test_sleep_mode_backend_arg",
       "test_trust_request_mm_kwargs_cli"
     ],
-    "tests/engine/test_short_mm_context.py": [
-      "test_context_length_too_short[llava-hf/llava-1.5-7b-hf]"
-    ],
     "tests/entrypoints/generate/structured_decisions/test_strategies.py": [
       "test_bad_top_level_fields_are_a_400[joint-True-joint-decisions]",
       "test_bad_top_level_fields_are_a_400[joint-True-joint-systemone]",
@@ -593,12 +590,6 @@
     "tests/entrypoints/launchers/render/test_app_state.py": [
       "test_explicit_reasoning_parser_flag_wins_over_model_default"
     ],
-    "tests/entrypoints/llm/test_chat.py": [
-      "test_chat",
-      "test_chat_priority",
-      "test_llm_chat_tokenization_no_double_bos",
-      "test_multi_chat"
-    ],
     "tests/entrypoints/llm/test_collective_rpc.py": [
       "test_collective_rpc[mp-2]",
       "test_collective_rpc[ray-1]",
@@ -611,9 +602,6 @@
       "test_rejects_torch_sdpa_for_decoder",
       "test_single_prompt_priority"
     ],
-    "tests/entrypoints/llm/test_gpu_utilization.py": [
-      "test_gpu_memory_utilization"
-    ],
     "tests/entrypoints/llm/test_prompt_validation.py": [
       "test_empty_prompt"
     ],
@@ -621,12 +609,7 @@
       "test_structured_output[mistralai/Ministral-8B-Instruct-2410-guidance-hf-None]",
       "test_structured_output[mistralai/Ministral-8B-Instruct-2410-xgrammar-auto-None]"
     ],
-    "tests/entrypoints/multimodal/llm/test_chat.py": [
-      "test_chat_multi_image[image_urls0]"
-    ],
     "tests/entrypoints/multimodal/llm/test_mm_embeds_only.py": [
-      "test_generate_with_embedding",
-      "test_raw_image_rejected",
       "test_text_only_prompt"
     ],
     "tests/entrypoints/multimodal/llm/test_mm_processor_kwargs.py": [
@@ -704,9 +687,6 @@
       "test_max_tokenize_tokens_env_and_cli[environment-variable]",
       "test_tokenize_request_models_respect_max_total_tokens"
     ],
-    "tests/entrypoints/serve/tokenize/test_tokenization_vlm.py": [
-      "test_tokenize_chat_expands_image_placeholders"
-    ],
     "tests/entrypoints/speech_to_text/transcription/test_transcription_validation.py": [
       "test_request_extensions_reach_prompt_and_sampling_params[absent]",
       "test_request_extensions_reach_prompt_and_sampling_params[dict]",
@@ -746,10 +726,6 @@
       "test_nvfp4_moe_correctness[tensor_parallel_size:8-nvidia/Qwen3-30B-A3B-NVFP4-4-2]",
       "test_nvfp4_moe_correctness[tensor_parallel_size:8-nvidia/Qwen3-30B-A3B-NVFP4-4-4]",
       "test_triton_dequantize_nvfp4"
-    ],
-    "tests/kernels/test_flex_attention.py": [
-      "test_flex_attention_custom_mask_full_cudagraphs",
-      "test_flex_attention_full_cudagraphs"
     ],
     "tests/kernels/test_fused_indexer_q_rope_quant.py": [
       "test_fused_indexer_q_rope_quant_matches_unfused[32-False-False-cache_dtype0-1023]",
@@ -1104,10 +1080,6 @@
       "test_load_weights_resolves_hf_repo_id[org/model-None-org/model]",
       "test_sharded_state_loader[1-False]"
     ],
-    "tests/model_executor/model_loader/test_weight_cache.py": [
-      "test_weight_cache_backend_llm_restart[torch_ipc]",
-      "test_weight_cache_backend_llm_restart[vmm_ipc]"
-    ],
     "tests/model_executor/test_mistral_large_3_eagle.py": [
       "test_eagle_mistral_large3_loads_weights"
     ],
@@ -1222,11 +1194,6 @@
       "test_threshold_unmasking_and_commit[4-2]",
       "test_threshold_unmasking_and_commit[4-4]"
     ],
-    "tests/models/language/pooling/test_all_pooling_plus_chunked_prefill.py": [
-      "test_decoder_token_embed_model_runner_v2[Qwen/Qwen3-Embedding-0.6B]",
-      "test_last_pool_score_chunked_prefill_matches_unchunked[Qwen/Qwen3-Reranker-0.6B]",
-      "test_sequence_embed_model_runner_v2"
-    ],
     "tests/models/language/pooling/test_colbert.py": [
       "TestColbertSharedEngine::test_colbert_embed_task_not_supported[bert]",
       "TestColbertSharedEngine::test_colbert_late_interaction_1_to_1[bert]",
@@ -1273,8 +1240,7 @@
       "test_llava_onevision_mixed_frame_count_videos"
     ],
     "tests/models/multimodal/generation/test_memory_leak.py": [
-      "test_consumed_cpu_inputs_released_during_generation",
-      "test_no_memory_leak[image_urls0-None]"
+      "test_consumed_cpu_inputs_released_during_generation"
     ],
     "tests/models/multimodal/generation/test_muse_vision_encoders.py": [
       "test_glimmer_pixel_shuffle_order_groups_merge_blocks[2-2]",
@@ -1313,9 +1279,6 @@
       "test_navit_sparse_permutation_orders_tokens_by_window[74-74]",
       "test_navit_sparse_permutation_orders_tokens_by_window[96-170]"
     ],
-    "tests/models/multimodal/generation/test_qwen2_5_vl.py": [
-      "test_qwen2_5_vl_video_fits_max_model_len[Qwen/Qwen2.5-VL-3B-Instruct]"
-    ],
     "tests/models/multimodal/pooling/test_radio.py": [
       "test_native_format_weight_loading"
     ],
@@ -1323,21 +1286,6 @@
       "test_image_tokens_attend_bidirectionally",
       "test_template_is_registered_over_the_hub_template",
       "test_weight_names_map_to_gemma3_layout"
-    ],
-    "tests/models/multimodal/processing/test_common.py": [
-      "test_processing_correctness[1.0-32-0.3-HuggingFaceM4/Idefics3-8B-Llama3]",
-      "test_processing_correctness[1.0-32-0.3-Qwen/Qwen2-VL-2B-Instruct]",
-      "test_processing_correctness[1.0-32-0.3-Qwen/Qwen2.5-VL-3B-Instruct]",
-      "test_processing_correctness[1.0-32-0.3-Qwen/Qwen3-VL-4B-Instruct]",
-      "test_processing_correctness[1.0-32-0.3-Qwen/Qwen3.5-0.8B]",
-      "test_processing_correctness[1.0-32-0.3-Qwen/Qwen3.5-4B]",
-      "test_processing_correctness[1.0-32-0.3-llava-hf/llava-1.5-7b-hf]",
-      "test_processing_correctness[1.0-32-0.3-llava-hf/llava-onevision-qwen2-0.5b-ov-hf]",
-      "test_processing_correctness[1.0-32-0.3-llava-hf/llava-v1.6-mistral-7b-hf]",
-      "test_processing_correctness[1.0-32-0.3-meta-llama/Llama-4-Scout-17B-16E-Instruct]",
-      "test_processor_cache_preserves_hits_when_request_exceeds_capacity[order0]",
-      "test_processor_cache_preserves_hits_when_request_exceeds_capacity[order1]",
-      "test_processor_cache_preserves_hits_when_request_exceeds_capacity[order2]"
     ],
     "tests/models/multimodal/processing/test_moss_audio.py": [
       "test_moss_audio_encoder_loads_realistic_attention_weight_names",
@@ -1357,12 +1305,6 @@
       "test_model_tensor_schema[moonshotai/Kimi-K2.5]"
     ],
     "tests/models/multimodal/processing/test_transformers_image.py": [
-      "test_image_adjacent_inputs",
-      "test_image_multiple_inputs",
-      "test_missing_replacement_offsets_names_the_processor",
-      "test_multimodal_processor[llava-hf/llava-onevision-qwen2-0.5b-ov-hf]",
-      "test_repeated_image_hits_the_processor_cache",
-      "test_spliced_prompt_matches_hf_expansion[llava-hf/llava-onevision-qwen2-0.5b-ov-hf-<image>\\nWhat is this?]",
       "test_text_only_prompt"
     ],
     "tests/models/multimodal/test_nano_nemotron_vl.py": [
@@ -1375,9 +1317,6 @@
       "test_vision_layernorm_is_loaded_and_applied_before_pixel_shuffle[True-dynamic]",
       "test_vision_layernorm_is_loaded_and_applied_before_pixel_shuffle[True-image]",
       "test_vision_layernorm_is_loaded_and_applied_before_pixel_shuffle[True-video]"
-    ],
-    "tests/models/quantization/test_awq.py": [
-      "test_awq_models[5-128-half-OpenGVLab/InternVL2-2B-OpenGVLab/InternVL2-2B-AWQ]"
     ],
     "tests/models/quantization/test_fp8_per_channel.py": [
       "test_fp8_per_channel_logprobs[dense]"
@@ -1894,9 +1833,6 @@
     "tests/samplers/test_beam_search.py": [
       "test_beam_search_single_input[4-64-half-TinyLlama/TinyLlama-1.1B-Chat-v1.0]",
       "test_beam_search_stops_at_context_limit_per_prompt[TinyLlama/TinyLlama-1.1B-Chat-v1.0]"
-    ],
-    "tests/samplers/test_ignore_eos.py": [
-      "test_ignore_eos[512-half-distilbert/distilgpt2]"
     ],
     "tests/samplers/test_no_bad_words.py": [
       "TestTwoTokenBadWord::test_two_token_bad_word"
@@ -2700,9 +2636,6 @@
       "test_mtp_speculative_mixed_batch_short_prefill[False-qwen]",
       "test_mtp_speculative_mixed_batch_short_prefill[True-qwen]"
     ],
-    "tests/v1/ec_connector/unit/test_ec_cpu_connector.py": [
-      "test_ec_cpu_offloading"
-    ],
     "tests/v1/ec_connector/unit/test_ec_transfer_params.py": [
       "test_free_request_calls_ec_connector_and_surfaces_params",
       "test_free_request_without_ec_connector_returns_none"
@@ -2716,12 +2649,6 @@
     ],
     "tests/v1/engine/test_fast_incdec_prefix_err.py": [
       "test_fast_inc_detok_invalid_utf8_err_case"
-    ],
-    "tests/v1/engine/test_llm_engine.py": [
-      "test_compatibility_with_skip_tokenizer_init[False]",
-      "test_compatibility_with_skip_tokenizer_init[True]",
-      "test_parallel_sampling[False]",
-      "test_parallel_sampling[True]"
     ],
     "tests/v1/kv_connector/unit/offloading_connector/test_scheduler.py": [
       "test_cache_reset_fence_held_too_long_warns_on_idle_steps",
@@ -3016,11 +2943,6 @@
       "test_extract_hidden_states_speculative_config_vlm",
       "test_extract_hidden_states_text_only_config_regression"
     ],
-    "tests/v1/spec_decode/test_max_len.py": [
-      "test_ngram_max_len[ngram-10]",
-      "test_ngram_max_len[ngram-1]",
-      "test_ngram_max_len[ngram-3]"
-    ],
     "tests/v1/spec_decode/test_mtp_structured_output.py": [
       "test_bitmask_engine_reasoner_ends_midwindow_with_padding[guidance]",
       "test_bitmask_engine_reasoner_ends_midwindow_with_padding[xgrammar]",
@@ -3153,9 +3075,6 @@
       "test_trim_spec_tokens_with_grammar[raw_drafts3-4-guidance]",
       "test_trim_spec_tokens_with_grammar[raw_drafts3-4-xgrammar]",
       "test_xgrammar_compiles_choice_without_rewrite"
-    ],
-    "tests/v1/tracing/test_tracing.py": [
-      "test_traces"
     ],
     "tests/v1/worker/test_extensible_kv_cache.py": [
       "test_allocate_kv_cache_warms_up_wvsplitkrc_before_backing[default-other]",
