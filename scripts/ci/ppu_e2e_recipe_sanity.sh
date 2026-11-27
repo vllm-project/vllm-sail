@@ -203,10 +203,12 @@ if [[ "${TIER}" == "model_sanity" ]]; then
 fi
 
 if [[ "${SKIP_WHEEL_INSTALL}" == "false" ]]; then
-    python -m pip install --no-deps --force-reinstall "${vllm_wheel}"
-    python -m pip install --no-deps --force-reinstall "${sail_wheel}"
+    # shellcheck source=scripts/ci/ppu_ci_deps.sh
+    source "${CI_SCRIPT_DIR}/ppu_ci_deps.sh"
+    python -m pip install --no-index --no-deps --force-reinstall "${vllm_wheel}"
+    python -m pip install --no-index --no-deps --force-reinstall "${sail_wheel}"
     PIP_INDEX_URL=https://mirrors.aliyun.com/pypi/simple/ \
-        python -m pip install -r "${ROOT_DIR}/requirements/ci-runtime.txt"
+        ppu_ci_install_wheel_dependency transformers ''
     if [[ "${TIER}" == "model_sanity" ]]; then
         PIP_INDEX_URL=https://mirrors.aliyun.com/pypi/simple/ \
             python -m pip install "evalscope==1.14.1"

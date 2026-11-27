@@ -249,7 +249,16 @@ else:
     _EXT_MODULES = [Extension(name, sources=[]) for name in _EXT_NAMES]
     _BUILD_EXT = _CMakeBuildExt
 
+_DEV_REQUIREMENTS = [
+    line.strip()
+    for line in (_ROOT / "requirements/dev.txt")
+    .read_text(encoding="utf-8")
+    .splitlines()
+    if line.strip() and not line.lstrip().startswith("#")
+]
+
 setup(
     ext_modules=_EXT_MODULES,
     cmdclass={"build_ext": _BUILD_EXT, "build_py": _BuildPy},
+    extras_require={"dev": _DEV_REQUIREMENTS, "profiling": ["nvtx"]},
 )

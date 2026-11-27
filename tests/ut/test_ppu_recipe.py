@@ -1491,13 +1491,17 @@ def test_recipe_evalscope_install_preserves_runtime_numpy(
         f"#!{sys.executable}\n"
         "import os, sys\n"
         "from pathlib import Path\n"
-        "if sys.argv[1] == '-c' and 'version(\"numpy\")' in sys.argv[2]:\n"
+        "if sys.argv[1:] == ['-', 'transformers', '']:\n"
+        "    print('transformers==5.19.0')\n"
+        "elif sys.argv[1] == '-c' and 'version(\"numpy\")' in sys.argv[2]:\n"
         "    print('1.26.4')\n"
         "elif sys.argv[1] == '-c':\n"
         "    assert sys.argv[2] == 'from evalscope import TaskConfig, run_task'\n"
         "    print('import evalscope')\n"
         "else:\n"
         "    assert sys.argv[1:4] == ['-m', 'pip', 'install']\n"
+        "    if '--dry-run' in sys.argv:\n"
+        "        sys.exit(1)\n"
         "    print(sys.argv[-1], Path(os.environ['PIP_CONSTRAINT']).read_text().split())\n"
     )
     python.chmod(0o755)
@@ -1511,6 +1515,7 @@ def test_recipe_evalscope_install_preserves_runtime_numpy(
             "PIP_CONSTRAINT": str(constraints),
             "TIER": tier,
             "ROOT_DIR": str(ROOT),
+            "CI_SCRIPT_DIR": str(CI_DIR),
             "SKIP_WHEEL_INSTALL": "false",
             "vllm_wheel": "vllm.whl",
             "sail_wheel": "sail.whl",
@@ -1522,7 +1527,7 @@ def test_recipe_evalscope_install_preserves_runtime_numpy(
     expected = ["torch===2.13.0"]
     if expected_install:
         expected.extend(["numpy===1.26.4", "pyarrow<26"])
-    packages = ["vllm.whl", "sail.whl", str(ROOT / "requirements/ci-runtime.txt")]
+    packages = ["vllm.whl", "sail.whl", "transformers==5.19.0"]
     if expected_install:
         packages.append("evalscope==1.14.1")
     expected_output = [f"{package} {expected}" for package in packages]

@@ -4,6 +4,8 @@
 set -Eeuo pipefail
 
 ROOT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)"
+# shellcheck source=scripts/ci/ppu_ci_deps.sh
+source "${ROOT_DIR}/scripts/ci/ppu_ci_deps.sh"
 WHEELS_DIR="${WHEELS_DIR:?WHEELS_DIR is required}"
 UT_RESULTS_DIR="${UT_RESULTS_DIR:?UT_RESULTS_DIR is required}"
 mkdir -p "${UT_RESULTS_DIR}"
@@ -36,11 +38,10 @@ export PIP_CONSTRAINT="${UT_RESULTS_DIR}/image-constraints.txt"
 python "${ROOT_DIR}/scripts/ci/ppu_image_stack.py" capture \
     --sdk /usr/local/PPU_SDK --output "${UT_RESULTS_DIR}/image-stack.json" \
     --constraints "${PIP_CONSTRAINT}"
-python -m pip install --no-deps --force-reinstall \
+python -m pip install --no-index --no-deps --force-reinstall \
     "${WHEELS_DIR}"/vllm/*.whl "${WHEELS_DIR}"/vllm-sail/*.whl
 PIP_INDEX_URL=https://mirrors.aliyun.com/pypi/simple/ \
-    python -m pip install -r "${ROOT_DIR}/requirements/dev.txt" \
-    -r "${ROOT_DIR}/requirements/profiling.txt"
+    ppu_ci_install_wheel_dependency nvtx profiling -r "${ROOT_DIR}/requirements/dev.txt"
 python "${ROOT_DIR}/scripts/ci/ppu_image_stack.py" verify \
     --sdk /usr/local/PPU_SDK --output "${UT_RESULTS_DIR}/image-stack.json"
 

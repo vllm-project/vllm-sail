@@ -34,6 +34,7 @@ def run_recipe(tmp_path):
     scripts.mkdir(parents=True)
     for name in (
         Path(ENTRYPOINT).name,
+        "ppu_ci_deps.sh",
         "ppu_wheel_manifest.py",
         "ppu_recipe.py",
         "ppu_recipe_runner.py",
@@ -61,6 +62,8 @@ with open(os.environ['CALL_TRACE'], 'a', encoding='utf-8') as trace:
     trace.write(json.dumps(args) + '\\n')
 if args[:2] == ['-m', 'pip']:
     assert (Path(os.environ['RESULTS_DIR']) / 'provenance.json').is_file()
+if args == ['-', 'transformers', '']:
+    print('transformers==5.19.0')
 if args and args[0].endswith('/ppu_recipe_runner.py'):
     results = Path(args[args.index('--results-dir') + 1])
     results.mkdir(parents=True, exist_ok=True)
