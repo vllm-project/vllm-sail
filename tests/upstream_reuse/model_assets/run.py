@@ -146,6 +146,10 @@ def main() -> int:
     deadline = time.monotonic() + SHARD_SECONDS
     try:
         view = runner.runtime_root()
+        # Some upstream tests read chat templates relative to the test tree.
+        (view / "examples").symlink_to(
+            runner.root / "examples", target_is_directory=True
+        )
         with (output / "module-results.jsonl").open("a", encoding="utf-8") as progress:
             for row in plan["modules"]:
                 module = row["module"]

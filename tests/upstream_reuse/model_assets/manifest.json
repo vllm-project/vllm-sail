@@ -116,9 +116,6 @@
       "test_model_startup",
       "test_moe_startup"
     ],
-    "tests/compile/passes/test_double_aiter_rms_quant_fusion.py": [
-      "test_double_aiter_rms_fp8_group_quant_fusion"
-    ],
     "tests/compile/passes/test_functionalization.py": [
       "test_fix_functionalization"
     ],
@@ -1472,9 +1469,6 @@
     "tests/kernels/attention/test_flashmla_sparse.py": [
       "test_sparse_flashmla_prefill_on_the_kv_cache_at_allocation"
     ],
-    "tests/kernels/mamba/test_gdn_rocm_layout_dispatch.py": [
-      "test_rocm_prefill_numerics_and_output_layout"
-    ],
     "tests/kernels/moe/test_ocp_mx_moe.py": [
       "test_mxfp4_loading_and_execution_moe"
     ],
@@ -2641,15 +2635,9 @@
     "tests/models/quantization/test_per_token_kv_cache.py": [
       "test_per_token_head_kv_cache_accuracy"
     ],
-    "tests/models/qwen3_5/test_amd_model.py": [
-      "test_models"
-    ],
     "tests/models/qwen4_exp/test_qsa_reference.py": [
       "test_qsa_hisparse_prefill_ignores_unused_request_table_rows",
       "test_qsa_hisparse_starts_with_automatic_cache_layout"
-    ],
-    "tests/models/step5/test_amd_model.py": [
-      "test_sparse_prefill_matches_decode"
     ],
     "tests/models/test_deepseek_v41_pcp.py": [
       "test_pcp_generates_with_pipeline_or_data_parallelism"
@@ -2671,18 +2659,6 @@
     ],
     "tests/models/test_dsv4_mono_layers.py": [
       "test_mono_decode_matches_the_model"
-    ],
-    "tests/models/test_hyv4_rocm.py": [
-      "test_hyv4_defaults_to_breakable_graphs",
-      "test_hyv4_dummy_generation"
-    ],
-    "tests/models/test_muse_spark_rocm_mono.py": [
-      "test_deployment_guard_accepts_only_tep8_with_dspark",
-      "test_fused_attention_layers_follow_the_window",
-      "test_layer_guards_follow_the_weight_finalize",
-      "test_mono_step_matches_the_stock_loop",
-      "test_other_steps_run_stock",
-      "test_weight_views_alias_the_rank_slices"
     ],
     "tests/models/test_pp_equivalence.py": [
       "test_pp_equivalence_detects_a_changed_weight",
@@ -3059,6 +3035,7 @@
       "test_opt_125m_int4wo_model_running_preshuffled_kernel_online_quant",
       "test_opt_125m_module_fqn_to_config_regex_model",
       "test_pre_quantized_model",
+      "test_reload_weights",
       "test_safetensors_model_loading_with_params"
     ],
     "tests/reasoning/test_base_thinking_reasoning_parser.py": [
@@ -4115,15 +4092,10 @@
       "test_scale_down_removes_dead_rank_and_recovers"
     ],
     "tests/v1/kv_connector/extract_hidden_states_integration/test_extraction.py": [
+      "test_extract_hidden_states_qwen35_hybrid_smoke",
+      "test_extract_hidden_states_tp2",
       "test_extract_hidden_states_with_predictable_dummy_model",
       "test_extract_layer_zero_is_input_embeddings"
-    ],
-    "tests/v1/kv_connector/moriio_integration/test_write_dummy_e2e_rocm.py": [
-      "test_corrupted_prefill_state_is_detected",
-      "test_corrupted_prefill_state_is_detected_read",
-      "test_heterogeneous_tp_hands_decode_every_prompt_token",
-      "test_read_matches_direct_serve",
-      "test_write_matches_direct_serve"
     ],
     "tests/v1/kv_connector/nixl_integration/test_spec_decode_acceptance.py": [
       "test_spec_decode_acceptance_length"
@@ -4267,10 +4239,6 @@
     ],
     "tests/v1/kv_connector/unit/test_nixl_connector_hma.py": [
       "test_fewer_blocks_with_hma"
-    ],
-    "tests/v1/kv_connector/unit/test_nixl_rocm_gpu_mem_diag.py": [
-      "test_gpu_memory_nixl_hma",
-      "test_gpu_memory_no_nixl_baseline"
     ],
     "tests/v1/kv_connector/unit/test_nixl_simple_cpu_offload.py": [
       "test_cpu_offload_wins_when_nixl_has_no_match",
