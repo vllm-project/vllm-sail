@@ -355,6 +355,43 @@ def test_resolve_dsv4_matches_catalog_and_dpep_preset() -> None:
     assert "--no-enable-prefix-caching" in resolved_dpep["flags"]
     assert "--enable-prefix-caching" not in resolved_dpep["flags"]
 
+    prefill = ppu_recipe.resolve_recipe(recipe, preset="prefill", cache="enabled")
+    decode = ppu_recipe.resolve_recipe(recipe, preset="decode", cache="disabled")
+    assert prefill["argv"] == resolved_default["argv"]
+    assert decode["argv"] == resolved_dpep["argv"]
+    assert decode["server_env"] == resolved_dpep["server_env"]
+
+
+def test_dsv4_int8_decode_uses_810e_assets_and_legacy_layout(tmp_path: Path) -> None:
+    recipe = RECIPES_DIR / "deepseek-ai" / "DeepSeek-V4-Flash.yaml"
+    legacy = next(
+        case
+        for case in json.loads((CI_DIR / "ppu_e2e_models.json").read_text())
+        if case["key"] == "deepseek-v4-int8-dp-ep"
+    )
+    assets_map = tmp_path / "assets.yaml"
+    assets_map.write_text(
+        "deepseek-v4-mxfp4: mxfp4-checkpoint\ndeepseek-v4-int8: int8-checkpoint\n"
+    )
+    resolved = ppu_recipe.resolve_recipe(
+        recipe, variant="w8a8_int8", preset="decode", assets_map_path=assets_map
+    )
+
+    assert resolved["hardware"] == "zhenwu_810e"
+    assert resolved["ppu_count"] == legacy["ppu_count"] == 8
+    assert resolved["hf_model_id"] == legacy["model_id"]
+    assert resolved["golden_model_key"] == legacy["model_key"]
+    assert resolved["served_name"] == legacy["served_name"]
+    assert resolved["resolved_model"] == "int8-checkpoint"
+    assert resolved["server_env"] == legacy["server_env"]
+    assert dict(
+        (flag, value)
+        for flag, value, _ in ppu_recipe._parse_flag_entries(resolved["flags"])
+    ) == dict(
+        (flag, value)
+        for flag, value, _ in ppu_recipe._parse_flag_entries(legacy["server_cmd"][9:])
+    )
+
 
 def test_resolve_minimax_reproduces_the_retired_catalog_case() -> None:
     recipe = RECIPES_DIR / "MiniMaxAI" / "MiniMax-M3.yaml"

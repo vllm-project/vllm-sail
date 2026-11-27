@@ -52,6 +52,24 @@ features:
 variants:
   default:
     precision: mxfp4
+    hardware: zhenwu_m890
+    assets:
+      model: deepseek-v4-mxfp4
+      tokenizer: deepseek-v4-mxfp4
+    hf_model_id: T-HEAD/DeepSeek-V4-Flash-0731-MoE-Quant-W-MXFP4-A-MXFP4-Dense-Quant-W-FP8-PerChannel-A-FP8-PerToken
+    golden_model_key: deepseek_v4_mxfp4
+    served_name: deepseek-v4-mxfp4
+    extra_args: []
+    extra_env: {}
+  w8a8_int8:
+    precision: w8a8_int8
+    hardware: zhenwu_810e
+    assets:
+      model: deepseek-v4-int8
+      tokenizer: deepseek-v4-int8
+    hf_model_id: T-HEAD/DeepSeek-V4-Flash-0731-W8A8-INT8
+    golden_model_key: deepseek_v4_int8
+    served_name: deepseek-v4-int8
     extra_args: []
     extra_env: {}
 hardware_overrides:
@@ -59,8 +77,12 @@ hardware_overrides:
     extra_args: []
     extra_env: {}
 presets:
-  dp_ep_low_latency:
-    hardware: zhenwu_m890
+  prefill: &single_node_prefill
+    select:
+      features:
+        spec_decoding: false
+    args: []
+  decode: &single_node_decode
     remove_args:
       - --tensor-parallel-size
       - --seed
@@ -91,15 +113,20 @@ presets:
       - '{"cudagraph_mode": "FULL_DECODE_ONLY", "custom_ops": ["all"]}'
     env:
       VLLM_ENGINE_READY_TIMEOUT_S: "6000"
-  prefill_long:
+  # Existing callers keep the M890 preset names and policy digests.
+  dp_ep_low_latency:
+    <<: *single_node_decode
     hardware: zhenwu_m890
-    select:
-      features:
-        spec_decoding: false
-    args: []
+  prefill_long:
+    <<: *single_node_prefill
+    hardware: zhenwu_m890
   eval_longctx:
     hardware: zhenwu_m890
     args: []
 notes: >-
-  Default baseline matches the deepseek-v4-mxfp4 catalog entry (TP8 on 8
-  Zhenwu M890 cards). Preset dp_ep_low_latency matches deepseek-v4-mxfp4-dp-ep.
+  The M890 MXFP4 baseline and dp_ep_low_latency preset back the existing TP8
+  and single-node DP8+EP policies. The prefill and decode slots expose the TP8
+  path without speculative decoding and the DP8+EP path with DSpark. The
+  810E W8A8 INT8 variant follows the existing eight-card legacy layouts and
+  is catalog-only. Multi-node EP and disaggregated PD require separate
+  model-specific validation.
