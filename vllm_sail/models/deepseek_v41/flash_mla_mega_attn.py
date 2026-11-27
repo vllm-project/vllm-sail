@@ -15,9 +15,8 @@ through ``flash_mla_cuda``). This module mirrors the upstream layer for PPU:
   writing in place into caller-provided buffers, so results are copied into
   the pre-allocated ``QuantizedActivation`` token slices (``copy_`` is
   element-correct even when the per-chunk aligned strides differ). The scale
-  side of that contract has two arms, selected per call by
-  ``VLLM_SAIL_FUSED_ATTN_PER_TOKEN_SCALE`` — see "PR#59 output scale arms"
-  below;
+  format follows the loaded ``wo_a`` or the existing
+  ``VLLM_SAIL_FUSED_ATTN_PER_TOKEN_SCALE`` override;
 * ``backend_cls`` stays ``FLASHMLA_SPARSE_DSV41`` (identical metadata and KV
   geometry per upstream's own note) and ``packed_kv_cache_dtype`` defaults to
   ``fp8_ds_mla``: the fused decode kernel reads the 528B V4.1 MXFP8 record for
@@ -83,15 +82,14 @@ second output FP8 scale format, chosen at call time by ``num_per_channels``.
 ``out_fp8``'s physical layout is unchanged in both arms (32-element chunks
 interleaved across the 8 heads of a WV group); only the scale differs.
 
-* default, ``VLLM_SAIL_FUSED_ATTN_PER_TOKEN_SCALE=0`` — the PR#54 contract:
+* packed per-32 scales — the PR#54 contract:
   ``num_per_channels=32`` with ``use_tma_aligned_col_major_sf=round_sf=
   use_packed_ue8m0=True``. ``out_sf`` is int32 ``[T, G, D/128]``, four UE8M0
   bytes per word, MN-major. Byte-identical behaviour to the pre-PR#59 wheel.
-* opt-in, ``VLLM_SAIL_FUSED_ATTN_PER_TOKEN_SCALE=1`` — ``num_per_channels=4096``
+* per-token scales — ``num_per_channels=4096``
   (= ``WV_GROUP_SIZE * _HEAD_DIM_V``) with all three flags **False**. ``out_sf``
   is a contiguous **float32** ``[T, G, 1]`` holding the exact dequantization
-  scale ``max(1e-4, amax)/448`` per token and WV group, so ``_o_proj``
-  multiplies instead of unpacking UE8M0. The kernel hard-requires SM89 for this
+  scale ``max(1e-4, amax)/448`` per token and WV group. The kernel requires SM89 for this
   arm (``TORCH_CHECK(!per_token_scale || minor == 9)``) and rejects mixed flag
   combinations; ``fused_gate`` closes with ``gate-per-token-cap`` on 8.0.
 
@@ -103,6 +101,10 @@ are format-aware and assert the arm's dtype/shape loudly; there is no silent
 fallback and no re-quantization of the FP32 scale back to UE8M0 (that would
 discard the precision the arm exists to keep). The switch is read live, so an
 A/B run flips only the environment variable on one code tree and one wheel.
+
+On M890 with channelwise DeepGEMM FP8 einsum available, a loaded per-channel FP8
+``wo_a`` automatically selects the per-token format. DeepGEMM consumes
+both operands and their FP32 scales directly.
 
 Selection is gated by ``fused_gate`` (env switch, KV-record switch, platform,
 capability, the opt-in NVFP4 and per-token-scale capability checks, the NVFP4
@@ -155,8 +157,8 @@ _PPU_FUSED_CAPABILITIES = ((8, 0), (8, 9))
 #: PPU o_proj contract is the per-32 recipe without TMA-aligned scales (mirrors
 #: vllm_sail/models/deepseek_v41/flashmla.py and the SM100 MXFP8 bmm kernel's
 #: fixed recipe in vllm .../mxfp8/deep_gemm.py:26). The PPU ``_o_proj`` below
-#: never calls ``fp8_einsum`` — it dequantizes and runs a BF16 bmm — so this
-#: recipe is inert here and stays pinned for both PR#59 output scale arms.
+#: uses its own recipe for channelwise FP8, so this inherited recipe stays
+#: pinned for both PR#59 output formats.
 _PPU_EINSUM_RECIPE = (1, 1, 32)
 
 #: PR#59 per-token arm: one FP32 scale spans a whole WV group's output row, so
@@ -176,24 +178,24 @@ def _fused_api():
     return _API
 
 
-def _per_token_scale() -> bool:
+def _per_token_scale(channelwise_o_proj: bool = False) -> bool:
     """Whether the fused kernel should emit PR#59 per-token FP32 output scales.
 
     Read live (not cached in ``__init__``) so an A/B run flips only the
     environment variable: the same code tree, wheel and process layout serve
     both arms.
     """
-    return bool(ppu_envs.VLLM_SAIL_FUSED_ATTN_PER_TOKEN_SCALE)
+    return channelwise_o_proj or ppu_envs.VLLM_SAIL_FUSED_ATTN_PER_TOKEN_SCALE
 
 
-def _output_scale_args() -> dict:
+def _output_scale_args(channelwise_o_proj: bool = False) -> dict:
     """The four PR#59 output-format arguments for the selected arm.
 
     Single source of truth for both kernel call sites: the kernel rejects any
     mixture of ``num_per_channels`` and the three format flags, so they must
     never be set independently.
     """
-    if _per_token_scale():
+    if _per_token_scale(channelwise_o_proj):
         return {
             "num_per_channels": _PER_TOKEN_SCALE_GROUP,
             "use_tma_aligned_col_major_sf": False,
@@ -218,13 +220,12 @@ def _call_fused(entry: str, **kwargs):
     try:
         return getattr(_fused_api(), entry)(**kwargs)
     except RuntimeError as exc:
-        if _per_token_scale() and "num_per_channels" in str(exc):
+        per_token = kwargs.get("num_per_channels") == _PER_TOKEN_SCALE_GROUP
+        if per_token and "num_per_channels" in str(exc):
             raise RuntimeError(
-                "VLLM_SAIL_FUSED_ATTN_PER_TOKEN_SCALE=1 needs a FlashMLA-for-sail "
-                "PR#59 (7bce34f) or newer flash_mla wheel: the installed wheel "
-                "rejected num_per_channels="
-                f"{_PER_TOKEN_SCALE_GROUP}. Rebuild flash_mla from PR#59, or set "
-                "VLLM_SAIL_FUSED_ATTN_PER_TOKEN_SCALE=0 for the per-32 arm."
+                "Per-token output scales require FlashMLA-for-sail PR#59 "
+                "(7bce34f) or later. The installed wheel rejected "
+                f"num_per_channels={_PER_TOKEN_SCALE_GROUP}. Upgrade FlashMLA."
             ) from exc
         raise
 
@@ -353,10 +354,10 @@ def fused_gate(vllm_config) -> tuple[bool, str]:
             f"written with the e2m1 PTX conversion, which SAIL supports on 8.9 "
             f"only"
         )
-    per_token = ppu_envs.VLLM_SAIL_FUSED_ATTN_PER_TOKEN_SCALE
+    per_token = _per_token_scale()
     if per_token and (cap.major, cap.minor) != (8, 9):
         return False, (
-            f"gate-per-token-cap: VLLM_SAIL_FUSED_ATTN_PER_TOKEN_SCALE=1 needs "
+            "gate-per-token-cap: per-token output scale needs "
             f"capability 8.9 (ZW-M890P), got {cap.major}.{cap.minor}; the PR#59 "
             f"per-token FP32 output scale is hard-checked to SM89 "
             f"(!per_token_scale || minor == 9)"
@@ -417,7 +418,7 @@ def fused_gate(vllm_config) -> tuple[bool, str]:
         f"local_heads={n_local_heads} padded_heads="
         f"{64 if n_local_heads <= 64 else 128} "
         f"compressed_kv={'nvfp4_288B' if nvfp4 else 'mxfp8_528B'} "
-        f"output_scale={'per_token_fp32' if per_token else 'per32_ue8m0'}"
+        f"output_scale={'per_token_fp32' if per_token else 'auto'}"
     )
 
 
@@ -472,6 +473,7 @@ class PPUDeepseekV4MegaAttnAttention(DeepseekV4MegaAttnAttention):
 
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
+        self._uses_channelwise_o_proj = False
         # v1.1: the inherited __init__ computed the recipe from the device
         # capability, which on PPU (major 8 <= 9) yields (1, 128, 128) — the
         # wrong convention for the fused kernel's fixed per-32 packed UE8M0
@@ -533,7 +535,7 @@ class PPUDeepseekV4MegaAttnAttention(DeepseekV4MegaAttnAttention):
         scale as packed UE8M0.
         """
         out = alloc_mega_attn_output(num_tokens, self.n_wv_group, hidden_states.device)
-        if not _per_token_scale():
+        if not _per_token_scale(self._uses_channelwise_o_proj):
             return out
         scale = torch.empty(
             (num_tokens, self.n_wv_group, 1),
@@ -544,22 +546,37 @@ class PPUDeepseekV4MegaAttnAttention(DeepseekV4MegaAttnAttention):
 
     # ---- output projection (v1.1, PPU emulation reality) -------------------
 
+    def process_weights_after_loading(self, act_dtype: torch.dtype) -> None:
+        """Select the projection after the linear loaders finalize wo_a."""
+        self._uses_channelwise_o_proj = False
+        weight = self.wo_a.weight
+        scale = getattr(self.wo_a, "weight_scale", None)
+        rows = self.n_local_groups * self.o_lora_rank
+        if (
+            weight.dtype != torch.float8_e4m3fn
+            or weight.shape != (rows, _PER_TOKEN_SCALE_GROUP)
+            or weight.stride(-1) != 1
+            or scale is None
+            or scale.dtype != torch.float32
+            or scale.shape not in ((rows,), (rows, 1))
+        ):
+            return
+
+        cap = current_platform.get_device_capability()
+        if cap is None or (cap.major, cap.minor) != (8, 9):
+            return
+
+        from vllm_sail.utils.deep_gemm import has_fp8_einsum
+
+        self._uses_channelwise_o_proj = has_fp8_einsum()
+
     def _o_proj(
         self, attn_out: QuantizedActivation, positions: torch.Tensor
     ) -> torch.Tensor:
-        """Grouped BF16 ``wo_a`` bmm then ``wo_b`` over the fused output.
-
-        The inverse RoPE and the FP8 cast already happened inside the fused
-        attention kernel, so ``positions`` is unused here. On PPU ``wo_a`` is
-        a BF16 2D shard (EmulationMxfp8LinearKernel dequantized it at load
-        time), which the upstream fp8_einsum cannot consume; dequantize the
-        kernel output exactly and run the same grouped bmm the baseline
-        non-fp8 path runs (deep_gemm_fp8_o_proj's bmm branch), with no second
-        inverse RoPE. Every shape/dtype contract is asserted loudly; there is
-        no silent fallback.
-        """
+        """Project the already rotated FlashMLA output through wo_a and wo_b."""
         weight = self.wo_a.weight
         weight_scale = getattr(self.wo_a, "weight_scale", None)
+        channelwise = self._uses_channelwise_o_proj
         data, scale = attn_out.data, attn_out.scale
         dim = data.shape[2] if data.ndim == 3 else None
         # Classified before the ledger so an unrecognised layout fails with its
@@ -582,12 +599,12 @@ class PPUDeepseekV4MegaAttnAttention(DeepseekV4MegaAttnAttention):
             "dtype=%s | einsum_recipe=%s o_proj_block_size=%s | "
             "attn_out.data.shape=%s dtype=%s | attn_out.scale.shape=%s "
             "dtype=%s | n_local_groups=%s n_wv_group=%s o_lora_rank=%s D=%s "
-            "wo_a_scale_mode=%s scale_permute=%s",
+            "wo_a_scale_mode=%s scale_permute=%s channelwise_einsum=%s",
             tuple(weight.shape),
             weight.dtype,
             tuple(weight_scale.shape) if weight_scale is not None else None,
             weight_scale.dtype if weight_scale is not None else None,
-            self._einsum_recipe,
+            (1, 1, dim) if channelwise else self._einsum_recipe,
             self._o_proj_block_size,
             tuple(data.shape),
             data.dtype,
@@ -599,6 +616,7 @@ class PPUDeepseekV4MegaAttnAttention(DeepseekV4MegaAttnAttention):
             dim,
             scale_mode,
             permute_label,
+            channelwise,
         )
 
         # Batch dim of the grouped bmm is n_local_groups, per upstream's own
@@ -617,13 +635,12 @@ class PPUDeepseekV4MegaAttnAttention(DeepseekV4MegaAttnAttention):
             raise AssertionError(
                 f"fused attn_out.data dtype must be float8_e4m3fn, got {data.dtype}"
             )
-        per_token = _per_token_scale()
+        per_token = _per_token_scale(channelwise)
         expected_scale_dtype = torch.float32 if per_token else torch.int32
         if scale.dtype != expected_scale_dtype:
             raise AssertionError(
                 f"fused attn_out.scale dtype must be {expected_scale_dtype} "
-                f"({'per-token FP32' if per_token else 'packed UE8M0'} arm, "
-                f"VLLM_SAIL_FUSED_ATTN_PER_TOKEN_SCALE={int(per_token)}), "
+                f"({'per-token FP32' if per_token else 'packed UE8M0'}), "
                 f"got {scale.dtype}"
             )
         if data.ndim != 3 or data.shape[1] != self.n_wv_group:
@@ -643,8 +660,7 @@ class PPUDeepseekV4MegaAttnAttention(DeepseekV4MegaAttnAttention):
                 f"fused attn_out.scale shape {tuple(scale.shape)} != expected "
                 f"{expected_scale_shape} "
                 f"[n_local_groups={groups}, n_wv_group={self.n_wv_group}, "
-                f"data.shape={tuple(data.shape)}, "
-                f"VLLM_SAIL_FUSED_ATTN_PER_TOKEN_SCALE={int(per_token)}]"
+                f"data.shape={tuple(data.shape)}, per_token={per_token}]"
             )
         if weight.ndim != 2:
             raise AssertionError(
@@ -669,6 +685,24 @@ class PPUDeepseekV4MegaAttnAttention(DeepseekV4MegaAttnAttention):
                 f"data.shape={tuple(data.shape)}, "
                 f"scale.shape={tuple(scale.shape)}]"
             )
+
+        if channelwise:
+            assert weight_scale is not None
+            z = torch.empty(
+                (data.shape[0], groups, self.o_lora_rank),
+                dtype=torch.bfloat16,
+                device=data.device,
+            )
+            torch.ops.vllm.deepseek_v4_fp8_channel_einsum(
+                data[:, :groups],
+                scale[:, :groups],
+                weight.view(groups, self.o_lora_rank, dim),
+                weight_scale.reshape(groups, self.o_lora_rank, 1),
+                z,
+                "bhr,hdr->bhd",
+                [1, 1, dim],
+            )
+            return self._wo_b_proj(z.flatten(1))
 
         if weight.element_size() == 1:
             # Defensive branch: emulation dequant-at-load disabled or a
@@ -780,7 +814,7 @@ class PPUDeepseekV4MegaAttnAttention(DeepseekV4MegaAttnAttention):
             rope_dim=_ROPE_DIM,
             cos_sin_cache=self.rotary_emb.cos_sin_cache,
             n_wv_group=self.n_wv_group,
-            **_output_scale_args(),
+            **_output_scale_args(self._uses_channelwise_o_proj),
             q=q,
             k_cache=swa_kv_cache.unsqueeze(-2),
             indices_in_kvcache=indices,
@@ -906,7 +940,7 @@ class PPUDeepseekV4MegaAttnAttention(DeepseekV4MegaAttnAttention):
                 rope_dim=_ROPE_DIM,
                 cos_sin_cache=self.rotary_emb.cos_sin_cache,
                 n_wv_group=self.n_wv_group,
-                **_output_scale_args(),
+                **_output_scale_args(self._uses_channelwise_o_proj),
                 q=q[qs:qe],
                 kv=kv_ws.view(-1, 1, q.shape[-1]),
                 indices=combined_indices.unsqueeze(1),
