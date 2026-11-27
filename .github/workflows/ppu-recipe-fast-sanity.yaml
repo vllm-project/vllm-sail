@@ -52,7 +52,8 @@ jobs:
           trap cleanup EXIT
           trap 'exit 130' INT
           trap 'exit 143' TERM
-          git show "$SOURCE_SHA:vllm_sail/utils/deep_select.py" > "$temp_dir/deep_select.py"
+          mkdir "$temp_dir/candidate"
+          git show "$SOURCE_SHA:vllm_sail/utils/deep_select.py" > "$temp_dir/candidate/deep_select.py"
           cp scripts/ci/pr472_fp32_probe.py "$temp_dir/probe.py"
           image_digest="@$PPU_CI_RUNTIME_IMAGE_DIGEST"
           image_ref="${PPU_CI_RUNTIME_IMAGE%:*}$image_digest"

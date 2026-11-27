@@ -16,7 +16,7 @@ EXPECTED_SOURCE_HASH = "f56a3cfa8ac3a1c0eb27454892c9b23f2d06e4559360eabafa819f0e
 
 def main():
     print("PROBE_STAGE load_candidate", flush=True)
-    spec = importlib.util.spec_from_file_location("pr472_deep_select", "/probe/deep_select.py")
+    spec = importlib.util.spec_from_file_location("pr472_deep_select", "/probe/candidate/deep_select.py")
     deep_select = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(deep_select)
     source_hash = hashlib.sha256(Path(deep_select.__file__).read_bytes()).hexdigest()
@@ -28,6 +28,9 @@ def main():
     assert "m890" in device_name.casefold(), ("requires M890", device_name)
 
     print("PROBE_STAGE load_wheel", flush=True)
+    wheel_spec = importlib.util.find_spec("deep_select")
+    if wheel_spec and wheel_spec.origin:
+        assert not Path(wheel_spec.origin).is_relative_to("/probe"), "probe must import the installed wheel"
     interface = deep_select._wheel()
     if interface is None:
         print("PROBE_STAGE wheel_interface_missing", flush=True)
@@ -84,9 +87,9 @@ if __name__ == "__main__":
         main()
     except Exception as error:
         print(f"PROBE_EXCEPTION {type(error).__name__}", flush=True)
-        if isinstance(error, ModuleNotFoundError) and re.fullmatch(r"[a-zA-Z0-9_.]+", error.name or ""):
+        if isinstance(error, ImportError) and re.fullmatch(r"[a-zA-Z0-9_.]+", error.name or ""):
             print(f"PROBE_MODULE {error.name}", flush=True)
-        for marker in ("undefined symbol", "cannot open shared object file", "supports bfloat16 input only"):
+        for marker in ("undefined symbol", "cannot open shared object file", "cannot import name", "supports bfloat16 input only"):
             if marker in str(error):
                 print(f"PROBE_DIAGNOSTIC {marker}", flush=True)
         raise
