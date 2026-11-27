@@ -14,7 +14,7 @@ from collections import Counter
 from contextlib import suppress
 from pathlib import Path, PurePosixPath
 
-from tests.upstream_reuse._reuse_harness import RUNTIME_BOOTSTRAP, UpstreamRunner
+from tests.upstream_reuse._reuse_harness import UpstreamRunner
 
 HERE = Path(__file__).resolve().parent
 MODULE_SECONDS = 240
@@ -76,15 +76,16 @@ def run_module(
     env = os.environ.copy()
     env.update(
         PYTHONPATH=os.pathsep.join((str(view), str(HERE))),
-        VLLM_UPSTREAM_REUSE_TARGET="890p",
         HF_HUB_DISABLE_IMPLICIT_TOKEN="1",
         SAIL_ASSET_DEFINITIONS=json.dumps(definitions),
         SAIL_ASSET_EVENTS=str(output / "events.jsonl"),
     )
+    # ppu_upstream_reuse.sh verifies the wheels and device in a separate process.
+    # Leave CUDA uninitialized here for upstream tests that fork before using it.
     command = [
         sys.executable,
-        "-c",
-        RUNTIME_BOOTSTRAP,
+        "-m",
+        "pytest",
         module,
         "-p",
         "_sail_asset_cases",

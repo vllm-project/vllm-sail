@@ -27,12 +27,7 @@ def test_asset_probe_requires_pinned_manifest():
         run.load_modules(run.HERE / "manifest.json", "0" * 40)
 
 
-def test_asset_probe_keeps_parameter_ids_and_reasons(tmp_path, monkeypatch):
-    monkeypatch.setattr(
-        run,
-        "RUNTIME_BOOTSTRAP",
-        "import pytest, sys; sys.exit(pytest.main(sys.argv[1:]))",
-    )
+def test_asset_probe_keeps_parameter_ids_and_reasons(tmp_path):
     test_dir = tmp_path / "tests"
     test_dir.mkdir()
     (test_dir / "conftest.py").write_text(
