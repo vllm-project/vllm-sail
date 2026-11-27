@@ -1,21 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
-"""MiniMax-M3 with the ``SupportsQuant`` interface.
-
-The fork's *only* change to MiniMax-M3
-(``vllm/models/minimax_m3/nvidia/model.py``, +3/-2) is adding
-``SupportsQuant`` to the two public classes so the model works with
-quantization configs such as the plugin's ``mixed_precision_w4``. It is not
-handled by quantization utils: it is a model-class interface change.
-
-Rather than patch the class bases, the plugin registers subclasses that add
-the interface through the documented ``ModelRegistry.register_model`` API.
-``SupportsQuant`` sits after the upstream classes in the MRO, so its
-``__new__`` hook runs and the upstream behaviour is otherwise untouched.
-"""
+"""Registered MiniMax-M3 subclasses with quantization-aware module names."""
 
 from __future__ import annotations
 
 from vllm.model_executor.models.interfaces import SupportsQuant
+from vllm.model_executor.models.utils import WeightsMapper
 from vllm.models.minimax_m3.nvidia.model import (
     MiniMaxM3SparseForCausalLM as _UpstreamMiniMaxM3SparseForCausalLM,
 )
@@ -31,4 +20,9 @@ class MiniMaxM3SparseForCausalLM(_UpstreamMiniMaxM3SparseForCausalLM, SupportsQu
 class MiniMaxM3SparseForConditionalGeneration(
     _UpstreamMiniMaxM3SparseForConditionalGeneration, SupportsQuant
 ):
-    """Upstream MiniMax-M3 VL entry point + the fork's SupportsQuant."""
+    """Also map bare vision MLP module names in quantization configs."""
+
+    hf_to_vllm_mapper = (
+        _UpstreamMiniMaxM3SparseForConditionalGeneration.hf_to_vllm_mapper
+        | WeightsMapper(orig_to_new_suffix={".mlp.fc1": ".fc1", ".mlp.fc2": ".fc2"})
+    )
