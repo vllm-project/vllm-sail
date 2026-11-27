@@ -81,6 +81,10 @@ _ATTENTION_TARGETS = (
         "FlashMLASparseMetadataBuilder.__init__",
     ),
     (
+        "vllm.v1.attention.backends.mla.flashmla_sparse",
+        "FlashMLASparseImpl._fp8_flash_mla_kernel",
+    ),
+    (
         "vllm.v1.attention.backends.mla.prefill.flash_attn",
         "FlashAttnPrefillBackend.__init__",
     ),
@@ -565,3 +569,26 @@ def test_flash_attn_package_exports_the_ppu_api(installed) -> None:
     assert package.flash_attn_varlen_func is interface.flash_attn_varlen_func
     assert package.get_scheduler_metadata is interface.get_scheduler_metadata
     assert package.compile_flash_attn_varlen_func_from_specs is None
+
+
+@pytest.mark.requires_runtime
+def test_sparse_fp8_decode_patch_registration_contract(installed):
+    from vllm.v1.attention.backends.mla import flashmla_sparse as backend
+
+    from vllm_sail.patch.enhancement.attention import flashmla_sparse_backend as plugin
+    from vllm_sail.patch.utils import original_of, patch
+
+    target = "FlashMLASparseImpl._fp8_flash_mla_kernel"
+    full_target = f"{plugin._MODULE}.{target}"
+    replacement = backend.FlashMLASparseImpl._fp8_flash_mla_kernel
+    assert replacement is plugin.fp8_flash_mla_kernel
+    assert (
+        original_of(replacement, full_target) is plugin._upstream_fp8_flash_mla_kernel
+    )
+    with pytest.raises(RuntimeError, match="already patched"):
+        patch(
+            plugin._MODULE,
+            target,
+            reason="Exercise the sparse FP8 double-install guard.",
+            remove_when="This test completes.",
+        )(replacement)

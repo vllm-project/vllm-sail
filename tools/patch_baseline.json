@@ -376,6 +376,7 @@
   "vllm.v1.attention.backends.mla.flashmla.FlashMLAMetadataBuilder._build_decode": "2b3c68f8dbc573f979a6b58424ee50c04322bfcc333b46a6c5f55dabb620b8cf",
   "vllm.v1.attention.backends.mla.flashmla_sparse.FlashMLASparseBackend.supports_combination": "d10c87843af0f215c86a1615ce393050570a2d45a9d67727697a4905da5609ac",
   "vllm.v1.attention.backends.mla.flashmla_sparse.FlashMLASparseBackend.supports_compute_capability": "e81f5251f5cab5c1a77a4ff811ac25b02c5f457d80a0796d393fe64fc8a7f169",
+  "vllm.v1.attention.backends.mla.flashmla_sparse.FlashMLASparseImpl._fp8_flash_mla_kernel": "8562be5d3b2028b6cf554a19b5840c1dfd19c70c0a5a48a7a596b247753520d4",
   "vllm.v1.attention.backends.mla.flashmla_sparse.FlashMLASparseMetadataBuilder.__init__": "19567a8302c3b22a9fd0b2a30f8f24679a9ccba29aea9bfe8a53fb113703c661",
   "vllm.v1.attention.backends.mla.indexer.DeepseekV32IndexerMetadataBuilder.__init__": "8a90a7a8ba7c946d76ea876e5269f47b217efcf8f8680b6ce56c2babf2e07193",
   "vllm.v1.attention.backends.mla.indexer.DeepseekV32IndexerMetadataBuilder._prepare_decode_tensors": "3b232bdbaebccf754664046cea5977061400d492b04f2ac78ed5e0cafd45d9cf",

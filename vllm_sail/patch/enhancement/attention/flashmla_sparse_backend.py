@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """PPU patches for ``vllm.v1.attention.backends.mla.flashmla_sparse``.
 
-Three PPU-gated fork changes, applied by delegation:
+PPU-gated sparse FlashMLA adaptations:
 
 * ``FlashMLASparseBackend.supports_compute_capability`` accepts capability
   majors 8, 9 and 10 on PPU (upstream: 9 and 10).
@@ -11,6 +11,10 @@ Three PPU-gated fork changes, applied by delegation:
   ``max_num_sm_parts`` on PPU ("PPU uses full SM count"). That value only feeds
   the ``tile_scheduler_metadata_buffer`` allocation, so the upstream ``__init__``
   runs first and the buffer is re-allocated with the PPU size afterwards.
+* ``FlashMLASparseImpl._fp8_flash_mla_kernel`` passes the native query head
+  count to the PPU kernel instead of allocating and computing zero-padded
+  64/128-head queries. Metadata construction retains its upstream DCP checks;
+  the PPU scheduler initializes from the actual query shape at the kernel call.
 """
 
 from __future__ import annotations
@@ -32,6 +36,9 @@ _upstream_supports_combination = (
     _flashmla_sparse_backend.FlashMLASparseBackend.supports_combination
 )
 _upstream_builder_init = _flashmla_sparse_backend.FlashMLASparseMetadataBuilder.__init__
+_upstream_fp8_flash_mla_kernel = (
+    _flashmla_sparse_backend.FlashMLASparseImpl._fp8_flash_mla_kernel
+)
 
 
 @patch(
@@ -154,3 +161,58 @@ def builder_init(
             dtype=torch.int32,
             device=device,
         )
+
+
+@patch(
+    _MODULE,
+    "FlashMLASparseImpl._fp8_flash_mla_kernel",
+    reason=(
+        "PPU sparse FP8 FlashMLA accepts native query head counts, including "
+        "h_q < 64. Upstream pads queries to 64/128 heads for GPU kernels, "
+        "adding an allocation, a copy and redundant attention work on PPU. "
+        "Bypass that padding at the kernel boundary so the upstream metadata "
+        "builder and its DCP validation remain unchanged."
+    ),
+    remove_when=(
+        "upstream FlashMLASparseImpl._fp8_flash_mla_kernel skips query head "
+        "padding on PPU or exposes a platform hook at the kernel boundary."
+    ),
+)
+def fp8_flash_mla_kernel(
+    self,
+    q: torch.Tensor,
+    kv_c_and_k_pe_cache: torch.Tensor,
+    topk_indices: torch.Tensor,
+    kernel_metadata: _flashmla_sparse_backend.FlashMLASparseMetadata.FP8KernelMetadata,
+    topk_length: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    if not current_platform.is_ppu():
+        return _upstream_fp8_flash_mla_kernel(
+            self, q, kv_c_and_k_pe_cache, topk_indices, kernel_metadata,
+            topk_length=topk_length,
+        )
+
+    # PPU MODIFICATION: begin
+    # Preserve the upstream sparse FP8 call contract, but pass q directly.
+    # Its runtime head count also includes any heads gathered by DCP. PPU's
+    # FlashMLASchedMeta initializes lazily from that shape; no padding or
+    # output/LSE head slicing is needed. Resolve the provider on the upstream
+    # module so the FlashMLA op patch and loaded-alias rebinding stay effective.
+    return _flashmla_sparse_backend.flash_mla_with_kvcache(
+        q=q,
+        k_cache=kv_c_and_k_pe_cache.view(torch.uint8).unsqueeze(-2),
+        block_table=kernel_metadata.dummy_block_table,
+        head_dim_v=512,
+        cache_seqlens=kernel_metadata.cache_lens,
+        # Length-dependent schedules cannot reuse the shared metadata.
+        tile_scheduler_metadata=(
+            kernel_metadata.scheduler_metadata
+            if topk_length is None
+            else _flashmla_sparse_backend.get_mla_metadata()[0]
+        ),
+        is_fp8_kvcache=True,
+        indices=topk_indices,
+        softmax_scale=self.softmax_scale,
+        topk_length=topk_length,
+    )
+    # PPU MODIFICATION: end
