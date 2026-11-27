@@ -50,6 +50,7 @@ def installed(modules):
             {
                 "torch": NS(bfloat16="bf16", float32="fp32"),
                 "is_deep_select_available": lambda: True,
+                "_wheel_supports_fp32": lambda: True,
             },
         ),
         _wheel=lambda: NS(get_stride_requirement=lambda: (512, 32)),
@@ -65,7 +66,7 @@ def installed(modules):
         takes_bf16_logits = original
         resolve_backend = original
 
-    modules("torch", int32="int32")
+    modules("torch", int32="int32", bfloat16="bf16")
     modules("vllm.platforms", current_platform=platform)
     provider = modules(
         PROVIDER,
@@ -150,7 +151,7 @@ def test_preloaded_consumers_get_all_matching_replacements(
     assert p.has_deep_select()
     assert p.get_deep_select_stride_requirement() == (512, 32)
     assert p.is_deep_select_supported(NS(dtype="bf16", ndim=2, shape=(2, 128)), 64)
-    assert not p.is_deep_select_supported(NS(dtype="fp32", ndim=2, shape=(2, 128)), 64)
+    assert p.is_deep_select_supported(NS(dtype="fp32", ndim=2, shape=(2, 128)), 64)
     assert not p.is_deep_select_supported(NS(dtype="fp16"), 64)
     assert installed.provider.SparseIndexerTopk.resolve_backend is p.resolve_backend
     for module, name, replacement in (
@@ -180,10 +181,11 @@ def test_preloaded_consumers_get_all_matching_replacements(
         load_patch(PATCH)
 
 
+@pytest.mark.parametrize("dtype", ["bf16", "fp32"])
 def test_upstream_entry_returns_sail_indices_and_preserves_optional_arguments(
-    installed,
+    installed, dtype
 ):
-    logits = NS(dtype="bf16")
+    logits = NS(dtype=dtype)
     assert (
         installed.patch.deep_select_topk(logits, 64, indices_dtype="int64")
         == "sail-indices"
@@ -197,33 +199,38 @@ def test_cached_topk_objects_do_not_retain_cuda_only_support_flags(installed, ba
     topk = installed.provider.SparseIndexerTopk
     bf16 = NS(dtype="bf16", ndim=2, shape=(2, 128))
     fp32 = NS(dtype="fp32", ndim=2, shape=(2, 128))
-    assert topk.takes_bf16_logits(cached, bf16, 64, 2)
-    assert not topk.takes_bf16_logits(cached, fp32, 64, 2)
+    fp16 = NS(dtype="fp16", ndim=2, shape=(2, 128))
+    assert topk.takes_bf16_logits(cached, bf16, 64, 2) is True
+    assert topk.takes_bf16_logits(cached, fp32, 64, 2) is False
     assert topk.resolve_backend(cached, bf16, 64, 2) == "deep_select"
+    assert topk.resolve_backend(cached, fp32, 64, 2) == "deep_select"
     if backend == "auto":
-        assert topk.resolve_backend(cached, fp32, 64, 2) == "cuda-result"
+        assert topk.resolve_backend(cached, fp16, 64, 2) == "cuda-result"
     else:
         with pytest.raises(RuntimeError, match="never rounded"):
-            topk.resolve_backend(cached, fp32, 64, 2)
+            topk.resolve_backend(cached, fp16, 64, 2)
 
 
 @pytest.mark.parametrize(
-    "dtype,backend,expected",
+    "dtype,backend,fp32_wheel,expected",
     [
-        ("bf16", "auto", "deep_select"),
-        ("bf16", "deep_select", "deep_select"),
-        ("fp32", "auto", "auto"),
-        ("fp32", "deep_select", "per_row"),
+        ("bf16", "auto", True, "deep_select"),
+        ("bf16", "deep_select", True, "deep_select"),
+        ("fp32", "auto", True, "deep_select"),
+        ("fp32", "deep_select", True, "deep_select"),
+        ("fp32", "auto", False, "auto"),
+        ("fp32", "deep_select", False, "per_row"),
     ],
 )
-def test_step5_preserves_scores_with_the_bf16_wheel(
-    installed, dtype, backend, expected
+def test_step5_selects_deepselect_or_falls_back_without_rounding(
+    dtype, backend, fp32_wheel, expected
 ):
+    """Step5 routes BF16/FP32 to DeepSelect when supported and keeps FP32 fallback."""
     scores = NS(dtype=dtype, ndim=2, shape=(2, 64))
     scores.float = lambda: scores
     calls = []
     sail = NS(
-        can_use_deep_select=installed.patch._sail.can_use_deep_select,
+        can_use_deep_select=lambda x, k: x.dtype == "bf16" or fp32_wheel,
         warn_deep_select_fallback=lambda: None,
     )
     select = function(

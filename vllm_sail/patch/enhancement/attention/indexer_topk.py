@@ -16,7 +16,7 @@ from vllm_sail.utils import deep_select as _sail
 _AFFECTED = ">=0.34.0,<0.35.0"
 _MODULE = "vllm.model_executor.layers.indexer_topk"
 _SPARSE_MODULE = "vllm.model_executor.kernels.attention.dsa.sparse_mqa_logits"
-_REASON = "PPU SM89 uses the SAIL BF16 DeepSelect wheel instead of vllm._deepselect_C."
+_REASON = "PPU SM89 uses the SAIL BF16/FP32 DeepSelect wheel instead of vllm._deepselect_C."
 _REMOVE_WHEN = "vLLM exposes a platform-selectable DeepSelect provider and capability hook."
 
 _original_has = _sparse.has_deep_select
@@ -108,13 +108,14 @@ def deep_select_topk(
 def takes_bf16_logits(self, logits, topk_tokens, num_rows) -> bool:
     # The upstream flags (self._has_deep_select, _HAS_DEEP_SELECT_C) describe
     # the CUDA C extension and are cached at construction, so on PPU they are
-    # always False: the caller then upcasts the BF16 logits to FP32, which the
-    # SAIL wheel rejects in resolve_backend. Resolve at call time instead.
-    # "auto" is included so PPU prefers DeepSelect without an explicit
-    # --kernel-config; when the wheel or shape does not qualify, upstream's
-    # FP32 chain still runs.
+    # always False: the caller then upcasts the BF16 logits to FP32 instead of
+    # keeping BF16 for DeepSelect. Resolve at call time instead, while keeping
+    # non-BF16 inputs False to match upstream's takes_bf16_logits contract.
     if current_platform.is_ppu() and self._backend in ("auto", "deep_select"):
-        return _sail.can_use_deep_select(logits, topk_tokens)
+        return (
+            logits.dtype == torch.bfloat16
+            and _sail.can_use_deep_select(logits, topk_tokens)
+        )
     return _original_takes_bf16(self, logits, topk_tokens, num_rows)
 
 
@@ -133,7 +134,7 @@ def resolve_backend(self, logits, topk_tokens, num_rows):
             return "deep_select"
         if self._backend == "deep_select":
             raise RuntimeError(
-                "SAIL DeepSelect requires an enabled wheel, PPU SM89+, BF16 "
+                "SAIL DeepSelect requires an enabled wheel, PPU SM89+, BF16/FP32 "
                 "logits and a supported shape; FP32 scores are never rounded"
             )
     return _original_resolve(self, logits, topk_tokens, num_rows)
