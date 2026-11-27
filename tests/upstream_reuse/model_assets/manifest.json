@@ -1,10 +1,11 @@
 {
   "schema": 1,
-  "upstream_sha": "047f6bfbb22cf4815162125f107e6dd90c72478a",
+  "upstream_sha": "e83d82a46b50a27534584a8bf4c6dd2d2cb9eeb5",
   "modules": {
     "tests/basic_correctness/cpu_offload/test_cpu_offload.py": [
       "test_mrv2_weight_offloading",
-      "test_tower_weight_offloading"
+      "test_tower_weight_offloading",
+      "test_transformers_backend_weight_offloading"
     ],
     "tests/basic_correctness/memory/cumem/test_cumem.py": [
       "test_release_kv_cache_memory_preserves_generation",
@@ -19,6 +20,7 @@
       "test_deep_sleep_compressed_tensors_kv_scales",
       "test_deep_sleep_fp8_kvcache",
       "test_deep_sleep_fp8_kvcache_with_undefined_remap",
+      "test_deep_sleep_keeps_preserved_parameters",
       "test_deep_sleep_lora",
       "test_deep_sleep_lora_tp2",
       "test_end_to_end",
@@ -38,6 +40,7 @@
       "test_bfcl_dataset_translates_schema_and_attaches_tools"
     ],
     "tests/benchmarks/test_custom_dataset_seed.py": [
+      "test_bench_dataset_seed_propagates",
       "test_custom_dataset_same_seed_is_deterministic",
       "test_custom_dataset_seed_propagates"
     ],
@@ -65,14 +68,17 @@
     ],
     "tests/benchmarks/test_serve_cli.py": [
       "test_bench_serve",
-      "test_bench_serve_chat"
+      "test_bench_serve_chat",
+      "test_bench_serve_warmups_do_not_prime_prefix_cache"
     ],
     "tests/benchmarks/test_skip_tokenizer_init.py": [
       "test_main_async_skip_tokenizer_init_does_not_raise"
     ],
     "tests/benchmarks/test_throughput_cli.py": [
       "test_get_requests_allows_multimodal_on_plain_vllm_backend",
+      "test_get_requests_custom_audio_output_len",
       "test_get_requests_hf_dataset_with_mm_processor_args",
+      "test_get_requests_prefix_repetition_output_len",
       "test_get_requests_random_mm_with_mm_processor_args",
       "test_get_requests_resolves_mmvu"
     ],
@@ -162,12 +168,17 @@
       "test_enforce_eager",
       "test_enforce_eager_jit_warmup",
       "test_no_compilation",
+      "test_platform_adaptive_capture_grid",
+      "test_platform_capture_grid_cannot_exceed_its_limit",
+      "test_platform_capture_policy_preserves_users_and_drafter",
       "test_real_vllm_config_caps_widest_ngram_decode_batch",
+      "test_sm100_capture_defaults_are_cuda_only",
       "test_stock_torch_compile",
       "test_torch_compile_disable",
       "test_use_cudagraphs"
     ],
     "tests/compile/test_rotary_embedding_compile.py": [
+      "test_rotary_embedding_kernel_lowering_has_no_copies",
       "test_rotary_embedding_torch_compile_with_custom_op"
     ],
     "tests/config/test_model_arch_config.py": [
@@ -177,12 +188,21 @@
     "tests/config/test_speculative_draft_limits_max_model_len.py": [
       "test_draft_limit_applies_before_hybrid_mamba_block_size",
       "test_draft_model_limits_max_model_len",
-      "test_eagle_draft_limits_max_model_len_unless_resized"
+      "test_eagle_draft_limits_max_model_len_unless_resized",
+      "test_yarn_draft_limits_max_model_len_to_its_rotary_cache"
     ],
     "tests/config/test_speculative_draft_max_position_embeddings.py": [
       "test_dflash_draft_inherits_target_max_model_len",
       "test_eagle_draft_inherits_target_max_model_len",
-      "test_independent_draft_model_keeps_its_own_limit"
+      "test_independent_draft_model_keeps_its_own_limit",
+      "test_mtp_draft_inherits_target_max_model_len"
+    ],
+    "tests/detokenizer/test_decode_stream_seed.py": [
+      "test_empty_and_missing_prompt",
+      "test_prompt_ending_mid_character_keeps_full_prompt_seed",
+      "test_prompt_tail_streams_same_text_as_full_prompt",
+      "test_random_token_ids_stream_same_text_as_full_prompt",
+      "test_seed_length_is_independent_of_prompt_length"
     ],
     "tests/detokenizer/test_disable_detokenization.py": [
       "test_computed_prefix_blocks"
@@ -202,6 +222,22 @@
     "tests/distributed/test_elastic_ep.py": [
       "test_elastic_ep_scaling"
     ],
+    "tests/distributed/test_eplb_execute.py": [
+      "test_async_eplb_worker_stops_before_model_teardown"
+    ],
+    "tests/distributed/test_eplb_extension_hooks.py": [
+      "test_async_commit_updates_maps_before_buffer_acknowledgement",
+      "test_async_nccl_restrictions_remain",
+      "test_balancedness_interval_must_be_positive",
+      "test_builtin_platform_rejects_unknown_names",
+      "test_explicit_builtin_communicator_is_preserved",
+      "test_llm_rejects_async_nccl_communicator",
+      "test_platform_can_reject_eplb_even_on_cuda",
+      "test_platform_can_validate_out_of_tree_names",
+      "test_policy_receives_extended_stats_without_losing_inputs",
+      "test_sync_commit_updates_maps_before_device_work",
+      "test_xpu_preserves_eplb_and_xccl_auto_selection"
+    ],
     "tests/distributed/test_kimi_linear_context_parallel.py": [
       "test_kimi_k3_dcp_partial_prefix_reuse",
       "test_kimi_linear_dcp_tiny"
@@ -209,6 +245,12 @@
     "tests/distributed/test_kvlayout.py": [
       "test_get_kv_connector_cache_layout_with_multi_connector",
       "test_get_kv_connector_cache_layout_with_nixl_connector"
+    ],
+    "tests/distributed/test_pipeline_parallel.py": [
+      "test_pp_tied_word_embeddings"
+    ],
+    "tests/distributed/test_pp_cudagraph.py": [
+      "test_pp_cudagraph_mode_differs_across_stages"
     ],
     "tests/distributed/test_ray_v2_executor.py": [
       "test_ray_v2_bundle_indices_env",
@@ -244,6 +286,7 @@
       "TestDpDeviceIdSharding::test_dp_rank_shards_user_assigned_gpu_ids",
       "TestDpDeviceIdSharding::test_dp_supervisor_device_ids_stay_env_relative",
       "TestDpDeviceIdSharding::test_dp_supervisor_shards_user_device_ids",
+      "test_attention_backend_rejects_torch_sdpa",
       "test_attention_config",
       "test_cloud_storage_tokenizer_skips_get_model_path",
       "test_cloud_storage_uri_skips_get_model_path",
@@ -333,6 +376,11 @@
       "test_joint_matches_per_question_on_a_clear_case",
       "test_joint_one_canvas"
     ],
+    "tests/entrypoints/generate/structured_decisions/test_slot_decision_e2e.py": [
+      "test_decisions",
+      "test_systemone",
+      "test_systemone_refusals"
+    ],
     "tests/entrypoints/generate/structured_decisions/test_strategies.py": [
       "test_bad_top_level_fields_are_a_400",
       "test_d3_reads_each_question_with_its_own_codes",
@@ -374,6 +422,7 @@
     ],
     "tests/entrypoints/launchers/api_server/test_multi_api_servers.py": [
       "test_completion_streaming",
+      "test_scheduler_gauges_before_first_request",
       "test_single_completion"
     ],
     "tests/entrypoints/launchers/render/test_app_state.py": [
@@ -401,13 +450,15 @@
       "test_multi_chat"
     ],
     "tests/entrypoints/llm/test_collective_rpc.py": [
-      "test_collective_rpc"
+      "test_collective_rpc",
+      "test_model_inspection_requires_explicit_call"
     ],
     "tests/entrypoints/llm/test_generate.py": [
       "test_log_stats",
       "test_max_model_len",
       "test_multiple_priority",
       "test_multiple_sampling_params",
+      "test_rejects_torch_sdpa_for_decoder",
       "test_single_prompt_priority"
     ],
     "tests/entrypoints/llm/test_gpu_utilization.py": [
@@ -417,7 +468,8 @@
       "test_empty_prompt",
       "test_out_of_vocab_token",
       "test_out_of_vocab_token_skip_tokenizer_init",
-      "test_require_mm_embeds"
+      "test_require_mm_embeds",
+      "test_token_past_model_vocab"
     ],
     "tests/entrypoints/llm/test_struct_output_generate.py": [
       "test_guidance_ignore_eos_with_speculative_decoding",
@@ -464,7 +516,8 @@
       "test_online_audio_in_video_multi_videos"
     ],
     "tests/entrypoints/multimodal/openai/chat_completion/test_chat_completion_with_image_embeds.py": [
-      "test_chat_completions_with_image_embeds"
+      "test_chat_completions_with_image_embeds",
+      "test_unreadable_image_embeds_returns_bad_request"
     ],
     "tests/entrypoints/multimodal/openai/chat_completion/test_chat_completion_with_mixed_audio_embeds.py": [
       "test_prompt_embeds_plus_audio_embeds",
@@ -517,8 +570,10 @@
       "test_batched_chat_completions_logprob_token_ids",
       "test_batched_chat_completions_logprobs_not_token_id_placeholders",
       "test_batched_chat_completions_prompt_tokens_details",
+      "test_batched_chat_completions_rejects_too_many_conversations",
       "test_batched_chat_completions_return_tokens_as_token_ids",
-      "test_batched_chat_completions_with_json_schema"
+      "test_batched_chat_completions_with_json_schema",
+      "test_inference_invalid_model_error_is_bounded"
     ],
     "tests/entrypoints/openai/chat_completion/test_chat.py": [
       "test_chat_completion_n_equals_1",
@@ -673,6 +728,9 @@
       "test_lm_eval_accuracy_v1_engine"
     ],
     "tests/entrypoints/openai/decisions/test_decisions_e2e.py": [
+      "test_decisions_benchmark_rejects_invalid_requests",
+      "test_decisions_custom_benchmark_does_not_wrap_prompt",
+      "test_openai_decisions_predicate_matches_systemone_noul",
       "test_openai_decisions_rejects_images",
       "test_openai_decisions_text_questions"
     ],
@@ -712,6 +770,15 @@
       "test_system_prompt_override_no_duplication",
       "test_system_prompt_structured_content",
       "test_web_search"
+    ],
+    "tests/entrypoints/openai/responses/test_harmony_logprobs.py": [
+      "test_final_output_carries_logprobs",
+      "test_no_logprobs_requested",
+      "test_reasoning_delta_ignores_logprobs",
+      "test_streaming_events_carry_logprobs",
+      "test_streaming_matches_non_streaming",
+      "test_text_logprobs_cover_only_output_text",
+      "test_token_bytes_rejoin_split_character"
     ],
     "tests/entrypoints/openai/responses/test_mcp_tools.py": [
       "TestMCPEnabled::test_mcp_tool_calling_streaming_types",
@@ -860,12 +927,16 @@
     "tests/entrypoints/pooling/embed/test_online_dimensions.py": [
       "test_matryoshka"
     ],
+    "tests/entrypoints/pooling/embed/test_online_dual_encoder.py": [
+      "test_dual_encoder_chat_text_matches_input"
+    ],
     "tests/entrypoints/pooling/embed/test_online_long_text.py": [
       "test_batch_long_text_embedding",
       "test_chunked_processing_response_format",
       "test_chunked_vs_normal_consistency",
       "test_long_text_embedding_1500_chars",
-      "test_long_text_embedding_2500_chars"
+      "test_long_text_embedding_2500_chars",
+      "test_pooling_endpoint_with_chunked_processing"
     ],
     "tests/entrypoints/pooling/embed/test_online_vision.py": [
       "test_chat_image_base64_request",
@@ -923,7 +994,8 @@
       "test_classify",
       "test_max_tokens_per_doc",
       "test_n_to_n",
-      "test_pooling_params"
+      "test_pooling_params",
+      "test_score_content_format_override_matches_classify"
     ],
     "tests/entrypoints/pooling/scoring/test_cross_encoder_online.py": [
       "test_basic",
@@ -948,6 +1020,7 @@
       "test_rerank_api_instruction_field",
       "test_rerank_api_instruction_field_matches_chat_template_kwargs",
       "test_rerank_api_queries_str_documents_list",
+      "test_rerank_preserves_structured_text_and_image",
       "test_score_api_instruction_field",
       "test_score_api_queries_list_documents_list",
       "test_score_api_queries_str_documents_image_base64_content",
@@ -956,6 +1029,16 @@
       "test_score_api_queries_str_documents_list",
       "test_score_api_queries_str_documents_str",
       "test_score_api_queries_str_documents_text_content"
+    ],
+    "tests/entrypoints/pooling/scoring/test_io_processor_unit.py": [
+      "test_offline_scoring_uses_default_template_unless_overridden",
+      "test_pooling_workers_share_only_their_request_media_budget",
+      "test_scoring_detects_structured_content_with_saved_template",
+      "test_scoring_template_keeps_images_distinct_from_literal_placeholder_text",
+      "test_scoring_text_limit_is_independent_of_adjacent_block_boundaries",
+      "test_scoring_text_limits_share_budget_across_blocks_and_keep_images",
+      "test_string_scoring_templates_keep_model_placeholders",
+      "test_truncation_keeps_jinavl_score_token"
     ],
     "tests/entrypoints/pooling/scoring/test_late_interaction_offline.py": [
       "test_1_to_1",
@@ -1132,6 +1215,8 @@
       "test_stream_parsed_matches_batch_tool_call",
       "test_stream_parsed_missing_chat_request_rejected",
       "test_stream_parsed_missing_prompt_token_ids_rejected",
+      "test_stream_parsed_usage_details",
+      "test_stream_parsed_usage_details_n_gt_1_no_reasoning_tokens",
       "test_streaming_chat_derender_roundtrip",
       "test_streaming_completion_derender_roundtrip",
       "test_streaming_derender_invalid_body_returns_400",
@@ -1146,29 +1231,38 @@
       "test_tokenize_matches_render_for_multimodal_input"
     ],
     "tests/entrypoints/scale_out/token_in_token_out/test_serving_multimodal_tokens.py": [
+      "test_content_parts_before_features_is_rejected",
       "test_content_parts_generates_tokens",
       "test_content_parts_streaming",
+      "test_features_with_content_parts",
       "test_render_to_generate_roundtrip"
     ],
     "tests/entrypoints/scale_out/token_in_token_out/test_serving_tokens.py": [
       "test_abort_requests_is_served_without_tokens_only",
+      "test_bad_words_rejected_without_tokenizer",
       "test_derender_logprob_request_override",
+      "test_derender_mode_usage_reports_reasoning_tokens",
       "test_derender_mode_with_parser_matches_chat_completions",
       "test_derender_mode_without_parser_returns_text_message",
       "test_generate_defaults_max_tokens_when_omitted",
       "test_generate_endpoint",
+      "test_generate_explicit_null_max_tokens_respects_server_cap",
       "test_generate_logprobs",
+      "test_generate_priority_header_overrides_body",
+      "test_generate_priority_is_bounded_to_int32",
       "test_generate_prompt_token_id_logprobs",
       "test_generate_rejects_min_tokens_above_filled_max_tokens",
+      "test_generate_rejects_min_tokens_above_server_cap",
       "test_generate_returns_all_choices_when_n_greater_than_one",
       "test_generate_sampling_mask",
       "test_generate_stream",
+      "test_generate_stream_force_include_usage",
       "test_generate_with_lora_adapter",
       "test_render_then_generate_forwards_reasoning_ended",
       "test_render_then_generate_forwards_reasoning_parser_kwargs",
       "test_same_response_as_chat_completions",
       "test_stop_string_workflow",
-      "test_stop_strings_rejected_when_tokens_only",
+      "test_stop_strings_rejected_without_tokenizer",
       "test_stream_delivers_abort_finish_chunk",
       "test_text_mode_invalid_requests_return_400",
       "test_text_mode_matches_chat_completions",
@@ -1227,6 +1321,12 @@
     "tests/entrypoints/serve/sagemaker/test_sagemaker_handler_overrides.py": [
       "TestHandlerOverrideIntegration::test_framework_default_handlers"
     ],
+    "tests/entrypoints/serve/sagemaker/test_sagemaker_invocation_validation.py": [
+      "TestGenerateInvocationValidation::test_completion_request_rejected_by_chat_validator_is_served",
+      "TestGenerateInvocationValidation::test_invalid_field_is_reported_like_the_matching_endpoint",
+      "TestGenerateInvocationValidation::test_request_type_validator_error_is_reported",
+      "test_invalid_field_of_lower_priority_type_is_reported"
+    ],
     "tests/entrypoints/serve/sagemaker/test_sagemaker_lora_adapters.py": [
       "test_sagemaker_invocations_with_adapter",
       "test_sagemaker_load_adapter_happy_path",
@@ -1246,6 +1346,15 @@
       "test_close_session_invalidrequest",
       "test_create_session_badrequest",
       "test_session"
+    ],
+    "tests/entrypoints/serve/tokenize/test_max_tokenize_tokens.py": [
+      "test_blank_env_var_startup_and_cli_precedence",
+      "test_harmony_chat_without_tok_params_does_not_truncate",
+      "test_harmony_tokenize_and_count_tokens_max_limit",
+      "test_max_tokenize_tokens_default_uses_model_length_floor",
+      "test_max_tokenize_tokens_env_and_cli",
+      "test_tokenize_request_models_respect_max_total_tokens",
+      "test_tokenize_request_rejects_over_limit_requests"
     ],
     "tests/entrypoints/serve/tokenize/test_tokenization.py": [
       "test_detokenize",
@@ -1281,9 +1390,12 @@
       "test_basic_audio",
       "test_basic_audio_foscolo",
       "test_basic_audio_with_lora",
+      "test_diarized_json_stream_matches_non_stream",
       "test_ming_chunk_policy_prefix_cache",
       "test_ming_context",
-      "test_request_extensions_reach_prompt_and_sampling_params"
+      "test_request_extensions_reach_prompt_and_sampling_params",
+      "test_transformers_backend_audio",
+      "test_transformers_backend_diarization_spans_audio_windows"
     ],
     "tests/entrypoints/speech_to_text/transcription/test_transcription_validation_whisper.py": [
       "test_audio_prompt",
@@ -1312,7 +1424,8 @@
       "test_long_audio_request",
       "test_non_asr_model",
       "test_stream_options",
-      "test_streaming_response"
+      "test_streaming_response",
+      "test_transcription_only_model_rejects_translation"
     ],
     "tests/entrypoints/tool_parsers/test_functiongemma_tool_parser.py": [
       "test_arguments_reach_the_client",
@@ -1404,6 +1517,9 @@
       "test_default_mm_lora_succeeds_with_redundant_lora_request",
       "test_inactive_default_mm_lora"
     ],
+    "tests/lora/test_gemma4_moe_lora.py": [
+      "test_gemma4_moe_3d_expert_lora_matches_merged"
+    ],
     "tests/lora/test_gemma4_tp.py": [
       "test_gemma4_lora",
       "test_gemma4_lora_tp2",
@@ -1414,13 +1530,23 @@
       "test_gpt_oss_lora_mixed_moe_format",
       "test_gpt_oss_lora_tp2"
     ],
+    "tests/lora/test_gte_lora.py": [
+      "test_gte_lora_matches_merged"
+    ],
+    "tests/lora/test_gte_native_lora.py": [
+      "test_native_gte_lora_matches_transformers"
+    ],
     "tests/lora/test_llama_tp.py": [
       "test_llama_lora",
       "test_llama_lora_tp4",
-      "test_llama_lora_tp4_fully_sharded_loras"
+      "test_llama_lora_tp4_fully_sharded_loras",
+      "test_llama_lora_transformers_backend"
     ],
     "tests/lora/test_lora_functions.py": [
+      "test_dummy_batch_keeps_loras",
+      "test_lora_cuda_graphs_with_base_requests",
       "test_lora_functions_sync",
+      "test_memory_lora_loading_and_reload",
       "test_same_lora_name_with_different_ids"
     ],
     "tests/lora/test_lora_manager.py": [
@@ -1485,7 +1611,8 @@
     "tests/lora/test_transformers_model.py": [
       "test_ilama_lora",
       "test_ilama_lora_tp4",
-      "test_ilama_lora_tp4_fully_sharded_loras"
+      "test_ilama_lora_tp4_fully_sharded_loras",
+      "test_lora_on_input_embeddings_not_named_embed_tokens"
     ],
     "tests/lora/test_utils.py": [
       "test_get_adapter_absolute_path_huggingface",
@@ -1649,8 +1776,13 @@
       "test_layerwise_reload_is_rejected_and_keeps_weights",
       "test_loads_explicitly_named_values",
       "test_loads_local_approx_values_and_passes_through_others",
-      "test_loads_mone_checkpoint_into_compact_experts",
-      "test_tensorizer_finalizes_local_substitution_values"
+      "test_loads_mone_checkpoint_into_compact_experts"
+    ],
+    "tests/model_executor/model_loader/test_model_inspection.py": [
+      "test_backend_summary_failure_does_not_fail_the_load",
+      "test_backend_summary_groups_layers_by_backend",
+      "test_backends_are_logged_when_loading_fails",
+      "test_layer_names_collapse_indices_and_leaves"
     ],
     "tests/model_executor/model_loader/test_modelexpress_loader.py": [
       "test_modelexpress_load_format_allows_object_storage_model_weights",
@@ -1678,6 +1810,7 @@
       "test_attention_sink_deepseek_hy_loading_uses_parameter_loader",
       "test_attention_sink_layerwise_reload",
       "test_attention_sink_model_loading_shards_once",
+      "test_direct_reload_keeps_lm_head_untied",
       "test_gpt_oss_attention_sink_skips_missing_parameter",
       "test_gpt_oss_attention_sink_uses_parameter_loader",
       "test_kv_scale_reload",
@@ -1688,6 +1821,9 @@
     "tests/model_executor/model_loader/test_reload_moe_kernels.py": [
       "test_reload_keeps_moe_output"
     ],
+    "tests/model_executor/model_loader/test_reload_refit.py": [
+      "test_refit_equals_fresh"
+    ],
     "tests/model_executor/model_loader/test_sharded_state_loader.py": [
       "test_load_weights_resolves_hf_repo_id",
       "test_sharded_state_loader",
@@ -1696,17 +1832,32 @@
     ],
     "tests/model_executor/model_loader/test_weight_cache.py": [
       "test_d2d_warmup_cache_seeding",
+      "test_d2d_weight_seeding_cross_host",
+      "test_d2d_weight_seeding_same_host",
+      "test_daemon_capture_releases_registered_model_layers",
       "test_daemon_releases_cublas_workspaces",
       "test_ipc_cache_cold_start_and_warm_restart",
+      "test_ipc_cache_cold_start_and_warm_restart_pp2_mtp",
       "test_ipc_cache_cold_start_and_warm_restart_tp2_ep",
+      "test_ipc_cache_compressed_block_fp8",
+      "test_ipc_cache_compressed_fp8",
       "test_ipc_cache_key_tracks_kernel_backends",
       "test_ipc_cache_key_tracks_kv_quantization",
+      "test_ipc_cache_key_tracks_skipped_mm_components",
       "test_ipc_cache_modelopt_fp8",
       "test_ipc_cache_nvfp4_cutlass",
       "test_ipc_cache_online_blackwell",
       "test_ipc_cache_online_fp8",
+      "test_ipc_cache_rejects_daemon_without_vision_tower",
       "test_ipc_fallback_restores_memory_budget",
-      "test_ipc_rope_matching"
+      "test_ipc_rope_matching",
+      "test_mooncake_warmup_cache_store_e2e",
+      "test_preload_survives_oversized_compile_cache",
+      "test_weight_cache_backend_llm_restart"
+    ],
+    "tests/model_executor/test_flashinfer_encoder_autotune.py": [
+      "test_flashinfer_autotune_data_parallel_encoder_cache",
+      "test_flashinfer_autotune_vision_gemms"
     ],
     "tests/model_executor/test_mistral_large_3_eagle.py": [
       "test_eagle_mistral_large3_loads_weights"
@@ -1719,7 +1870,6 @@
     "tests/model_executor/test_qwen3_omni.py": [
       "test_dspark_shares_target_embedding_with_smaller_draft_vocabulary",
       "test_qwen3_dspark_accepts_draft_vocab_at_least_target",
-      "test_qwen3_dspark_rejects_incomplete_vocab_weights",
       "test_qwen3_omni_exposes_eagle3_to_its_text_backbone",
       "test_qwen3_omni_get_updates_use_audio_in_video",
       "test_qwen3_omni_text_model_collects_post_deepstack_aux_hidden_states"
@@ -1757,19 +1907,42 @@
       "test_download_weights_from_hf",
       "test_drop_checkpoint_cache_releases_local_weight_files",
       "test_dummy_e8m0_scale_is_fixed_exponent",
-      "test_dummy_fp8_weight_is_not_degenerate",
       "test_dummy_norm_weights_are_neutral",
       "test_dummy_packed_weight_gets_random_bytes",
       "test_dummy_wide_integer_param_is_untouched",
       "test_make_attention_sink_registers_loader_and_padding"
     ],
+    "tests/models/deepseek_v32/test_shardq_sequence_parallel.py": [
+      "test_shardq_keeps_tp_weights_and_projects_local_rows"
+    ],
     "tests/models/deepseek_v41/nvidia/specialized_decode/test_layers.py": [
       "test_specialized_decode_matches_the_model"
+    ],
+    "tests/models/glm5next/test_epd_metadata.py": [
+      "test_python_llm_requires_rust_for_multimodal"
+    ],
+    "tests/models/hy_v4/test_sequence_parallel.py": [
+      "test_ihc_shards_rows_and_preserves_generation"
+    ],
+    "tests/models/inkling2/test_model.py": [
+      "test_loop_serving_options_validation",
+      "test_piecewise_graphs_match_eager",
+      "test_portable_fp16_kv_config",
+      "test_released_checkpoint_quant_config",
+      "test_sm12x_logits_preserve_softcap_and_vocabulary",
+      "test_tiny_looped_model_decode_matches_prefill",
+      "test_tiny_looped_model_shared_cache",
+      "test_tiny_model_generates",
+      "test_tiny_model_lora_with_quantized_experts",
+      "test_tiny_model_routed_experts"
     ],
     "tests/models/kimi_k3/test_prefix_cache.py": [
       "test_dspark_exact_resend_reuses_prompt_checkpoint",
       "test_mooncake_resend_reuses_prompt_checkpoint",
       "test_turns_reuse_prefix_and_match_recompute"
+    ],
+    "tests/models/language/generation/test_block_bidirectional.py": [
+      "test_block_attention_matches_transformers"
     ],
     "tests/models/language/generation/test_common.py": [
       "test_models"
@@ -1778,7 +1951,6 @@
       "test_gdn_sleep_wake_no_stale_state"
     ],
     "tests/models/language/generation/test_gemma.py": [
-      "test_checkpoint_lm_head_can_override_tied_config",
       "test_dummy_loader",
       "test_gemma4_dspark_loads_confidence_head",
       "test_gemma4_per_layer_embeddings_pipeline_parallel"
@@ -1801,6 +1973,8 @@
       "test_full_cuda_graph",
       "test_mamba_cache_cg_padding",
       "test_models",
+      "test_pipeline_parallel_correctness",
+      "test_pipeline_parallel_mamba_only_stage_prefix_caching",
       "test_same_mamba_output_apc_on_vs_off",
       "test_state_cleanup",
       "test_zaya_cca_state"
@@ -1810,6 +1984,23 @@
       "test_mistral_function_calling",
       "test_mistral_symbolic_languages",
       "test_models"
+    ],
+    "tests/models/language/generation/test_nemotron_dllm.py": [
+      "test_ar_logits_and_generation",
+      "test_ar_mode_config",
+      "test_ar_mode_diffusion_detection",
+      "test_arch_in_model_registry",
+      "test_attention_backend_supports_mixed_causality",
+      "test_checkpoint_dimensions_and_rope",
+      "test_config_registration",
+      "test_diffusion_model_options_are_model_specific",
+      "test_greedy_generation",
+      "test_logits_parity",
+      "test_masked_step_sampling_semantics",
+      "test_mixed_temperature_distribution_and_logprobs",
+      "test_stochastic_rollouts",
+      "test_temperature_precedes_top_p",
+      "test_threshold_unmasking_and_commit"
     ],
     "tests/models/language/generation/test_phimoe.py": [
       "test_models"
@@ -1888,7 +2079,7 @@
     "tests/models/language/pooling/test_nomic_max_model_len.py": [
       "test_default",
       "test_set_max_model_len_legal",
-      "test_use_rope_scaling_legal"
+      "test_use_rope_parameters_legal"
     ],
     "tests/models/language/pooling/test_pooler_config_init_behaviour.py": [
       "test_classify_models_using_activation",
@@ -1972,13 +2163,21 @@
       "test_rerank_models_mteb"
     ],
     "tests/models/minimax_m3/test_index_cache_overrides.py": [
+      "test_index_cache_engine",
+      "test_index_cache_registration",
       "test_text_config_overrides_take_effect",
       "test_top_level_overrides_are_rejected"
+    ],
+    "tests/models/multimodal/generation/test_audio_encoder_cudagraph.py": [
+      "test_qwen3_asr_audio_encoder_cudagraph"
     ],
     "tests/models/multimodal/generation/test_audioflamingo3.py": [
       "test_batched_generation",
       "test_single_and_batched_generation_match",
       "test_single_generation"
+    ],
+    "tests/models/multimodal/generation/test_bailing_moe_v3_vl.py": [
+      "test_bailing_yarn_image_order_and_centered_positions"
     ],
     "tests/models/multimodal/generation/test_common.py": [
       "test_audio_models",
@@ -1997,7 +2196,12 @@
     "tests/models/multimodal/generation/test_deepseek_vl2.py": [
       "test_deepseek_vl2_encoder_cache_cropping"
     ],
+    "tests/models/multimodal/generation/test_dots_ocr.py": [
+      "test_dots_ocr_tensor_parallel_without_host_sync",
+      "test_dots_ocr_vision_without_host_sync"
+    ],
     "tests/models/multimodal/generation/test_gemma_ragged_audio.py": [
+      "test_single_frame_audio_keeps_engine_usable",
       "test_variable_length_audio_batching"
     ],
     "tests/models/multimodal/generation/test_granite4_vision.py": [
@@ -2009,6 +2213,9 @@
     "tests/models/multimodal/generation/test_interleaved.py": [
       "test_models"
     ],
+    "tests/models/multimodal/generation/test_llava_onevision.py": [
+      "test_llava_onevision_mixed_frame_count_videos"
+    ],
     "tests/models/multimodal/generation/test_maverick.py": [
       "test_dummy_maverick"
     ],
@@ -2018,7 +2225,8 @@
     ],
     "tests/models/multimodal/generation/test_mm_prefix_lm.py": [
       "test_mm_prefix_lm_cache_hit_inside_image",
-      "test_mm_prefix_lm_e2e"
+      "test_mm_prefix_lm_e2e",
+      "test_mm_prefix_lm_pipeline_parallel"
     ],
     "tests/models/multimodal/generation/test_moondream3.py": [
       "test_batched_inference",
@@ -2033,11 +2241,27 @@
       "test_moss_audio_hf_vllm_accuracy",
       "test_moss_audio_parallel_smoke"
     ],
+    "tests/models/multimodal/generation/test_muse_vision_encoders.py": [
+      "test_glimmer_engine_has_no_gpu_sync",
+      "test_glimmer_pixel_shuffle_order_groups_merge_blocks",
+      "test_glimmer_pos_emb_layout_matches_trainer_reference",
+      "test_glimmer_sparse_permutation_orders_tokens_by_window",
+      "test_glimmer_vision_encoder_has_no_gpu_sync",
+      "test_glimmer_vision_encoder_is_batch_invariant",
+      "test_glimmer_vision_encoder_projects_patches_per_group",
+      "test_glimmer_vision_encoder_rejects_grid_not_divisible_by_merge_size",
+      "test_navit_cu_seqlens",
+      "test_navit_has_no_gpu_sync",
+      "test_navit_sparse_permutation_orders_tokens_by_window"
+    ],
     "tests/models/multimodal/generation/test_nemotron_parse.py": [
       "test_models"
     ],
     "tests/models/multimodal/generation/test_nemotron_parse_35.py": [
       "test_model"
+    ],
+    "tests/models/multimodal/generation/test_opencua.py": [
+      "test_engine_applies_max_pixels"
     ],
     "tests/models/multimodal/generation/test_phi4mm.py": [
       "test_models",
@@ -2051,16 +2275,30 @@
     "tests/models/multimodal/generation/test_qwen2_5_vl.py": [
       "test_qwen2_5_vl_evs_batched_videos",
       "test_qwen2_5_vl_evs_functionality",
+      "test_qwen2_5_vl_evs_pipeline_parallel",
+      "test_qwen2_5_vl_video_fits_max_model_len",
       "test_qwen2_5_vl_window_attention_image",
       "test_qwen2_5_vl_window_attention_image_batch"
     ],
     "tests/models/multimodal/generation/test_qwen2_vl.py": [
+      "test_qwen2_vl_embeddings_input_with_encoder_cudagraph",
       "test_qwen2_vl_image_embeddings_input",
       "test_qwen2_vl_multiple_image_embeddings_input",
       "test_qwen2_vl_video_embeddings_input"
     ],
+    "tests/models/multimodal/generation/test_qwen3_vl.py": [
+      "test_encoder_only_matches_full_model_for_pruned_video",
+      "test_qwen3_vl_pruned_video_prefix_cache_hit"
+    ],
     "tests/models/multimodal/generation/test_transformers_audio.py": [
-      "test_transformers_audio_generation"
+      "test_transformers_audio_generation",
+      "test_transformers_audio_mixed_lengths"
+    ],
+    "tests/models/multimodal/generation/test_transformers_image.py": [
+      "test_transformers_image_deepstack"
+    ],
+    "tests/models/multimodal/generation/test_transformers_omni.py": [
+      "test_transformers_omni_generation"
     ],
     "tests/models/multimodal/generation/test_transformers_video.py": [
       "test_transformers_video_generation"
@@ -2073,10 +2311,12 @@
     "tests/models/multimodal/generation/test_unlimited_ocr.py": [
       "test_unlimited_ocr2_batched_pages",
       "test_unlimited_ocr2_chunked_prefill_under_encoder_pressure",
-      "test_unlimited_ocr2_excess_markers_survive_preemption"
+      "test_unlimited_ocr2_excess_markers_survive_preemption",
+      "test_unlimited_ocr2_starts_with_default_kv_cache"
     ],
     "tests/models/multimodal/generation/test_vit_cudagraph.py": [
       "test_eonly_vit_cudagraph_outputs",
+      "test_kimi_k3_vit_cudagraph_replay_and_threshold",
       "test_vit_cudagraph_image",
       "test_vit_cudagraph_video"
     ],
@@ -2094,6 +2334,7 @@
     "tests/models/multimodal/generation/test_whisper.py": [
       "test_audio_tensor_inputs",
       "test_beam_search_encoder_decoder",
+      "test_decoder_prompt_layout",
       "test_encoder_cache_cleanup",
       "test_models",
       "test_models_distributed"
@@ -2194,6 +2435,15 @@
       "test_native_format_weight_loading",
       "test_radio"
     ],
+    "tests/models/multimodal/pooling/test_shieldgemma2.py": [
+      "test_classify_image_policy",
+      "test_config_rejects_logit_softcap",
+      "test_config_selects_two_way_softmax_over_no_yes",
+      "test_image_tokens_attend_bidirectionally",
+      "test_template_is_hub_template_plus_one_bos",
+      "test_template_is_registered_over_the_hub_template",
+      "test_weight_names_map_to_gemma3_layout"
+    ],
     "tests/models/multimodal/pooling/test_siglip.py": [
       "test_models"
     ],
@@ -2212,11 +2462,13 @@
       "TestDeepseekOCREmptyImagesCrop::test_populated_images_crop_large_image",
       "TestDeepseekOCRInputValidation::test_mismatched_image_count_raises_value_error",
       "TestDeepseekOCRInputValidation::test_missing_images_raises_value_error",
-      "TestDeepseekOCRInputValidation::test_missing_prompt_raises_value_error"
+      "TestDeepseekOCRInputValidation::test_missing_prompt_raises_value_error",
+      "test_crop_kwargs_match_processed_image_tokens"
     ],
     "tests/models/multimodal/processing/test_deepseek_vl2.py": [
       "test_image_cache_identity_depends_on_cropping",
-      "test_image_embedding_cache_identity_ignores_image_count"
+      "test_image_embedding_cache_identity_ignores_image_count",
+      "test_request_candidate_resolutions_match_engine"
     ],
     "tests/models/multimodal/processing/test_h2ovl.py": [
       "test_image_cache_identity_across_image_counts",
@@ -2224,6 +2476,7 @@
     ],
     "tests/models/multimodal/processing/test_kimi_k3.py": [
       "test_fused_image_processor_matches_hf",
+      "test_image_metadata_only_chat",
       "test_mm_device_do_normalize"
     ],
     "tests/models/multimodal/processing/test_ming_v3_asr.py": [
@@ -2235,6 +2488,7 @@
     "tests/models/multimodal/processing/test_mistral3.py": [
       "test_lightonocr_keeps_vision_config_image_size",
       "test_mm_device_do_normalize",
+      "test_pixtral_hf_processor_size_override",
       "test_processor_size_override",
       "test_scoped_request_size_overrides_configured_flat_size"
     ],
@@ -2274,6 +2528,17 @@
       "test_audio_fields_not_claimed_by_image",
       "test_audio_multimodal_processor",
       "test_audio_multiple_inputs",
+      "test_audio_windows_stay_with_their_audio",
+      "test_diarized_stream_parser_buffers_transformers_output",
+      "test_diarized_stream_parser_rejects_unparsable_transformers_output",
+      "test_long_form_audio_follows_the_decode_limits",
+      "test_long_form_audio_limit",
+      "test_only_long_form_audio_fills_the_context",
+      "test_transcription_config_keeps_uncapped_audio_whole",
+      "test_transcription_needs_a_transcription_request",
+      "test_transcription_output_parsing",
+      "test_transcription_output_strips_a_generated_prefix",
+      "test_transcription_prompt_matches_hf_processor",
       "test_unclaimed_fields_warn_rather_than_raise"
     ],
     "tests/models/multimodal/processing/test_transformers_image.py": [
@@ -2308,9 +2573,17 @@
       "test_v2_dummy_layers_preserve_dash_configuration",
       "test_v2_flashinfer_vision_falls_back_without_changing_dash_backend",
       "test_v2_gundam_matches_official_wide_page_grid",
+      "test_v2_multi_page_request_uses_processor_cache",
       "test_v2_output_window_reaches_runtime_config",
+      "test_v2_partial_cache_hit_matches_uncached_request",
       "test_v2_preprocessed_features_validate_page_layout_at_admission",
-      "test_v2_rejects_unsupported_runtime_before_loading"
+      "test_v2_rejects_unsupported_runtime_before_loading",
+      "test_v2_rocm_defaults_select_aiter_for_dash_and_vision",
+      "test_v2_turns_off_requested_extensible_kv_cache"
+    ],
+    "tests/models/multimodal/processing/test_whisper.py": [
+      "test_decoder_start_token",
+      "test_generation_prompt_decoder_layout"
     ],
     "tests/models/multimodal/test_mapping.py": [
       "test_hf_model_weights_mapper"
@@ -2322,12 +2595,19 @@
       "test_omni_mamba_ssm_cache_dtype",
       "test_vision_layernorm_is_loaded_and_applied_before_pixel_shuffle"
     ],
+    "tests/models/nemotron_shortcut/test_pp_engine.py": [
+      "test_pp_matches_one_stage"
+    ],
+    "tests/models/nemotron_shortcut/test_sdsa_engine.py": [
+      "test_sdsa_engine"
+    ],
     "tests/models/quantization/test_awq.py": [
       "test_awq_load",
       "test_awq_models"
     ],
     "tests/models/quantization/test_fp8.py": [
       "test_cpu_models",
+      "test_flashinfer_bf16_query_with_checkpoint_q_scale",
       "test_models"
     ],
     "tests/models/quantization/test_fp8_per_channel.py": [
@@ -2349,7 +2629,8 @@
     ],
     "tests/models/quantization/test_mxfp8.py": [
       "test_mxfp8_generation",
-      "test_mxfp8_logprobs"
+      "test_mxfp8_logprobs",
+      "test_quark_mxfp8_weight_only_checkpoint"
     ],
     "tests/models/quantization/test_nvfp4.py": [
       "test_models",
@@ -2359,6 +2640,13 @@
     ],
     "tests/models/quantization/test_per_token_kv_cache.py": [
       "test_per_token_head_kv_cache_accuracy"
+    ],
+    "tests/models/qwen3_5/test_amd_model.py": [
+      "test_models"
+    ],
+    "tests/models/qwen4_exp/test_qsa_reference.py": [
+      "test_qsa_hisparse_prefill_ignores_unused_request_table_rows",
+      "test_qsa_hisparse_starts_with_automatic_cache_layout"
     ],
     "tests/models/step5/test_amd_model.py": [
       "test_sparse_prefill_matches_decode"
@@ -2396,6 +2684,14 @@
       "test_other_steps_run_stock",
       "test_weight_views_alias_the_rank_slices"
     ],
+    "tests/models/test_pp_equivalence.py": [
+      "test_pp_equivalence_detects_a_changed_weight",
+      "test_pp_equivalence_middle_stages",
+      "test_pp_equivalence_small_subset",
+      "test_pp_rejects_split_kv_sharing",
+      "test_transformers_pp_decoder_preamble",
+      "test_transformers_pp_piecewise_cudagraphs"
+    ],
     "tests/models/test_qwen3_5_mtp_config.py": [
       "test_mtp_num_hidden_layers_selects_multi_module_mtp",
       "test_mtp_override_downloads_real_hf_hub_configs",
@@ -2406,9 +2702,12 @@
       "test_inference"
     ],
     "tests/models/transformers/test_backend.py": [
+      "test_compile_mm_encoder",
       "test_distributed",
+      "test_eagle3_mm",
       "test_embed_loading",
       "test_hybrid_attention",
+      "test_init_parameters_keeps_declared_dtype_and_requires_grad",
       "test_marking_skipped_without_tokenizer",
       "test_mla",
       "test_models",
@@ -2625,6 +2924,7 @@
       "test_compressed_tensors_kv_cache_fp8_per_tensor",
       "test_compressed_tensors_moe_ignore_with_model",
       "test_compressed_tensors_mxfp4",
+      "test_compressed_tensors_mxfp6",
       "test_compressed_tensors_mxfp8_moe_setup",
       "test_compressed_tensors_no_enforce_eager",
       "test_compressed_tensors_nvfp4",
@@ -2638,6 +2938,9 @@
     ],
     "tests/quantization/test_configs.py": [
       "test_auto_gptq"
+    ],
+    "tests/quantization/test_cpu_int8_w4a8.py": [
+      "test_cpu_int8_w4a8_whisper"
     ],
     "tests/quantization/test_cpu_w8a8.py": [
       "test_cpu_w8a8"
@@ -2682,19 +2985,26 @@
       "test_modelopt_fp8_checkpoint_setup",
       "test_modelopt_fp8_pb_wo_checkpoint_setup",
       "test_modelopt_fp8_pc_pt_checkpoint_setup",
+      "test_modelopt_int8_pb_wo_checkpoint",
+      "test_modelopt_int8_pb_wo_routes_to_its_config",
       "test_modelopt_mixed_dspark_checkpoint",
       "test_modelopt_nested_mixed_checkpoint",
       "test_modelopt_nvfp4_moe_activation_override"
     ],
     "tests/quantization/test_online.py": [
       "test_activation_only_override_applies_to_checkpoint_method",
+      "test_checkpoint_platform_validation_applies_to_untargeted_layers",
       "test_checkpoint_quantization_rejects_online_shorthand",
       "test_legacy_fp8_online_quantization_uses_per_tensor_shorthand",
+      "test_linear_dispatch_skipped_for_requantization_source",
+      "test_modelopt_nvfp4_targets_preserve_checkpoint_and_selection",
+      "test_moe_oracles_skip_dispatch_for_requantization_source",
       "test_online_activation_only_spec_raises",
       "test_online_block_fp8_requantization_removes_source_scales",
       "test_online_ignore_keeps_checkpoint_quantization_linear",
       "test_online_lut_b_moe",
       "test_online_moe_stages_quantized_weights_for_humming",
+      "test_online_mxfp4_moe_requantizes_block_fp8_checkpoint",
       "test_online_nvfp4_per_token_moe",
       "test_online_overlay_loads_checkpoint_config_file",
       "test_online_overlay_requires_normalized_quantization_config",
@@ -2707,6 +3017,7 @@
       "test_online_quantization_records_global_config",
       "test_online_quantization_targets",
       "test_online_shorthand_selects_checkpoint_or_online_config",
+      "test_registered_online_config_is_instantiated",
       "test_weight_loading_requantization_moe"
     ],
     "tests/quantization/test_online_mxfp4.py": [
@@ -2725,12 +3036,14 @@
       "test_online_shared_expert_reload_compatibility"
     ],
     "tests/quantization/test_quark.py": [
+      "test_quark_dict_algo_config_engine_config",
       "test_quark_fp8_parity",
       "test_quark_fp8_w8a8_per_block_moe",
       "test_quark_fp8_w_per_channel_a_per_token",
       "test_quark_fp8_w_per_tensor_a_per_tensor",
       "test_quark_int8_w8a8_moe",
       "test_quark_int8_w_per_tensor_a_per_tensor",
+      "test_quark_static_int8_moe_compilation",
       "test_quark_w4a8_fp8_moe"
     ],
     "tests/quantization/test_register_quantization_config.py": [
@@ -2738,6 +3051,7 @@
       "test_register_quantization_config"
     ],
     "tests/quantization/test_torchao.py": [
+      "test_awq_fused_layers_keep_each_shard_act_pre_scale",
       "test_online_quant_config_dict_json",
       "test_online_quant_config_file",
       "test_opt_125m_awq_int4wo_model_loading_with_params",
@@ -2806,6 +3120,13 @@
       "test_reasoning",
       "test_reasoning_streaming_multi_token_deltas",
       "test_reasoning_thinking_disabled"
+    ],
+    "tests/renderers/chat_utils/test_assistant.py": [
+      "test_assistant_refusal_preserves_empty_content_history",
+      "test_assistant_refusal_preserves_nonempty_content",
+      "test_assistant_refusal_replays_sdk_history",
+      "test_tokenize_chat_preserves_assistant_refusal",
+      "test_tokenize_chat_replays_sdk_refusal"
     ],
     "tests/renderers/chat_utils/test_audio.py": [
       "test_parse_chat_messages_audio_embeds_async",
@@ -2878,7 +3199,10 @@
       "test_parse_chat_messages_multiple_modals_with_uuids_multiple_messages_interleave",
       "test_parse_chat_messages_video_and_video_embeds_mixed",
       "test_parse_chat_messages_video_embeds_async",
-      "test_parse_chat_messages_video_embeds_with_string"
+      "test_parse_chat_messages_video_embeds_disabled_modality",
+      "test_parse_chat_messages_video_embeds_with_string",
+      "test_parse_chat_messages_video_passes_the_frame_caps_once",
+      "test_parse_chat_messages_without_video_never_builds_the_hf_processor"
     ],
     "tests/renderers/chat_utils/test_vision_chunk.py": [
       "test_parse_chat_messages_image_vision_chunk",
@@ -2892,7 +3216,8 @@
       "test_parse_chat_messages_video_vision_chunk",
       "test_parse_chat_messages_video_vision_chunk_async",
       "test_parse_chat_messages_video_vision_chunk_with_uuid",
-      "test_parse_chat_messages_video_vision_chunk_with_uuid_async"
+      "test_parse_chat_messages_video_vision_chunk_with_uuid_async",
+      "test_rebuild_vision_chunk_uuids_keeps_missing_uuids"
     ],
     "tests/renderers/test_hf.py": [
       "TestApplyChatTemplateEffortTolerant::test_non_effort_template_error_is_bad_request",
@@ -2913,11 +3238,21 @@
       "test_resolve_content_format_fallbacks",
       "test_resolve_content_format_hf_defined"
     ],
+    "tests/renderers/test_inkling.py": [
+      "test_inkling2_payload_text_never_encodes_framing_tokens"
+    ],
     "tests/renderers/test_mistral.py": [
       "test_apply_mistral_chat_template_thinking_chunk"
     ],
     "tests/renderers/test_multimodal_hashes.py": [
       "test_mm_hash_includes_uuid_and_processing_kwargs"
+    ],
+    "tests/renderers/test_numpy_embedding_byteorder.py": [
+      "test_numpy_embedding_empty_shape",
+      "test_numpy_embedding_metadata_preserves_large_integers",
+      "test_numpy_embedding_rejects_object_arrays",
+      "test_numpy_embedding_values_preserve_byteorder",
+      "test_numpy_image_embedding_is_consumed_by_native_llava"
     ],
     "tests/renderers/test_process_multi_modal_uuids.py": [
       "test_multi_modal_uuids_accepts_empty",
@@ -2929,8 +3264,10 @@
     ],
     "tests/renderers/test_prompt_embeds_payload_validation.py": [
       "test_a_long_reason_is_truncated_and_says_how_much_was_left_out",
+      "test_a_non_ascii_str_payload_is_a_client_error",
       "test_a_payload_that_is_not_base64_is_still_a_client_error",
       "test_a_short_reason_is_passed_through_whole",
+      "test_a_str_payload_loads_like_bytes",
       "test_a_well_formed_payload_still_loads",
       "test_prompt_embeds_input_width",
       "test_the_error_body_stays_bounded",
@@ -2947,6 +3284,9 @@
       "TestNegativeControlWithoutRace::test_malicious_sparse_rejected_by_prompt_loader"
     ],
     "tests/renderers/test_sparse_tensor_validation.py": [
+      "TestCompressedStorageLimit::test_deflated_tensor_within_limit_accepted",
+      "TestCompressedStorageLimit::test_prompt_embeds_rejects_view_of_large_storage",
+      "TestCompressedStorageLimit::test_unreadable_archive_rejected",
       "TestPromptEmbedsValidation::test_extremely_large_indices_rejected",
       "TestPromptEmbedsValidation::test_float_dtype_mismatch_cast_to_model_dtype",
       "TestPromptEmbedsValidation::test_hidden_size_mismatch_rejected",
@@ -2996,9 +3336,18 @@
       "test_default_tok_pooling_type",
       "test_dflash_allows_async_scheduling",
       "test_disable_sliding_window",
+      "test_draft_all2all_backend_follows_target_after_fallback",
+      "test_draft_eplb_defaults_from_draft_expert_count",
+      "test_draft_eplb_defaults_to_minimum_when_unset",
+      "test_draft_eplb_rejects_invalid_explicit_count",
       "test_draft_inherits_ep_only_for_moe",
       "test_draft_model_enables_async_scheduling_by_default",
       "test_draft_runner",
+      "test_dspark_draft_eplb_can_be_disabled",
+      "test_dspark_draft_eplb_rejects_elastic_ep_unless_disabled",
+      "test_dspark_draft_eplb_uses_draft_expert_count",
+      "test_dspark_eplb_requires_draft_parallelism",
+      "test_eagle_draft_eplb_opt_out_disables_elastic_ep_on_draft",
       "test_eagle_draft_model_config",
       "test_fusion_pass_op_priority",
       "test_generation_config_loading",
@@ -3006,6 +3355,7 @@
       "test_get_bert_tokenization_sentence_transformer_config",
       "test_get_pooling_config",
       "test_get_pooling_config_from_args",
+      "test_hf_token_is_excluded_from_serialization",
       "test_is_chunked_prefill_supported",
       "test_is_encoder_decoder",
       "test_is_prefix_caching_supported",
@@ -3016,12 +3366,23 @@
       "test_moe_model_detection",
       "test_needs_dp_coordination",
       "test_nested_hf_overrides",
+      "test_ngram_eplb_with_automatic_target_redundant_count",
       "test_nixl_dcp_check_rejects_non_mla_model_with_dcp",
       "test_nixl_dcp_check_skipped_for_submodel_config",
+      "test_one_sided_all2all_default_follows_dispatch_format",
+      "test_one_sided_all2all_default_follows_draft_model",
+      "test_one_sided_all2all_default_follows_explicit_moe_backend",
+      "test_one_sided_all2all_default_follows_supported_top_k",
+      "test_one_sided_all2all_default_skips_batch_invariant",
+      "test_one_sided_all2all_default_skips_heterogeneous_moe_layers",
+      "test_one_sided_all2all_default_skips_lora",
+      "test_one_sided_all2all_default_yields_to_moe_ep_backend",
       "test_pooling_runner",
       "test_renderer_num_workers_with_mm_cache",
+      "test_replace_keeps_compile_factors_with_blocked_fp8_weights",
       "test_revision_resolved_for_model",
       "test_rope_customization",
+      "test_target_eplb_validation_suggests_lowest_valid_count",
       "test_uses_mrope",
       "test_vllm_config_callable_defaults",
       "test_vllm_config_defaults",
@@ -3179,17 +3540,22 @@
     ],
     "tests/v1/attention/test_attention_backends.py": [
       "test_causal_backend_correctness",
+      "test_flashinfer_bf16_query_ignores_q_scale",
       "test_flashinfer_cross_layer_layout",
       "test_flashinfer_fa2_spec_decode_correctness",
       "test_flashinfer_native_prefill_with_sinks",
       "test_flashinfer_xqa_decode_correctness",
       "test_non_causal_backend_correctness",
+      "test_rocm_aiter_fa_unordered_batch",
       "test_rocm_aiter_fa_unquantized_cache_ignores_kv_scales",
       "test_sliding_window_backend_correctness",
       "test_sliding_window_encoder_backend_correctness"
     ],
     "tests/v1/attention/test_b12x.py": [
       "test_b12x_causal_sliding_window"
+    ],
+    "tests/v1/attention/test_encoder_only_attention_hooks_e2e.py": [
+      "test_model_owned_backend_on_half_the_layers"
     ],
     "tests/v1/attention/test_mla_backends.py": [
       "test_adaptive_varlen_decode_correctness",
@@ -3208,6 +3574,7 @@
       "test_kv_pressure_preempt_mid_handoff",
       "test_kv_pressure_preemption_with_inflight_output",
       "test_no_spec_decode_padding_up_to_max_model_len",
+      "test_no_steps_past_max_tokens_with_deep_batch_queue",
       "test_prefix_caching_for_multi_turn",
       "test_prefix_caching_for_prefill_dedup",
       "test_requires_kv_delivery_defaults_to_producer_role",
@@ -3245,9 +3612,12 @@
       "test_auto_fit_max_model_len_with_hybrid",
       "test_check_enough_kv_cache_memory_reserves_null_block",
       "test_check_enough_kv_cache_memory_respects_num_gpu_blocks_override",
-      "test_eagle_groups_are_the_groups_holding_draft_layers",
+      "test_dflash_drafter_sliding_window_layers_back_only_their_tail",
       "test_estimate_max_model_len",
+      "test_finalize_extensible_kv_cache_auto_max_model_len_no_room",
+      "test_finalize_extensible_kv_cache_auto_max_model_len_warns_when_short",
       "test_finalize_extensible_kv_cache_keeps_measured_count",
+      "test_finalize_extensible_kv_cache_refits_auto_max_model_len",
       "test_get_kv_cache_config_one_worker",
       "test_get_kv_cache_configs_attention_free",
       "test_get_kv_cache_configs_multiple_workers",
@@ -3255,13 +3625,13 @@
       "test_hisparse_pool_must_fit_max_model_len",
       "test_kv_cache_reserves_null_block_for_max_model_len",
       "test_kv_tp_replicas",
+      "test_layers_group_by_manager_policy_not_layout",
       "test_multi_run_layer_compact_strides_place_hoisted_heads",
-      "test_no_eagle_groups_without_eagle_block_drop",
       "test_packed_groups_glm5_like_hybrid",
+      "test_pipeline_stages_describe_every_stage",
       "test_shrink_kv_cache_configs_keeps_tensors_and_checks_fit",
       "test_shrink_kv_cache_configs_leaves_host_resident_tensors",
-      "test_sparse_mla_preserves_physical_row_addressing",
-      "test_warns_only_when_untagged_draft_meets_mamba"
+      "test_sparse_mla_preserves_physical_row_addressing"
     ],
     "tests/v1/core/test_prefix_replay.py": [
       "test_async_remote_kv_hit_replays_after_load",
@@ -3271,7 +3641,8 @@
       "test_kv_load_carrying_window_does_not_replay",
       "test_kv_load_zeroing_respects_loaded_groups",
       "test_remote_kv_hit_is_taken_in_whole_blocks",
-      "test_replay_only_chunks_make_progress"
+      "test_replay_only_chunks_make_progress",
+      "test_throttle_defers_prefix_replay"
     ],
     "tests/v1/core/test_priority_preemption_bug.py": [
       "test_priority_scheduler_preempt_skipped_request"
@@ -3292,7 +3663,6 @@
       "test_cache_aware_admission_protects_resident_prefix_from_eviction",
       "test_cache_aware_admission_requires_fcfs_and_prefix_caching",
       "test_cache_aware_admission_skipped_below_threshold",
-      "test_cached_request_data_resumed_all_token_ids_mrv1_only",
       "test_cached_reservations_admit_like_on_demand_sum",
       "test_cpu_encoder_input_updates_preserve_shm_handles",
       "test_cpu_encoder_input_updates_restore_after_kv_load_failure",
@@ -3307,7 +3677,6 @@
       "test_diffusion_scheduler_is_selected_by_default",
       "test_diffusion_scheduler_narrows_the_canvas_per_request",
       "test_diffusion_scheduler_trims_full_width_worker_drafts",
-      "test_draft_slots_budgeted_per_scheduled_request",
       "test_drafter_lookahead_encoder_cache_cap_makes_progress",
       "test_drafter_lookahead_encoder_cache_cap_respects_token_budget",
       "test_drafts_unused_with_async_placeholders",
@@ -3315,6 +3684,7 @@
       "test_ec_connector_allocate_encoder_tokens_with_external_load",
       "test_ec_connector_cache_hit_external_load",
       "test_ec_connector_cache_miss_computes_locally",
+      "test_ec_connector_cache_miss_fails_metadata_only_item",
       "test_ec_connector_defers_running_request_for_async_reload",
       "test_ec_connector_ensure_cache_available_defers_request",
       "test_ec_connector_schedule_multiple_requests",
@@ -3323,7 +3693,6 @@
       "test_ec_connector_update_connector_output_called",
       "test_ec_connector_waits_for_embeddings_in_prefix_replay",
       "test_ec_connector_with_partial_cache_hit_multi_round",
-      "test_empty_schedule_does_not_advance_the_prefill_cadence",
       "test_encoder_cache_accepts_matching_embed_count",
       "test_encoder_cache_embed_count_mismatch_restores_prior_hit_state",
       "test_encoder_cache_pressure_respects_disabled_chunked_prefill",
@@ -3331,6 +3700,7 @@
       "test_encoder_cache_rejects_mismatched_embed_count",
       "test_encoder_cache_rejects_mismatched_embed_count_within_request",
       "test_encoder_cache_retained_across_preemption_and_resume",
+      "test_encoder_deferred_request_is_not_overtaken",
       "test_encoder_input_skipped_when_connector_already_has_the_item",
       "test_encoder_instance_defers_stop_until_prompt_is_consumed",
       "test_encoder_instance_finishes_request_once_prompt_is_consumed",
@@ -3351,6 +3721,7 @@
       "test_hybrid_divergent_hit_fallback_is_capped_at_retained_auxiliary_outputs",
       "test_hybrid_fa_deeper_hit_respects_connector_lookup_policy",
       "test_hybrid_per_group_hit_divergence_with_connector",
+      "test_iteration_details_count_recomputation_as_prefill",
       "test_kv_cache_release_after_keep_pause_preserves_requests",
       "test_kv_cache_release_rejects_nonresident_memory",
       "test_kv_connector_basic",
@@ -3358,15 +3729,11 @@
       "test_kv_connector_honors_skip_reading_prefix_cache",
       "test_kv_connector_records_external_cache_hit_sources",
       "test_kv_connector_unable_to_allocate",
-      "test_local_prefill_interval_defaults_to_no_gating",
-      "test_local_prefill_interval_defers_inflight_prefill_chunk",
-      "test_local_prefill_interval_holds_prefill_between_bursts",
-      "test_local_prefill_interval_left_to_engine_under_dp",
-      "test_local_prefill_interval_never_idles_the_model",
+      "test_kv_consumer_without_kv_fails_metadata_only_item",
+      "test_kv_loaded_without_auxiliary_outputs_is_hit_before_emit_start",
       "test_long_prefill_threshold_applies_with_other_requests",
       "test_long_prefill_threshold_floored_by_fair_share",
       "test_long_prefill_threshold_ignored_when_alone",
-      "test_make_scheduled_encoder_input_stats_output_embeddings",
       "test_mamba_align_eagle_schedules_encoder_at_boundary",
       "test_mamba_align_encoder_cache_cap_makes_progress",
       "test_mamba_decode_checkpoint_publication",
@@ -3386,12 +3753,11 @@
       "test_pending_hisparse_spill_keeps_scheduler_alive",
       "test_per_request_spec_decode_acceptance_disabled_by_default",
       "test_per_request_spec_decode_detailed_records_per_step",
-      "test_per_request_spec_decode_subtracts_invalid_drafts",
       "test_pooling_chunked_prefill_can_finish_at_max_model_len",
       "test_preempt_during_execution",
+      "test_preemption_of_aborted_request_is_counted",
       "test_preemption_processes_stale_aux_output",
       "test_preemption_re_records_prefix_cache_query",
-      "test_prefill_cadence_counts_executed_steps_not_schedule_calls",
       "test_prefix_cache_query_not_inflated_by_connector_defer",
       "test_prefix_cache_stats_counted_once_for_retried_then_scheduled_request",
       "test_prefix_cache_stats_not_recorded_when_caching_disabled",
@@ -3427,6 +3793,7 @@
       "test_schedule_spec_decoding_stats",
       "test_scheduled_encoder_input_stats_disabled_without_iteration_logging",
       "test_scheduled_encoder_input_stats_disabled_without_log_stats",
+      "test_scheduled_encoder_input_stats_output_embeddings",
       "test_scheduler_ec_connector_stats",
       "test_scheduler_kv_connector_stats",
       "test_scheduler_no_ec_connector_by_default",
@@ -3440,6 +3807,7 @@
       "test_spec_decode_padding_resumed_request_without_running_requests",
       "test_spec_decode_padding_skipped_for_diffusion",
       "test_spec_decode_padding_skipped_with_prefill_in_batch",
+      "test_spec_decode_stats_keep_batch_after_empty_draft",
       "test_spec_decoding_stats_empty_output",
       "test_stop_via_update_from_output",
       "test_streaming_lookahead_hashes_follow_recomputed_kv",
@@ -3475,6 +3843,9 @@
       "test_backend_and_cudagraph_mode_combo",
       "test_cudagraph_compilation_combo"
     ],
+    "tests/v1/cudagraph/test_encoder_only_full_cudagraph.py": [
+      "test_encoder_only_full_cudagraph_matches_eager"
+    ],
     "tests/v1/determinism/test_batch_invariance.py": [
       "test_decode_logprobs_match_prefill_logprobs",
       "test_logprobs_bitwise_batch_invariance_bs1_vs_bsN",
@@ -3482,6 +3853,7 @@
       "test_logprobs_without_batch_invariance_should_fail",
       "test_online_fp8_moe_logprobs_bitwise_bs1_vs_bsN",
       "test_simple_generation",
+      "test_sliding_window_logprobs_bitwise_alone_vs_mixed_batch",
       "test_v1_generation_is_deterministic_across_batch_sizes_with_needle"
     ],
     "tests/v1/determinism/test_batch_invariance_vlm.py": [
@@ -3502,6 +3874,7 @@
       "test_dbo_v2_features_gsm8k"
     ],
     "tests/v1/distributed/test_dense_dp_world_size.py": [
+      "test_dense_dp_ranks_follow_dynamic_sd_schedule",
       "test_dense_dp_world_size",
       "test_pcp_dp_with_auto_numa"
     ],
@@ -3524,6 +3897,7 @@
       "test_multinode_dp_server_info"
     ],
     "tests/v1/e2e/general/test_async_scheduling.py": [
+      "test_async_spec_decode_structured_output",
       "test_with_eagle3_spec_decoding",
       "test_with_ngram_gpu_spec_decoding",
       "test_without_spec_decoding"
@@ -3543,6 +3917,7 @@
     ],
     "tests/v1/e2e/general/test_correctness_sliding_window.py": [
       "test_hybrid_kv_cache_manager_output_equivalence",
+      "test_hybrid_sliding_window_honors_user_block_size",
       "test_sliding_window_retrieval"
     ],
     "tests/v1/e2e/general/test_hisparse.py": [
@@ -3555,8 +3930,7 @@
       "test_kv_sharing_fast_prefill"
     ],
     "tests/v1/e2e/general/test_mamba_prefix_cache.py": [
-      "test_mamba_prefix_cache_mrv1",
-      "test_mamba_prefix_cache_mrv1_async"
+      "test_mamba_mid_block_resume_exports_into_resumed_block"
     ],
     "tests/v1/e2e/general/test_min_tokens.py": [
       "test_min_tokens_basic_functionality",
@@ -3596,11 +3970,10 @@
       "test_draft_model_correctness",
       "test_draft_model_engine_args_rejects_invalid_tp_argname",
       "test_draft_model_engine_args_tensor_parallelism",
-      "test_draft_model_inherits_target_dcp_config",
       "test_draft_model_moe_backend_default_auto",
       "test_draft_model_moe_backend_inherits_target",
       "test_draft_model_moe_backend_override",
-      "test_draft_model_parallel_drafting",
+      "test_draft_model_pipeline_parallelism",
       "test_draft_model_quantization",
       "test_draft_model_realistic_example",
       "test_draft_model_tensor_parallelism",
@@ -3616,7 +3989,8 @@
       "test_specdec_pp_structured_output"
     ],
     "tests/v1/e2e/spec_decode/eagle/test_eagle3_pp.py": [
-      "test_eagle3_pipeline_parallel_acceptance"
+      "test_eagle3_pipeline_parallel_acceptance",
+      "test_eagle3_pipeline_parallel_targets"
     ],
     "tests/v1/e2e/spec_decode/eagle/test_eagle_correctness.py": [
       "test_eagle_correctness_light",
@@ -3629,7 +4003,7 @@
       "test_mtp_correctness"
     ],
     "tests/v1/e2e/spec_decode/mtp/glm/test_mtp.py": [
-      "test_glm_mtp_drafts_on_both_model_runners"
+      "test_glm_mtp_drafts"
     ],
     "tests/v1/e2e/spec_decode/mtp/mimo/test_mtp.py": [
       "test_mtp_correctness"
@@ -3639,6 +4013,7 @@
       "test_mtp_draft_lm_head_quantization",
       "test_mtp_draft_lm_head_quantization_survives_sleep_and_reload",
       "test_mtp_draft_steps_use_their_own_module",
+      "test_multi_module_mtp_reused_slot_has_only_current_request_inputs",
       "test_qwen3_5_mtp_prefix_cache_reuses_last_safe_block"
     ],
     "tests/v1/e2e/spec_decode/mtp/qwen3_5/test_rejected_placeholders.py": [
@@ -3647,8 +4022,8 @@
     "tests/v1/e2e/spec_decode/ngram_suffix/test_ngram_suffix.py": [
       "test_ngram_and_suffix_correctness",
       "test_ngram_gpu_default_with_async_scheduling",
-      "test_suffix_cross_request_acceptance_v2",
-      "test_suffix_decoding_acceptance"
+      "test_ngram_verification_applies_logit_bias_and_min_p",
+      "test_suffix_cross_request_acceptance"
     ],
     "tests/v1/e2e/spec_decode/speculators/test_speculators.py": [
       "test_speculators_model_integration"
@@ -3658,7 +4033,8 @@
     ],
     "tests/v1/e2e/spec_decode/test_mtp_parallel_load.py": [
       "test_deepseek_mtp_load_dp",
-      "test_deepseek_mtp_load_inline"
+      "test_deepseek_mtp_load_inline",
+      "test_mtp_drafter_runs_as_one_pp_stage"
     ],
     "tests/v1/e2e/spec_decode/test_sharded_sampling.py": [
       "test_dspark_sharded_sampling_equivalence",
@@ -3671,7 +4047,7 @@
     ],
     "tests/v1/e2e/test_cpu_spec_decode.py": [
       "test_ngram_spec_decode_matches_baseline",
-      "test_v2_speculator_smoke"
+      "test_speculator_smoke"
     ],
     "tests/v1/e2e/test_hybrid_chunked_prefill.py": [
       "test_mtp_speculative_mixed_batch_short_prefill",
@@ -3687,6 +4063,9 @@
       "test_replayssm_flashinfer_decode_matches_baseline",
       "test_replayssm_flashinfer_spec_decode_matches_baseline",
       "test_triton_replayssm_align_prefix_cache_matches_baseline"
+    ],
+    "tests/v1/ec_connector/integration/test_filesystem_tiering.py": [
+      "test_filesystem_entry_survives_restart_and_is_promoted"
     ],
     "tests/v1/ec_connector/integration/test_nixl_failure.py": [
       "test_missing_remote_encoding_is_request_scoped"
@@ -3704,7 +4083,8 @@
       "test_engine_core_advanced_sampling",
       "test_engine_core_concurrent_batches",
       "test_engine_core_invalid_request_id_type",
-      "test_engine_core_tp"
+      "test_engine_core_tp",
+      "test_failed_inprocess_startup_releases_model"
     ],
     "tests/v1/engine/test_engine_core_client.py": [
       "test_engine_core_client",
@@ -3735,7 +4115,8 @@
       "test_scale_down_removes_dead_rank_and_recovers"
     ],
     "tests/v1/kv_connector/extract_hidden_states_integration/test_extraction.py": [
-      "test_extract_hidden_states_with_predictable_dummy_model"
+      "test_extract_hidden_states_with_predictable_dummy_model",
+      "test_extract_layer_zero_is_input_embeddings"
     ],
     "tests/v1/kv_connector/moriio_integration/test_write_dummy_e2e_rocm.py": [
       "test_corrupted_prefill_state_is_detected",
@@ -3747,11 +4128,41 @@
     "tests/v1/kv_connector/nixl_integration/test_spec_decode_acceptance.py": [
       "test_spec_decode_acceptance_length"
     ],
+    "tests/v1/kv_connector/umbp_integration/test_mori_standalone_gpu.py": [
+      "test_clear_removes_objects_for_every_client",
+      "test_concurrent_writers_store_whole_objects",
+      "test_engine_restores_after_writer_exits",
+      "test_objects_outlive_the_writer_and_restore_on_another_gpu",
+      "test_process_exits_while_the_server_stays_stopped",
+      "test_server_loss_degrades_to_misses_and_failed_transfers"
+    ],
     "tests/v1/kv_connector/umbp_integration/test_mori_token_e2e.py": [
       "test_hybrid_restore_matches_local_prefix_hit",
+      "test_lazy_offload_defers_stores_until_gpu_reuse",
+      "test_lazy_offload_restores_reused_blocks",
       "test_restore_extends_a_local_prefix_hit",
       "test_restore_matches_recompute",
       "test_restore_under_pool_eviction"
+    ],
+    "tests/v1/kv_connector/unit/moriio/test_moriio_connector.py": [
+      "test_get_exchange_clipped_blocks_clips_only_sw_group",
+      "test_hma_blocks_per_sw_two_groups",
+      "test_hybrid_write_mode_rejected",
+      "test_is_hma_required",
+      "test_moriio_handshake_returns_metadata",
+      "test_non_sliding_window_hybrid_is_rejected",
+      "test_pipeline_parallel_only_on_a_write_producer",
+      "test_pipeline_parallel_producer_runs_on_one_node",
+      "test_read_mode_loads_remote_block_ids",
+      "test_register_kv_caches",
+      "test_single_group_path_unchanged",
+      "test_spec_decode_allowed_with_full_attention_only",
+      "test_spec_decode_allowed_with_sliding_window_in_read_mode",
+      "test_spec_decode_rejected_with_sliding_window_groups",
+      "test_transfer_disabled_hybrid_group_is_ignored",
+      "test_worker_layer_to_group_routing",
+      "test_write_mode_saves_local_block_ids",
+      "test_write_mode_with_chunked_prefill_saves_local_block_ids"
     ],
     "tests/v1/kv_connector/unit/offloading_connector/test_scheduler.py": [
       "test_cache_reset_fence_held_too_long_warns_on_idle_steps",
@@ -3759,6 +4170,9 @@
       "test_cache_reset_holds_promotions_until_flushed_jobs_report",
       "test_cache_reset_twice_before_a_step_still_flushes",
       "test_cache_reset_without_in_flight_jobs_holds_nothing",
+      "test_full_attention_pending_store_fence",
+      "test_full_attention_pending_store_with_bounded_replay",
+      "test_hisparse_host_block_id_does_not_flush_gpu_store",
       "test_lookahead_partial_lookup_uses_available_hashes",
       "test_lookahead_partial_store_uses_checkpoint_hash"
     ],
@@ -3800,6 +4214,10 @@
       "test_sync_fail_invalid_blocks_evicted",
       "test_sync_recompute_blocks_not_freed_for_running_requests"
     ],
+    "tests/v1/kv_connector/unit/test_kv_cache_ready.py": [
+      "test_cache_ready_before_first_request",
+      "test_connector_deferred_registration"
+    ],
     "tests/v1/kv_connector/unit/test_kv_load_failure_recovery.py": [
       "test_async_load_failure",
       "test_async_progressive_load_failure",
@@ -3829,25 +4247,8 @@
       "test_model_or_kv_format_change_isolates"
     ],
     "tests/v1/kv_connector/unit/test_mooncake_store_connector.py": [
-      "test_lookahead_hashed_prefix_is_retried_without_new_blocks"
-    ],
-    "tests/v1/kv_connector/unit/test_moriio_connector.py": [
-      "test_get_exchange_clipped_blocks_clips_only_sw_group",
-      "test_hma_blocks_per_sw_two_groups",
-      "test_hybrid_write_mode_rejected",
-      "test_is_hma_required",
-      "test_moriio_handshake_returns_metadata",
-      "test_non_sliding_window_hybrid_is_rejected",
-      "test_read_mode_loads_remote_block_ids",
-      "test_register_kv_caches",
-      "test_single_group_path_unchanged",
-      "test_spec_decode_allowed_with_full_attention_only",
-      "test_spec_decode_allowed_with_sliding_window_in_read_mode",
-      "test_spec_decode_rejected_with_sliding_window_groups",
-      "test_transfer_disabled_hybrid_group_is_ignored",
-      "test_worker_layer_to_group_routing",
-      "test_write_mode_saves_local_block_ids",
-      "test_write_mode_with_chunked_prefill_saves_local_block_ids"
+      "test_lookahead_hashed_prefix_is_retried_without_new_blocks",
+      "test_reset_running_requests_resumes_in_reporting_step"
     ],
     "tests/v1/kv_connector/unit/test_multi_connector.py": [
       "test_multi_connector_handle_preemptions_integration",
@@ -3883,6 +4284,7 @@
       "test_fs_tiering_offloading",
       "test_mamba_cpu_offload_boundary",
       "test_p2p_cache_reset_with_absent_decoder",
+      "test_sleep_keeps_offloaded_blocks_unless_reset",
       "test_tiering_cache_reset_resumes_promotions_on_idle_engine",
       "test_tiering_offloading"
     ],
@@ -3894,6 +4296,7 @@
     ],
     "tests/v1/kv_connector/unit/test_remote_prefill_lifecycle.py": [
       "test_aborted_kv_load_counts_until_transfer_done",
+      "test_async_kv_load_limits_do_not_block_local_requests",
       "test_async_load_does_not_double_reserve_mamba_spec_blocks",
       "test_async_load_reserves_blocks_for_inflight",
       "test_async_load_reserves_blocks_for_promotion_margin",
@@ -3904,11 +4307,11 @@
       "test_deferred_lookup_does_not_block_parked_load",
       "test_early_kv_load_does_not_overtake_finished_load",
       "test_full_block_prompt",
-      "test_inflight_kv_load_cap_does_not_block_local_requests",
       "test_inflight_kv_loads_follow_connector_may_load_async",
       "test_inflight_kv_loads_start_while_batch_full",
       "test_interleaved_lifecycle",
       "test_kv_fetch_stages_cleared_on_abort",
+      "test_max_async_kv_loads_per_step",
       "test_no_spurious_prefix_caching",
       "test_p_side_chunked_prefill_mamba"
     ],
@@ -3922,15 +4325,6 @@
     "tests/v1/kv_offload/tiering/test_p2p_lifecycle_e2e.py": [
       "test_inference_reuses_a_finished_kv_request_id",
       "test_inference_uses_completion_buffered_after_disconnect"
-    ],
-    "tests/v1/logits_processors/test_custom_offline.py": [
-      "test_custom_logitsprocs",
-      "test_custom_logitsprocs_req",
-      "test_rejects_custom_logitsprocs"
-    ],
-    "tests/v1/logits_processors/test_custom_online.py": [
-      "test_custom_logitsprocs",
-      "test_invalid_custom_logitsproc_arg"
     ],
     "tests/v1/metrics/test_histogram_buckets.py": [
       "test_prometheus_logger_applies_overrides",
@@ -3973,7 +4367,8 @@
     "tests/v1/shutdown/test_delete.py": [
       "test_async_llm_delete",
       "test_llm_delete",
-      "test_llm_delete_inprocess"
+      "test_llm_delete_inprocess",
+      "test_llm_delete_inprocess_removes_bytecode_hooks"
     ],
     "tests/v1/shutdown/test_forward_error.py": [
       "test_async_llm_model_error",
@@ -4007,7 +4402,6 @@
       "test_eager_in_flight_store_dedup_across_steps",
       "test_eager_store_and_load_roundtrip",
       "test_eager_store_does_not_scan_mamba_blocks_positionally",
-      "test_eager_store_matches_gpu_cacheable_prefix",
       "test_eager_store_preemption_cleanup",
       "test_eager_store_preserves_secondary_block_hashes",
       "test_eager_store_resets_block_cursor_after_preemption",
@@ -4045,7 +4439,7 @@
       "test_reset_pending_loads",
       "test_reset_releases_pending_cpu_hits",
       "test_reset_releases_unsubmitted_finished_stores",
-      "test_scheduler_uses_worker_aligned_num_cpu_blocks",
+      "test_scheduler_sizes_by_the_largest_pipeline_stage",
       "test_scratch_group_excluded_from_store_and_load",
       "test_toctou_cpu_hit_evicted_between_phases_no_crash",
       "test_touched_blocks_survive_eviction"
@@ -4054,12 +4448,12 @@
       "test_eagle3_acceptance_length"
     ],
     "tests/v1/spec_decode/test_dflash_lookahead.py": [
-      "test_dflash_drafter_window_reserves_bonus_token",
       "test_dflash_first_prefill_query_window_fits_allocated_blocks",
-      "test_dflash_prefill_reserves_lookahead_blocks"
+      "test_dflash_prefill_reserves_lookahead_blocks",
+      "test_prefill_context_kv_only_config"
     ],
     "tests/v1/spec_decode/test_dynamic_sd.py": [
-      "test_dynamic_sd_is_disabled_with_data_parallel",
+      "test_dynamic_sd_with_data_parallel",
       "test_scheduler_clamps_dsd_k_to_runtime_num_speculative_tokens",
       "test_scheduler_falls_back_to_static_k_when_dsd_not_configured",
       "test_scheduler_initializes_dynamic_sd_lookup_from_speculative_config",
@@ -4068,59 +4462,22 @@
       "test_scheduler_uses_dsd_k_based_on_number_of_scheduled_requests",
       "test_scheduler_uses_static_k_when_no_requests_are_scheduled"
     ],
-    "tests/v1/spec_decode/test_eagle.py": [
-      "test_load_model",
-      "test_prepare_inputs",
-      "test_prepare_inputs_padded",
-      "test_prepare_next_token_ids",
-      "test_propose",
-      "test_propose_refreshes_layout_caches_each_draft_step",
-      "test_propose_stores_probabilistic_draft_probs",
-      "test_set_inputs_first_pass_default_eagle",
-      "test_set_inputs_first_pass_dflash",
-      "test_set_inputs_first_pass_draft_model",
-      "test_set_inputs_first_pass_parallel_drafting"
-    ],
     "tests/v1/spec_decode/test_extract_hidden_states.py": [
       "test_extract_hidden_states_speculative_config_vlm",
-      "test_extract_hidden_states_text_only_config_regression",
-      "test_prepare_next_token_ids_padded",
-      "test_propose",
-      "test_propose_different_layer_counts",
-      "test_proposer_initialization",
-      "test_proposer_initialization_missing_layer_ids"
+      "test_extract_hidden_states_text_only_config_regression"
     ],
     "tests/v1/spec_decode/test_max_len.py": [
       "test_eagle_max_len",
       "test_mtp_speculative_config_max_model_len",
-      "test_ngram_gpu_max_len",
       "test_ngram_max_len"
     ],
     "tests/v1/spec_decode/test_mtp.py": [
-      "test_glm_mtp_feeds_back_final_normed_hidden",
-      "test_mtp_load_model_unified",
-      "test_mtp_propose"
+      "test_glm_mtp_feeds_back_final_normed_hidden"
     ],
     "tests/v1/spec_decode/test_mtp_structured_output.py": [
       "test_bitmask_engine_reasoner_ends_midwindow_with_padding",
       "test_xgrammar_accept_tokens_stops_at_termination",
       "test_xgrammar_validate_tokens_stops_at_termination"
-    ],
-    "tests/v1/spec_decode/test_ngram_gpu.py": [
-      "test_construction_validates_speculative_config",
-      "test_falls_back_to_3gram_when_4gram_missing",
-      "test_min_n_eq_1",
-      "test_multibatch_independent_choice_of_n",
-      "test_multibatch_mixed",
-      "test_no_4gram_match_only",
-      "test_no_match_clears_previous_proposal",
-      "test_noncontiguous_idx_mapping",
-      "test_picks_longest_match_among_2_3_4_grams",
-      "test_picks_rightmost_when_multiple_matches",
-      "test_prefers_longer_ngram",
-      "test_short_context_yields_zero_valid",
-      "test_tail_falls_back_when_few_tokens_after_match",
-      "test_zero_sampled_disables_proposal"
     ],
     "tests/v1/spec_decode/test_speculators_correctness.py": [
       "test_speculators_correctness",
@@ -4129,15 +4486,13 @@
     "tests/v1/spec_decode/test_speculators_eagle3.py": [
       "test_eagle3_speculators_model"
     ],
-    "tests/v1/spec_decode/test_vocab_mapping.py": [
-      "test_detect_space_prefix_real_tokenizers"
-    ],
     "tests/v1/streaming_input/test_scheduler_streaming.py": [
       "TestStreamingScheduler::test_add_request",
       "TestStreamingScheduler::test_chunk_logprobs_do_not_depend_on_continuation_arrival",
       "TestStreamingScheduler::test_process_streaming_requests_with_finish_session",
       "TestStreamingScheduler::test_streaming_e2e_lifecycle",
       "TestStreamingScheduler::test_streaming_request_session_update",
+      "TestStreamingScheduler::test_streaming_update_overflow_via_queue_drains_to_fitting_update",
       "TestStreamingScheduler::test_update_request_as_session",
       "TestStreamingScheduler::test_update_request_as_session_drops_stale_block_hashes",
       "TestStreamingScheduler::test_update_request_as_session_max_token",
@@ -4170,18 +4525,19 @@
       "test_token_naming_grammars_can_emit_special_tokens"
     ],
     "tests/v1/structured_output/test_grammar_backends.py": [
-      "test_accept_tokens_rejection_is_atomic"
+      "test_accept_tokens_rejection_is_atomic",
+      "test_vocab_size_is_respected"
     ],
     "tests/v1/structured_output/test_structured_output_manager.py": [
       "test_clear_backend_waits_for_running_grammar_and_cancels_pending",
       "test_clear_backend_without_grammar",
       "test_initial_constraint_activation",
+      "test_mixed_backend_flows",
       "test_outlines_choice_with_non_bmp_characters",
       "test_outlines_termination",
       "test_parallel_fill_masks_grammar_invalid_implicit_end",
       "test_real_flow",
       "test_reasoning_rows_mask_grammar_invalid_implicit_end",
-      "test_regex_flow",
       "test_trim_spec_tokens_with_grammar",
       "test_xgrammar_compiles_choice_without_rewrite"
     ],
@@ -4197,11 +4553,15 @@
       "test_cpu_greedy_sampling_applies_thinking_budget"
     ],
     "tests/v1/worker/test_extensible_kv_cache.py": [
+      "test_adaptive_verification_profiles_against_the_final_cache",
+      "test_allocate_kv_cache_warms_up_wvsplitkrc_before_backing",
       "test_block_outermost_views_have_mapped_memory_past_their_start",
       "test_blocks_within_accounts_for_granule_rounding",
+      "test_capture_gets_the_memory_warmup_committed",
       "test_committed_kv_cache_tensors_match_views",
       "test_committed_views_cover_exactly_the_committed_bytes",
       "test_defragmenting_commit_backs_each_segment_with_one_allocation",
+      "test_drafter_capture_writes_kv_only_to_the_null_block",
       "test_engine_pads_segments_without_a_connector",
       "test_mixed_block_strides_commit_per_layer",
       "test_pad_kv_cache_segments",
@@ -4209,30 +4569,8 @@
       "test_release_and_recommit_for_sleep",
       "test_segments_follow_layout",
       "test_shrinking_commit_remaps_to_the_smaller_prefix",
+      "test_sizing_warmup_gets_the_memory_kernel_warmup_committed",
       "test_views_stay_valid_across_commits"
-    ],
-    "tests/v1/worker/test_gpu_model_runner.py": [
-      "test_get_nans_in_logits",
-      "test_hybrid_attention_mamba_tensor_shapes",
-      "test_hybrid_cache_integration",
-      "test_init_kv_cache_with_kv_sharing_valid",
-      "test_init_kv_cache_without_kv_sharing",
-      "test_load_model_weights_inplace",
-      "test_mamba_cache_raises_when_max_num_seqs_exceeds_blocks",
-      "test_reasoning_config_without_custom_logitsprocs_does_not_need_output_token_ids",
-      "test_reload_weights_before_load_model",
-      "test_update_config",
-      "test_update_states_new_request",
-      "test_update_states_no_changes",
-      "test_update_states_pp_async_multi_request_keeps_rank_state_consistent",
-      "test_update_states_pp_non_async_multi_request_keeps_token_buffers_consistent",
-      "test_update_states_request_finished",
-      "test_update_states_request_resumed",
-      "test_update_states_request_unscheduled"
-    ],
-    "tests/v1/worker/test_gpu_model_runner_prefill_tail_classification.py": [
-      "test_prefill_continuation_keeps_placeholder_decode_zero_draft_becomes_zero",
-      "test_prefill_tail_of_two_or_three_tokens_also_keeps_the_placeholder"
     ],
     "tests/v1/worker/test_gpu_target_dependent_ar_speculator.py": [
       "test_load_model_disables_mm_support_for_text_only_drafter",

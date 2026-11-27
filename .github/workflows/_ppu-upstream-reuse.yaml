@@ -34,9 +34,9 @@ jobs:
     timeout-minutes: ${{ matrix.shard == 'strict' && 90 || 150 }}
     strategy:
       fail-fast: false
-      max-parallel: 2
+      max-parallel: 4
       matrix:
-        shard: ${{ fromJSON(inputs.model_asset_probe && '["strict","0","1","2","3","4","5","6","7","8","9"]' || '["strict"]') }}
+        shard: ${{ fromJSON(inputs.model_asset_probe && '["strict","0","1","2","3","4","5","6","7","8","9","10","11","12","13","14","15"]' || '["strict"]') }}
     env:
       GIT_CONFIG_NOSYSTEM: "1"
     defaults:
@@ -128,7 +128,7 @@ jobs:
         run: |
           printf 'PPU_CI_RUNTIME_IMAGE=%s\n' "$CI_RUNTIME_IMAGE" >> "$GITHUB_ENV"
 
-      - name: Run strict M890 reuse in the CI runtime
+      - name: ${{ matrix.shard == 'strict' && 'Run strict M890 reuse in the CI runtime' || 'Run M890 model-asset candidates' }}
         env:
           HF_HOME: /nas_aisw/datasets/hf_cache
           PPU_CI_REUSE_CHECKPOINT_ROOT: /nas_aisw/datasets/checkpoints/LLM
@@ -141,7 +141,7 @@ jobs:
           PPU_CI_REQUIRE_PR_ARTIFACT: ${{ inputs.pr_mode }}
           PPU_CI_WHEEL_SOURCE_SHA: ${{ inputs.wheel_source_sha || inputs.pr_head_sha || github.sha }}
           PPU_CI_REUSE_SHARD: ${{ matrix.shard }}
-          PPU_CI_REUSE_SHARDS: "10"
+          PPU_CI_REUSE_SHARDS: "16"
         run: bash "${PPU_CI_SOURCE_DIR}/scripts/ci/ppu_runtime_container.sh" upstream-reuse
 
       - name: Upload upstream reuse diagnostics

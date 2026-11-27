@@ -3445,7 +3445,7 @@ def test_upstream_reuse_leaf_uses_exact_pin_and_dual_source_identity():
     job = config["jobs"]["upstream-reuse"]
     assert "container" not in job
     assert job["strategy"]["fail-fast"] is False
-    assert job["strategy"]["max-parallel"] == 2
+    assert job["strategy"]["max-parallel"] == 4
     assert job["env"]["GIT_CONFIG_NOSYSTEM"] == "1"
     assert "mktemp" in job["steps"][0]["run"]
     upstream = checkouts(job)[1]

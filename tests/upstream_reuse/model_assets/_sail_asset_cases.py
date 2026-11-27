@@ -47,13 +47,18 @@ def pytest_runtest_logstart(nodeid, location):
 
 
 def pytest_runtest_logreport(report):
+    reason = report.longreprtext if report.longrepr is not None else ""
+    if report.failed:
+        captured = "\n".join(content for _, content in report.sections)
+        if captured:
+            reason += "\n\nCaptured output (tail):\n" + captured[-12000:]
     _emit(
         {
             "event": "test_report",
             "nodeid": report.nodeid,
             "phase": report.when,
             "outcome": report.outcome,
-            "reason": report.longreprtext if report.longrepr is not None else "",
+            "reason": reason,
             "xfail": getattr(report, "wasxfail", ""),
         }
     )

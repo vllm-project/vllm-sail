@@ -19,9 +19,10 @@ def test_asset_probe_shards_cover_each_module_once():
 
 
 def test_asset_probe_requires_pinned_manifest():
-    assert run.load_modules(
-        run.HERE / "manifest.json", "047f6bfbb22cf4815162125f107e6dd90c72478a"
+    pin = (
+        (run.HERE.parents[2] / ".github/vllm-main-verified.commit").read_text().strip()
     )
+    assert run.load_modules(run.HERE / "manifest.json", pin)
     with pytest.raises(ValueError, match="upstream pin"):
         run.load_modules(run.HERE / "manifest.json", "0" * 40)
 
@@ -44,6 +45,7 @@ def test_asset_probe_keeps_parameter_ids_and_reasons(tmp_path, monkeypatch):
         "class TestModel:\n"
         '    @pytest.mark.parametrize("model", ["cached", "missing"])\n'
         "    def test_load(self, model):\n"
+        '        print("cache lookup:", model)\n'
         '        assert model == "cached", "missing model"\n'
         "def test_skip():\n"
         '    pytest.skip("requires another backend")\n'
@@ -75,4 +77,5 @@ def test_asset_probe_keeps_parameter_ids_and_reasons(tmp_path, monkeypatch):
         event["outcome"]: event["reason"] for event in events if event.get("reason")
     }
     assert "missing model" in reasons["failed"]
+    assert "cache lookup: missing" in reasons["failed"]
     assert "requires another backend" in reasons["skipped"]
