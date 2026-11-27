@@ -23,6 +23,9 @@ import pytest
 pytest.importorskip("torch", reason="requires torch")
 pytest.importorskip("vllm", reason="requires vLLM")
 
+from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors import (
+    CompressedTensorsConfig,
+)
 from vllm.model_executor.layers.quantization.mxfp4 import Mxfp4Config
 from vllm.model_executor.models.interfaces import SupportsQuant
 
@@ -75,6 +78,35 @@ def _model_classes():
 
 def _make_quant_config() -> Mxfp4Config:
     return Mxfp4Config(fp8_channelwise_layers=list(FP8_CHANNELWISE_LAYERS))
+
+
+def test_vision_mlp_quant_exclusions_match_loaded_weights():
+    from torch.nn import Linear
+
+    _, model = _model_classes()
+    encoder = "vision_tower.vision_model.encoder.layers.0"
+    checkpoint_names = [f"{encoder}.mlp.fc1", f"{encoder}.mlp.fc2"]
+    quant = CompressedTensorsConfig(
+        target_scheme_map={"Linear": {"format": "int-quantized"}},
+        ignore=[*checkpoint_names, "multi_modal_projector.linear_1"],
+        quant_format="int-quantized",
+    )
+    model.__new__(model, quant)
+
+    linear = Linear(2, 2)
+    mapper = model.hf_to_vllm_mapper
+    for name in checkpoint_names:
+        runtime_name = mapper.map_name(name + ".weight").removesuffix(".weight")
+        assert runtime_name == f"{encoder}.{name.rsplit('.', 1)[1]}"
+        assert quant.get_scheme_dict(linear, runtime_name) is None
+
+    assert (
+        quant.get_scheme_dict(linear, "vision_tower.multi_modal_projector.linear_1")
+        is None
+    )
+    assert mapper.map_name(f"{encoder}.mlp.fc10") == f"{encoder}.mlp.fc10"
+    expert = "language_model.model.layers.3.block_sparse_moe.experts.0.w1"
+    assert quant.get_scheme_dict(linear, expert) is not None
 
 
 class TestPackedModulesMappingInjection:

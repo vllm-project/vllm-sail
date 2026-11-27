@@ -246,8 +246,13 @@ class PPUPlatform(NvmlCudaPlatform):
         # the registration after torch and the platform are both initialised.
         from vllm_sail import ops  # noqa: F401
         from vllm_sail.models.deepseek_v41.config import normalize_expert_dtype
+        from vllm_sail.renderers.qwen4exp_mode import select_qwen4exp_mode
 
         normalize_expert_dtype(vllm_config)
+
+        # Qwen4Exp checkpoints render chat through a native Python encoder when
+        # they ship no Jinja template; default them to the out-of-tree renderer.
+        select_qwen4exp_mode(vllm_config.model_config)
 
         if vllm_config.kernel_config.moe_backend == "deep_gemm_mega_moe":
             from vllm_sail.utils.deep_gemm_mega import (

@@ -169,6 +169,10 @@ def test_registry_registration_fails_terminally_after_partial_failure(
             "vllm_sail.registry.quant_config",
             register=lambda: events.append("quant"),
         ),
+        "renderers": _module(
+            "vllm_sail.registry.renderers",
+            register=lambda: events.append("renderers"),
+        ),
         "moe_backends": _module(
             "vllm_sail.registry.moe_backends",
             register=lambda: events.append("moe"),
