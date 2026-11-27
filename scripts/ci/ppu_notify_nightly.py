@@ -29,18 +29,18 @@ ACCURACY = (
     "golden_config_mismatch",
 )
 SETUP = (
-    "lite_perf_config_mismatch",
+    "light_perf_config_mismatch",
     "runtime_setup_failed",
     "wheel_verification_failed",
     "recipe_validation_failed",
     "runtime_dependencies_failed",
     "platform_check_failed",
 )
-LITE_PERF = (
-    "lite_perf_measurement_failed",
-    "lite_perf_measurement_timeout",
-    "lite_perf_measurement_unstable",
-    "lite_perf_regression",
+LIGHT_PERF = (
+    "light_perf_measurement_failed",
+    "light_perf_measurement_timeout",
+    "light_perf_measurement_unstable",
+    "light_perf_regression",
 )
 
 
@@ -94,10 +94,10 @@ def failure(model, phase):
     return {"model": model, "status": "fail", "phase": phase}
 
 
-def lite_perf_evidence(root, run_id, attempt):
+def light_perf_evidence(root, run_id, attempt):
     report = json_file(
         root
-        / f"ppu-recipe-lite_perf-deepseek-v4.1-flash-{run_id}-{attempt}"
+        / f"ppu-recipe-light_perf-deepseek-v4.1-flash-{run_id}-{attempt}"
         / "summary.json"
     )
     status = report["status"]
@@ -106,7 +106,7 @@ def lite_perf_evidence(root, run_id, attempt):
     reason = report.get("failure_reason")
     phase = (
         "lightweight performance regression"
-        if reason in LITE_PERF
+        if reason in LIGHT_PERF
         else runtime_failure_phase(reason)
     )
     return status, phase, None, None
@@ -121,13 +121,15 @@ def collect(root):
         f"Recipe model sanity & micro-E2E / Model sanity & micro-E2E {key}": key
         for key in recipe
     }
-    lite_perf = os.environ.get("NOTIFY_LITE_PERF_SELECTED") == "true"
-    lite_perf_job = "Lightweight Performance Regression / Lite perf deepseek-v4.1-flash"
-    lite_perf_key = "deepseek-v4.1-flash-lite-perf"
-    selected_keys = legacy + recipe + ([lite_perf_key] if lite_perf else [])
+    light_perf = os.environ.get("NOTIFY_LIGHT_PERF_SELECTED") == "true"
+    light_perf_job = (
+        "Lightweight Performance Regression / Light perf deepseek-v4.1-flash"
+    )
+    light_perf_key = "deepseek-v4.1-flash-light-perf"
+    selected_keys = legacy + recipe + ([light_perf_key] if light_perf else [])
     expected_jobs = set(legacy_jobs) | set(recipe_jobs)
-    if lite_perf:
-        expected_jobs.add(lite_perf_job)
+    if light_perf:
+        expected_jobs.add(light_perf_job)
     jobs, elapsed = run_jobs(expected_jobs)
     build = os.environ["NOTIFY_BUILD_RESULT"]
     skip_build = os.environ.get("NOTIFY_SKIP_BUILD") == "true"
@@ -155,12 +157,12 @@ def collect(root):
                         partial(evidence, root, key, prefix, run_id),
                     )
                 )
-        if lite_perf:
+        if light_perf:
             results.append(
                 model_result(
-                    lite_perf_key,
-                    jobs.get(lite_perf_job),
-                    partial(lite_perf_evidence, root, run_id),
+                    light_perf_key,
+                    jobs.get(light_perf_job),
+                    partial(light_perf_evidence, root, run_id),
                 )
             )
         if not results:

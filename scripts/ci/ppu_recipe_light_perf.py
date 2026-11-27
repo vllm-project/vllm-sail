@@ -187,7 +187,7 @@ def assess(current, baseline):
     if baseline["schema_version"] != 1 or baseline["config"] != current["config"]:
         return {
             "status": "fail",
-            "failure_reason": "lite_perf_config_mismatch",
+            "failure_reason": "light_perf_config_mismatch",
             "cases": [],
             "config_mismatch": [
                 field
@@ -208,7 +208,7 @@ def assess(current, baseline):
             or type(cv) not in (int, float)
             or not 0 <= cv <= MAX_CV
         ):
-            raise ValueError("Invalid lite perf baseline metric")
+            raise ValueError("Invalid light perf baseline metric")
         if Decimal(str(median_us)) > Decimal(str(baseline_us)) * REGRESSION_LIMIT:
             status = "FAIL"
         elif metric["cv"] > MAX_CV:
@@ -226,9 +226,9 @@ def assess(current, baseline):
         )
     failed = {row["status"] for row in rows}
     reason = (
-        "lite_perf_regression"
+        "light_perf_regression"
         if "FAIL" in failed
-        else "lite_perf_measurement_unstable"
+        else "light_perf_measurement_unstable"
         if "UNSTABLE" in failed
         else "not_applicable"
     )
@@ -251,8 +251,8 @@ def run(args):
     output = args.results_dir
     output.mkdir(parents=True, exist_ok=True)
     policy = _load_yaml(args.policy)
-    resolved = resolve_recipe(args.recipe, policy_path=args.policy, tier="lite_perf")
-    groups = policy["tiers"]["lite_perf"]["groups"]
+    resolved = resolve_recipe(args.recipe, policy_path=args.policy, tier="light_perf")
+    groups = policy["tiers"]["light_perf"]["groups"]
     count = resolved["ppu_count"]
     devices = [
         torch.cuda.get_device_name(rank) for rank in range(torch.cuda.device_count())
@@ -308,7 +308,7 @@ def run(args):
         },
         "metrics": {},
     }
-    baseline_name = f"{args.policy.stem}-lite-perf.json"
+    baseline_name = f"{args.policy.stem}-light-perf.json"
     baseline = None
     if not args.capture_baseline:
         path = ROOT / "tests/e2e/perf/baselines/890p" / baseline_name
@@ -331,14 +331,14 @@ def run(args):
                 run_benchmark(argv, env, log)
         except subprocess.TimeoutExpired:
             print(
-                f"Lite perf benchmark exceeded {BENCHMARK_TIMEOUT_S} seconds",
+                f"Light perf benchmark exceeded {BENCHMARK_TIMEOUT_S} seconds",
                 file=sys.stderr,
             )
             write_json(
                 output / "summary.json",
                 {
                     "status": "fail",
-                    "failure_reason": "lite_perf_measurement_timeout",
+                    "failure_reason": "light_perf_measurement_timeout",
                     "cases": [],
                 },
             )
@@ -353,7 +353,7 @@ def run(args):
         summary = assess(current, baseline)
     else:
         if any(metric["cv"] > MAX_CV for metric in current["metrics"].values()):
-            raise ValueError("Cannot capture unstable lite perf measurements")
+            raise ValueError("Cannot capture unstable light perf measurements")
         write_json(output / baseline_name, current)
         summary = {"status": "pass", "failure_reason": "not_applicable", "cases": []}
     write_json(output / "summary.json", summary)
@@ -369,7 +369,7 @@ def publish():
     private = artifacts / "results"
     public = Path(os.environ["PUBLIC_DIR"])
     status = "fail"
-    reason = failure_reason(artifacts, "lite_perf")
+    reason = failure_reason(artifacts, "light_perf")
     rows = []
     config_mismatch = []
     try:
@@ -381,13 +381,13 @@ def publish():
             raise ValueError("Expected bounded regular summary")
         report = json.loads(path.read_text())
         if report["status"] == "fail" and report["failure_reason"] in {
-            "lite_perf_config_mismatch",
-            "lite_perf_regression",
-            "lite_perf_measurement_timeout",
-            "lite_perf_measurement_unstable",
+            "light_perf_config_mismatch",
+            "light_perf_regression",
+            "light_perf_measurement_timeout",
+            "light_perf_measurement_unstable",
         }:
             reason = report["failure_reason"]
-        if reason == "lite_perf_config_mismatch":
+        if reason == "light_perf_config_mismatch":
             config_mismatch = [
                 field
                 for field in BASELINE_CONFIG_FIELDS
@@ -395,7 +395,7 @@ def publish():
             ]
         cases = report["cases"]
         if not isinstance(cases, list):
-            raise ValueError("Expected a list of lite perf results")
+            raise ValueError("Expected a list of light perf results")
         for row in cases:
             if (
                 CASE_NAME.fullmatch(row["case"])

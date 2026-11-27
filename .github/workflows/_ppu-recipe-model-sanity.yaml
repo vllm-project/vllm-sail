@@ -42,7 +42,7 @@ on:
         description: Skip wheel download/install and run directly inside the prebuilt runtime image
         type: boolean
         default: false
-      lite_perf:
+      light_perf:
         description: Run the lightweight performance regression tier
         type: boolean
         default: false
@@ -89,7 +89,7 @@ jobs:
         id: select
         env:
           MODELS: ${{ inputs.models }}
-          TIER: ${{ inputs.lite_perf && 'lite_perf' || 'model_sanity' }}
+          TIER: ${{ inputs.light_perf && 'light_perf' || 'model_sanity' }}
           PR_MODE: ${{ inputs.pr_mode }}
           BUILD_RUN_ID: ${{ inputs.build_run_id }}
           SELECTED_MATRIX: ${{ inputs.selected_matrix }}
@@ -98,7 +98,7 @@ jobs:
           SKIP_WHEEL_BUILD: ${{ inputs.skip_wheel_build }}
         run: |
           test "$PR_MODE" != true
-          if [[ "$TIER" == lite_perf ]]; then
+          if [[ "$TIER" == light_perf ]]; then
             test "${SKIP_WHEEL_BUILD:-false}" = false
             test -n "$MODELS"
             test -z "$SELECTED_MATRIX"
@@ -146,10 +146,10 @@ jobs:
           printf 'ready_epoch=%s\n' "$(date +%s)" >> "$GITHUB_OUTPUT"
 
   sanity:
-    name: ${{ inputs.lite_perf && 'Lite perf' || 'Model sanity & micro-E2E' }} ${{ matrix.model.key }}
+    name: ${{ inputs.light_perf && 'Light perf' || 'Model sanity & micro-E2E' }} ${{ matrix.model.key }}
     needs: prepare
     runs-on: 8-ppu-m890p
-    timeout-minutes: ${{ inputs.lite_perf && 60 || 240 }}
+    timeout-minutes: ${{ inputs.light_perf && 60 || 240 }}
     strategy:
       fail-fast: false
       max-parallel: 2
@@ -255,7 +255,7 @@ jobs:
           MODEL_ID: ${{ matrix.model.model_id }}
           RECIPE_PATH: ${{ matrix.model.recipe_path }}
           POLICY_PATH: ${{ matrix.model.policy_path }}
-          TIER: ${{ inputs.lite_perf && 'lite_perf' || 'model_sanity' }}
+          TIER: ${{ inputs.light_perf && 'light_perf' || 'model_sanity' }}
           PRESET: ${{ matrix.model.preset || '' }}
           PPU_CI_QUEUE_S: ${{ steps.runtime.outputs.queue_s }}
         run: |
@@ -285,7 +285,7 @@ jobs:
           PPU_CI_SOURCE_DIR: ${{ steps.runtime.outputs.source }}
           PPU_CI_SOURCE_SHA: ${{ inputs.pr_head_sha || github.sha }}
           PPU_CI_ARTIFACT_DIR: ${{ steps.runtime.outputs.artifacts }}
-          TIER: ${{ inputs.lite_perf && 'lite_perf' || 'model_sanity' }}
+          TIER: ${{ inputs.light_perf && 'light_perf' || 'model_sanity' }}
           MODEL_KEY: ${{ matrix.model.key }}
           RECIPE_OUTCOME: ${{ steps.recipe.outcome }}
         run: |
@@ -294,7 +294,7 @@ jobs:
 
       - name: Publish public recipe sanity summary
         id: publish
-        if: always() && steps.runtime.outcome == 'success' && !inputs.lite_perf
+        if: always() && steps.runtime.outcome == 'success' && !inputs.light_perf
         env:
           RECIPE_OUTCOME: ${{ steps.recipe.outcome }}
           RETENTION_OUTCOME: ${{ steps.retain.outcome }}
@@ -490,9 +490,9 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
-      - name: Publish public lite perf summary
-        id: publish-lite-perf
-        if: always() && steps.runtime.outcome == 'success' && inputs.lite_perf
+      - name: Publish public light perf summary
+        id: publish-light-perf
+        if: always() && steps.runtime.outcome == 'success' && inputs.light_perf
         env:
           RECIPE_OUTCOME: ${{ steps.recipe.outcome }}
           RETENTION_OUTCOME: ${{ steps.retain.outcome }}
@@ -501,17 +501,17 @@ jobs:
           PUBLIC_DIR: ${{ steps.runtime.outputs.public }}
         run: |
           python3 --version
-          python3 -I "${TRUSTED_CI_DIR}/scripts/ci/ppu_recipe_lite_perf.py" publish
+          python3 -I "${TRUSTED_CI_DIR}/scripts/ci/ppu_recipe_light_perf.py" publish
 
-      - name: Upload public lite perf summary
-        if: always() && steps.publish-lite-perf.outcome == 'success'
+      - name: Upload public light perf summary
+        if: always() && steps.publish-light-perf.outcome == 'success'
         uses: actions/upload-artifact@v4
         with:
-          name: ppu-recipe-lite_perf-${{ matrix.model.key }}-${{ github.run_id }}-${{ github.run_attempt }}
+          name: ppu-recipe-light_perf-${{ matrix.model.key }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ steps.runtime.outputs.public }}/summary.json
           if-no-files-found: error
           retention-days: 14
 
-      - name: Enforce lite perf verdict
-        if: always() && steps.publish-lite-perf.outcome == 'success' && steps.publish-lite-perf.outputs.status != 'pass'
+      - name: Enforce light perf verdict
+        if: always() && steps.publish-light-perf.outcome == 'success' && steps.publish-light-perf.outputs.status != 'pass'
         run: exit 1

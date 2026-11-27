@@ -12,7 +12,7 @@ import yaml
 ROOT = Path(__file__).resolve().parents[2]
 CI_DIR = ROOT / "scripts/ci"
 POLICY = ROOT / "tests/ppu/policy/models/deepseek-v4.1-flash.yaml"
-BASELINE = ROOT / "tests/e2e/perf/baselines/890p/deepseek-v4.1-flash-lite-perf.json"
+BASELINE = ROOT / "tests/e2e/perf/baselines/890p/deepseek-v4.1-flash-light-perf.json"
 
 
 @pytest.fixture
@@ -20,9 +20,9 @@ def modules(monkeypatch):
     monkeypatch.syspath_prepend(str(CI_DIR))
     monkeypatch.syspath_prepend(str(ROOT / "tests/e2e/perf"))
     import ppu_recipe
-    import ppu_recipe_lite_perf
+    import ppu_recipe_light_perf
 
-    return ppu_recipe, ppu_recipe_lite_perf
+    return ppu_recipe, ppu_recipe_light_perf
 
 
 def test_recipe_resolves_only_the_tp_prefill_command(tmp_path, modules):
@@ -40,13 +40,13 @@ def test_recipe_resolves_only_the_tp_prefill_command(tmp_path, modules):
                 "--policy",
                 str(POLICY),
                 "--tier",
-                "lite_perf",
+                "light_perf",
             ],
             text=True,
         )
     )
     commands = runner.commands(
-        resolved, policy["tiers"]["lite_perf"]["groups"], tmp_path, tmp_path
+        resolved, policy["tiers"]["light_perf"]["groups"], tmp_path, tmp_path
     )
     assert list(commands) == ["prefill"]
     for cmd in commands.values():
@@ -65,14 +65,14 @@ def test_recipe_resolves_only_the_tp_prefill_command(tmp_path, modules):
     assert "prefill_100k=102400" in commands["prefill"]
     baseline = json.loads(BASELINE.read_text())
     assert resolved["config_digest"] == baseline["config"]["recipe_config_digest"]
-    assert policy["tiers"]["lite_perf"]["groups"] == baseline["config"]["groups"]
+    assert policy["tiers"]["light_perf"]["groups"] == baseline["config"]["groups"]
     assert {
         name: runner.benchmark_args(cmd, resolved["hf_model_id"])
         for name, cmd in commands.items()
     } == baseline["config"]["benchmark_args"]
 
 
-def test_policy_validation_rejects_non_tp_lite_perf_recipe(tmp_path, modules):
+def test_policy_validation_rejects_non_tp_light_perf_recipe(tmp_path, modules):
     recipe, _ = modules
     policy = recipe._load_yaml(POLICY)
     doc = recipe._load_yaml(ROOT / policy["recipe"])
@@ -82,7 +82,9 @@ def test_policy_validation_rejects_non_tp_lite_perf_recipe(tmp_path, modules):
     model_recipe.write_text(yaml.safe_dump(doc))
     policy["recipe"] = model_recipe.name
     with pytest.raises(recipe.ValidationError, match="requires a TP recipe"):
-        recipe.validate_policy_structure(policy, context="lite_perf", base_dir=tmp_path)
+        recipe.validate_policy_structure(
+            policy, context="light_perf", base_dir=tmp_path
+        )
 
 
 def test_snapshot_provenance_supports_commit_and_local_cache_ref(tmp_path, modules):
@@ -139,7 +141,7 @@ def test_result_validation_and_comparison(tmp_path, modules):
     assert runner.assess(baseline, baseline)["status"] == "pass"
     assert runner.assess({**baseline, "config": {}}, baseline) == {
         "status": "fail",
-        "failure_reason": "lite_perf_config_mismatch",
+        "failure_reason": "light_perf_config_mismatch",
         "cases": [],
         "config_mismatch": ["devices"],
     }
@@ -151,13 +153,13 @@ def test_result_validation_and_comparison(tmp_path, modules):
         (99, 0, "PASS", "not_applicable"),
         (104.99, 0, "PASS", "not_applicable"),
         (105, 0, "PASS", "not_applicable"),
-        (105.00001, 0, "FAIL", "lite_perf_regression"),
-        (106, 0.10, "FAIL", "lite_perf_regression"),
-        (104, 0.16, "UNSTABLE", "lite_perf_measurement_unstable"),
-        (106, 0.16, "FAIL", "lite_perf_regression"),
+        (105.00001, 0, "FAIL", "light_perf_regression"),
+        (106, 0.10, "FAIL", "light_perf_regression"),
+        (104, 0.16, "UNSTABLE", "light_perf_measurement_unstable"),
+        (106, 0.16, "FAIL", "light_perf_regression"),
     ],
 )
-def test_lite_perf_regression_threshold(modules, median_us, cv, case_status, reason):
+def test_light_perf_regression_threshold(modules, median_us, cv, case_status, reason):
     _, runner = modules
     baseline = {
         "schema_version": 1,
@@ -195,7 +197,7 @@ def test_one_regressed_case_is_reported_to_nightly(tmp_path, monkeypatch, module
     private = tmp_path / "private"
     (private / "results").mkdir(parents=True)
     runner.write_json(private / "results/summary.json", report)
-    public = tmp_path / "ppu-recipe-lite_perf-deepseek-v4.1-flash-123-1"
+    public = tmp_path / "ppu-recipe-light_perf-deepseek-v4.1-flash-123-1"
     public.mkdir()
     summary = tmp_path / "step-summary.md"
     for key, value in {
@@ -213,7 +215,7 @@ def test_one_regressed_case_is_reported_to_nightly(tmp_path, monkeypatch, module
         "NOTIFY_LEGACY_RESULT": "skipped",
         "NOTIFY_RECIPE_MATRIX": '{"include":[{"key":"atlas"}]}',
         "NOTIFY_LEGACY_MATRIX": "",
-        "NOTIFY_LITE_PERF_SELECTED": "true",
+        "NOTIFY_LIGHT_PERF_SELECTED": "true",
     }.items():
         monkeypatch.setenv(key, value)
     assert runner.publish() == 0
@@ -221,7 +223,9 @@ def test_one_regressed_case_is_reported_to_nightly(tmp_path, monkeypatch, module
     assert "| +6.00% | FAIL |" in summary.read_text()
 
     recipe_job = "Recipe model sanity & micro-E2E / Model sanity & micro-E2E atlas"
-    lite_perf_job = "Lightweight Performance Regression / Lite perf deepseek-v4.1-flash"
+    light_perf_job = (
+        "Lightweight Performance Regression / Light perf deepseek-v4.1-flash"
+    )
     artifact = tmp_path / "ppu-recipe-model_sanity-atlas-123-1"
     artifact.mkdir()
     runner.write_json(
@@ -236,7 +240,7 @@ def test_one_regressed_case_is_reported_to_nightly(tmp_path, monkeypatch, module
     )
     jobs = {
         recipe_job: JobExecution("success", 1, 201, 60),
-        lite_perf_job: JobExecution("failure", 1, 202, 720),
+        light_perf_job: JobExecution("failure", 1, 202, 720),
     }
     monkeypatch.setattr(
         "ppu_notify_nightly.run_jobs",
@@ -246,16 +250,16 @@ def test_one_regressed_case_is_reported_to_nightly(tmp_path, monkeypatch, module
     rows = report["results"]
     assert [(row["model"], row["status"]) for row in rows] == [
         ("atlas", "pass"),
-        ("deepseek-v4.1-flash-lite-perf", "fail"),
+        ("deepseek-v4.1-flash-light-perf", "fail"),
     ]
     markdown = make_payload(report, {}, 0, version="main")["markdown"]
     assert markdown["title"] == "[vllm-sail | main] PPU Nightly 晨报"
     assert (
-        "`deepseek-v4.1-flash-lite-perf` · lightweight performance regression"
+        "`deepseek-v4.1-flash-light-perf` · lightweight performance regression"
         in markdown["text"]
     )
     assert "actions/runs/123/job/202" in markdown["text"]
-    monkeypatch.setenv("NOTIFY_LITE_PERF_SELECTED", "")
+    monkeypatch.setenv("NOTIFY_LIGHT_PERF_SELECTED", "")
     assert collect(tmp_path)["results"] == rows[:1]
 
 
@@ -263,12 +267,12 @@ def test_one_regressed_case_is_reported_to_nightly(tmp_path, monkeypatch, module
     "results, recipe_outcome, retention_outcome, reason",
     [
         ("missing", "failure", "success", "model_cache_check_failed"),
-        ("mismatch", "failure", "success", "lite_perf_config_mismatch"),
-        ("malformed", "success", "success", "lite_perf_measurement_failed"),
-        ("empty", "success", "success", "lite_perf_measurement_failed"),
+        ("mismatch", "failure", "success", "light_perf_config_mismatch"),
+        ("malformed", "success", "success", "light_perf_measurement_failed"),
+        ("empty", "success", "success", "light_perf_measurement_failed"),
         ("pass", "success", "failure", "private_retention_failed"),
         ("pass", "success", "success", "not_applicable"),
-        ("timeout", "failure", "success", "lite_perf_measurement_timeout"),
+        ("timeout", "failure", "success", "light_perf_measurement_timeout"),
     ],
 )
 def test_isolated_publisher_emits_verdict_without_private_details(
@@ -276,7 +280,7 @@ def test_isolated_publisher_emits_verdict_without_private_details(
 ):
     private = tmp_path / "private"
     (private / "results").mkdir(parents=True)
-    phase = "model_cache_check" if results == "missing" else "lite_perf_measurement"
+    phase = "model_cache_check" if results == "missing" else "light_perf_measurement"
     (private / "recipe-phase.txt").write_text(phase + "\n")
     (private / "runtime.log").write_text("private-runtime-error\n")
     evidence = private / "results/summary.json"
@@ -315,7 +319,7 @@ def test_isolated_publisher_emits_verdict_without_private_details(
     public.mkdir()
     summary = tmp_path / "step-summary.md"
     result = subprocess.run(
-        [sys.executable, "-IB", str(CI_DIR / "ppu_recipe_lite_perf.py"), "publish"],
+        [sys.executable, "-IB", str(CI_DIR / "ppu_recipe_light_perf.py"), "publish"],
         env={
             **os.environ,
             "PRIVATE_DIR": str(private),
@@ -354,27 +358,27 @@ def test_isolated_publisher_emits_verdict_without_private_details(
         ("runtime_setup_failed", "runtime_setup"),
         ("model_cache_check_failed", "model_cache_check"),
         ("private_retention_failed", "private_retention"),
-        ("lite_perf_config_mismatch", "runtime_setup"),
-        ("lite_perf_measurement_timeout", "lightweight performance regression"),
-        ("lite_perf_regression", "lightweight performance regression"),
+        ("light_perf_config_mismatch", "runtime_setup"),
+        ("light_perf_measurement_timeout", "lightweight performance regression"),
+        ("light_perf_regression", "lightweight performance regression"),
         ("unexpected", "unknown"),
     ],
 )
-def test_nightly_attributes_lite_perf_failures(tmp_path, modules, reason, phase):
+def test_nightly_attributes_light_perf_failures(tmp_path, modules, reason, phase):
     _, runner = modules
-    from ppu_notify_nightly import lite_perf_evidence
+    from ppu_notify_nightly import light_perf_evidence
 
-    artifact = tmp_path / "ppu-recipe-lite_perf-deepseek-v4.1-flash-123-1"
+    artifact = tmp_path / "ppu-recipe-light_perf-deepseek-v4.1-flash-123-1"
     artifact.mkdir()
     runner.write_json(
         artifact / "summary.json",
         {"status": "fail", "failure_reason": reason, "cases": []},
     )
-    assert lite_perf_evidence(tmp_path, "123", 1) == ("fail", phase, None, None)
+    assert light_perf_evidence(tmp_path, "123", 1) == ("fail", phase, None, None)
 
 
 @pytest.mark.parametrize("launch_signal", [None, signal.SIGTERM, signal.SIGINT])
-def test_lite_perf_timeout_or_cancellation_stops_launcher(
+def test_light_perf_timeout_or_cancellation_stops_launcher(
     tmp_path, monkeypatch, modules, launch_signal
 ):
     _, runner = modules
@@ -404,9 +408,9 @@ def test_lite_perf_timeout_or_cancellation_stops_launcher(
 
 
 @pytest.mark.parametrize(
-    "models, scheduled, enabled, skip_build, lite_perf",
+    "models, scheduled, enabled, skip_build, light_perf",
     [
-        ("lite_perf:deepseek-v4.1-flash", False, False, False, True),
+        ("light_perf:deepseek-v4.1-flash", False, False, False, True),
         ("", True, False, False, False),
         ("", True, True, False, True),
         ("recipe:deepseek-v4.1-flash", False, False, False, False),
@@ -414,12 +418,14 @@ def test_lite_perf_timeout_or_cancellation_stops_launcher(
         ("", False, False, True, False),
     ],
 )
-def test_nightly_selection(tmp_path, models, scheduled, enabled, skip_build, lite_perf):
+def test_nightly_selection(
+    tmp_path, models, scheduled, enabled, skip_build, light_perf
+):
     flow = yaml.safe_load(
         (ROOT / ".github/workflows/ppu-accuracy-nightly.yaml").read_text()
     )
     step = next(s for s in flow["jobs"]["select"]["steps"] if s.get("id") == "select")
-    assert step["env"]["SCHEDULED_LITE_PERF_ENABLED"] == "false"
+    assert step["env"]["SCHEDULED_LIGHT_PERF_ENABLED"] == "false"
     script = step["run"].split("python3 - <<'PY'\n", 1)[1].rsplit("\nPY", 1)[0]
     output = tmp_path / "output"
     env = {
@@ -430,12 +436,12 @@ def test_nightly_selection(tmp_path, models, scheduled, enabled, skip_build, lit
         "SKIP_WHEEL_BUILD": str(skip_build).lower(),
         "RECIPE_PUBLIC_ENABLED": "true",
         "SCHEDULED_RECIPE_ENABLED": str(scheduled).lower(),
-        "SCHEDULED_LITE_PERF_ENABLED": str(enabled).lower(),
+        "SCHEDULED_LIGHT_PERF_ENABLED": str(enabled).lower(),
     }
     subprocess.run([sys.executable, "-B", "-c", script], cwd=ROOT, env=env, check=True)
     values = dict(line.split("=", 1) for line in output.read_text().splitlines())
-    assert (values.get("run_lite_perf") == "true") is lite_perf
-    if models.startswith("lite_perf:"):
+    assert (values.get("run_light_perf") == "true") is light_perf
+    if models.startswith("light_perf:"):
         assert not values.get("matrix") and not values.get("run_recipe")
         assert values["full_run"] == "false"
     elif models.startswith("recipe:"):
@@ -453,7 +459,7 @@ def test_nightly_selection(tmp_path, models, scheduled, enabled, skip_build, lit
 
 
 @pytest.mark.parametrize("scheduled", [False, True])
-def test_nightly_rejects_lite_perf_when_target_has_no_policy_tier(tmp_path, scheduled):
+def test_nightly_rejects_light_perf_when_target_has_no_policy_tier(tmp_path, scheduled):
     target = tmp_path / "target"
     policy = yaml.safe_load(POLICY.read_text())
     # Simulate an earlier checkout that contains the serving recipe and its fast tier.
@@ -486,19 +492,19 @@ def test_nightly_rejects_lite_perf_when_target_has_no_policy_tier(tmp_path, sche
             **os.environ,
             "TARGET_SHA": "b" * 40,
             "GITHUB_OUTPUT": str(output),
-            "MODELS": "" if scheduled else "lite_perf:deepseek-v4.1-flash",
+            "MODELS": "" if scheduled else "light_perf:deepseek-v4.1-flash",
             "SKIP_WHEEL_BUILD": "false",
             "RECIPE_PUBLIC_ENABLED": "true",
             "SCHEDULED_RECIPE_ENABLED": str(scheduled).lower(),
-            "SCHEDULED_LITE_PERF_ENABLED": str(scheduled).lower(),
+            "SCHEDULED_LIGHT_PERF_ENABLED": str(scheduled).lower(),
         },
         capture_output=True,
         text=True,
     )
     assert selection.returncode != 0
     assert (
-        "Lite perf policy is unavailable for the selected target_ref"
+        "Light perf policy is unavailable for the selected target_ref"
         in selection.stderr
     )
-    assert "has no tier 'lite_perf'" in selection.stderr
+    assert "has no tier 'light_perf'" in selection.stderr
     assert not output.exists()

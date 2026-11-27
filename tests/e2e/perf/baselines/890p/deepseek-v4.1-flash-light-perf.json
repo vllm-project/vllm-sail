@@ -80,7 +80,7 @@
         "max_num_seqs": 1
       }
     },
-    "recipe_config_digest": "dfc325ada8cb5286a37e4fb327227e7a7eecf90ba04b66d5b3c4c6a53f728885",
+    "recipe_config_digest": "f84863908f8cbac43a834b89d34d1d90b9e2ad54eeb51e4e6fa5f0f570759d3f",
     "sdk_sha256": "c0c8a191879ad8f18ca4132b728773b7be51ff82edf1abda8c1c66ea2ed87a45",
     "torch_sha256": "96f32f544250ae4aadcaad3956e4fef7ff2779807a211a8c2bc1190ccbf12db8"
   },

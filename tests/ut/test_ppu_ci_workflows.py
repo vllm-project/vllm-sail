@@ -1724,7 +1724,7 @@ def test_recipe_model_sanity_has_one_scheduled_entry():
         ("workflow_dispatch", "recipe:all", "true", [], "", ""),
         ("workflow_dispatch", "recipe:all ", "true", [], "", ""),
         ("workflow_dispatch", " recipe:all ", "true", [], "", ""),
-        ("workflow_dispatch", " lite_perf:deepseek-v4.1-flash ", "true", [], None, ""),
+        ("workflow_dispatch", " light_perf:deepseek-v4.1-flash ", "true", [], None, ""),
         (
             "workflow_dispatch",
             " recipe:all ",
@@ -1844,7 +1844,7 @@ def test_accuracy_nightly_routes_selected_models(
         "needs.resolve-image.result": "skipped",
         "needs.select.outputs.recipe_models": values.get("recipe_models", ""),
         "needs.select.outputs.run_recipe": values.get("run_recipe", "false"),
-        "needs.select.outputs.run_lite_perf": values.get("run_lite_perf", ""),
+        "needs.select.outputs.run_light_perf": values.get("run_light_perf", ""),
         "needs.select.outputs.matrix": legacy_matrix,
     }
     context.update(
@@ -1857,8 +1857,8 @@ def test_accuracy_nightly_routes_selected_models(
     assert values["full_run"] == str(full_selection).lower()
     assert bool(expression(jobs["notify-summary"]["if"], context)) == full_selection
     assert expression(jobs["accuracy"]["if"], context) == (legacy_cases != [])
-    assert bool(expression(jobs["recipe-lite-perf"]["if"], context)) == (
-        models.strip() == "lite_perf:deepseek-v4.1-flash"
+    assert bool(expression(jobs["recipe-light-perf"]["if"], context)) == (
+        models.strip() == "light_perf:deepseek-v4.1-flash"
     )
     if legacy_cases is None:
         catalog = json.loads((ROOT / "scripts/ci/ppu_e2e_models.json").read_text())
@@ -1886,7 +1886,7 @@ def test_accuracy_nightly_routes_selected_models(
     [
         (" recipe:all ", False, False, True),
         (" recipe:glm-5.3 ", False, False, True),
-        (" lite_perf:deepseek-v4.1-flash ", False, False, True),
+        (" light_perf:deepseek-v4.1-flash ", False, False, True),
         (" \t", False, True, True),
         ("glm-5.3-mxfp4-tp4", False, False, False),
         (" \t", False, False, False),
@@ -1934,25 +1934,25 @@ def test_accuracy_nightly_recipe_dependencies_follow_normalized_input(
         assert bool(expression(step["if"], context)) == required
 
 
-def test_lite_perf_artifact_upload_precedes_failed_verdict():
+def test_light_perf_artifact_upload_precedes_failed_verdict():
     job = workflow("_ppu-recipe-model-sanity.yaml")["jobs"]["sanity"]
     steps = job["steps"]
-    publish = next(step for step in steps if step.get("id") == "publish-lite-perf")
+    publish = next(step for step in steps if step.get("id") == "publish-light-perf")
     upload = next(
-        step for step in steps if step.get("name") == "Upload public lite perf summary"
+        step for step in steps if step.get("name") == "Upload public light perf summary"
     )
     gate = next(
-        step for step in steps if step.get("name") == "Enforce lite perf verdict"
+        step for step in steps if step.get("name") == "Enforce light perf verdict"
     )
     assert steps.index(publish) < steps.index(upload) < steps.index(gate)
     assert gate["run"] == "exit 1"
-    context = {"steps.publish-lite-perf.outcome": "success"}
+    context = {"steps.publish-light-perf.outcome": "success"}
     for status in ("pass", "fail"):
-        context["steps.publish-lite-perf.outputs.status"] = status
+        context["steps.publish-light-perf.outputs.status"] = status
         assert expression(upload["if"], context)
         assert expression(gate["if"], context) == (status == "fail")
-    assert expression(job["timeout-minutes"], {"inputs.lite_perf": True}) == 60
-    assert expression(job["timeout-minutes"], {"inputs.lite_perf": False}) == 240
+    assert expression(job["timeout-minutes"], {"inputs.light_perf": True}) == 60
+    assert expression(job["timeout-minutes"], {"inputs.light_perf": False}) == 240
 
 
 @pytest.mark.parametrize(
@@ -2566,13 +2566,14 @@ def test_recipe_retention_and_publication(
     assert steps.index(runtime) < steps.index(retain) < steps.index(publish)
     assert retain["if"] == "always() && steps.runtime.outcome == 'success'"
     if tier == "model_sanity":
-        lite_perf = config[True]["workflow_call"]["inputs"]["lite_perf"]
-        assert lite_perf["type"] == "boolean"
-        assert lite_perf["default"] is False
-        context = {"inputs.lite_perf": lite_perf["default"]}
+        light_perf = config[True]["workflow_call"]["inputs"]["light_perf"]
+        assert light_perf["type"] == "boolean"
+        assert light_perf["default"] is False
+        context = {"inputs.light_perf": light_perf["default"]}
         assert expression(retain["env"]["TIER"], context) == tier
         assert (
-            expression(retain["env"]["TIER"], {"inputs.lite_perf": True}) == "lite_perf"
+            expression(retain["env"]["TIER"], {"inputs.light_perf": True})
+            == "light_perf"
         )
     else:
         assert retain["env"]["TIER"] == tier
