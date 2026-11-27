@@ -69,6 +69,7 @@ jobs:
             --mount "type=bind,source=$temp_dir,target=/probe,readonly" \
             --entrypoint python "$image_id" /probe/probe.py 9>&- >"$temp_dir/probe.log" 2>&1; then
             sed -nE 's/^PROBE_STAGE ([a-z_]+)$/FP32 probe reached \1/p' "$temp_dir/probe.log"
+            grep -E '^PROBE_(EXCEPTION|MODULE|DIAGNOSTIC) [A-Za-z0-9_. ]+$' "$temp_dir/probe.log" || true
             if grep -Fq "PPU DeepSelect currently supports bfloat16 input only" "$temp_dir/probe.log"; then
               echo "DeepSelect rejected FP32 with the BF16-only error"
             fi

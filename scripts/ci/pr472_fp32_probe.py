@@ -3,6 +3,7 @@ import importlib.metadata
 import importlib.util
 import json
 import os
+import re
 from pathlib import Path
 from unittest.mock import patch
 
@@ -28,17 +29,22 @@ def main():
 
     print("PROBE_STAGE load_wheel", flush=True)
     interface = deep_select._wheel()
-    assert interface is not None, "DeepSelect wheel missing"
+    if interface is None:
+        print("PROBE_STAGE wheel_interface_missing", flush=True)
+        raise RuntimeError("DeepSelect wheel interface missing")
+    print("PROBE_STAGE prepare_cpu_scores", flush=True)
     topk = interface.topk
     width = 4096
     k = 512
     values = 1.0 + torch.arange(width, dtype=torch.float32) * (2**-22)
     cpu_scores = torch.stack((values.roll(997), values.flip(0).roll(123)))
     assert cpu_scores.bfloat16().unique().numel() == 1
+    print("PROBE_STAGE copy_fp32_to_device", flush=True)
     scores = cpu_scores.cuda()
     lengths = (4096, 3072)
     ends = torch.tensor(lengths, dtype=torch.int32, device=scores.device)
 
+    print("PROBE_STAGE compute_cpu_reference", flush=True)
     expected = torch.stack(
         [cpu_scores[row, :end].topk(k).indices.sort().values for row, end in enumerate(lengths)]
     )
@@ -74,4 +80,13 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception as error:
+        print(f"PROBE_EXCEPTION {type(error).__name__}", flush=True)
+        if isinstance(error, ModuleNotFoundError) and re.fullmatch(r"[a-zA-Z0-9_.]+", error.name or ""):
+            print(f"PROBE_MODULE {error.name}", flush=True)
+        for marker in ("undefined symbol", "cannot open shared object file", "supports bfloat16 input only"):
+            if marker in str(error):
+                print(f"PROBE_DIAGNOSTIC {marker}", flush=True)
+        raise
