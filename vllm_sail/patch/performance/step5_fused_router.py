@@ -208,6 +208,10 @@ def install() -> None:
         if not dispatch_enabled:
             shared = self.share_expert(hidden_states)
         if fused:
+            # Under sequence parallel ``padding`` is the rank-local mask; pass it
+            # explicitly so the fused op masks the sharded rows correctly instead
+            # of reading the global forward-context prefix. Non-SP passes None and
+            # the op reads that global prefix itself.
             weights, ids = torch.ops.vllm.ppu_step5_fused_router(
                 hidden_states,
                 self.gate.weight,
@@ -215,6 +219,7 @@ def install() -> None:
                 self.router_bias,
                 router.renormalize,
                 router.routed_scaling_factor,
+                padding,
             )
         else:
             logits, _ = self.gate(hidden_states)
@@ -229,11 +234,14 @@ def install() -> None:
         ):
             mask = get_forward_context().is_padding
             padding = mask[: hidden_states.shape[0]] if mask is not None else None
+        # The fused router already masks padding rows (ids=-1, weights=0);
+        # passing padding downstream would re-mask in MegaMoE (4 extra kernels).
+        masked_padding = None if fused else padding
         if dispatch_enabled:
             return mega_moe_dispatch.dispatch(
-                self, hidden_states, weights, ids, padding
+                self, hidden_states, weights, ids, masked_padding
             )
-        return shared, routed_experts(hidden_states, weights, ids, padding)
+        return shared, routed_experts(hidden_states, weights, ids, masked_padding)
         # PPU MODIFICATION: end
 
     _installed = True

@@ -200,7 +200,9 @@ def _reduce_router_kernel(
     else:
         weights *= SCALING
     if HAS_PADDING:
-        indices = tl.where(tl.load(padding_ptr + row), -1, indices)
+        is_pad = tl.load(padding_ptr + row)
+        indices = tl.where(is_pad, -1, indices)
+        weights = tl.where(is_pad, 0.0, weights)
     if IDX64:
         indices = indices.to(tl.int64)
     tl.store(weights_ptr + row * 8 + ks, weights)
@@ -214,10 +216,11 @@ def fused_router(
     bias: torch.Tensor,
     renormalize: bool,
     scaling: float,
+    padding: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     rows = x.shape[0]
     if rows == 0:
-        return _fake(x, weight, bf16_weight, bias, renormalize, scaling)
+        return _fake(x, weight, bf16_weight, bias, renormalize, scaling, padding)
     bm, bn, bk, splits, gm, warps, stages = next(
         (cfg for limit, cfg in _CONFIGS if rows <= limit), _CONFIGS[-1][1]
     )
@@ -244,9 +247,9 @@ def fused_router(
         num_warps=warps,
         num_stages=stages,
     )
-    if splits == 1:
+    if splits == 1 and padding is None:
         # The GEMM has already produced logits. Keep SAIL's native biased TopK.
-        return fused_topk_bias(
+        weights, indices = fused_topk_bias(
             x,
             result[0],
             "sigmoid",
@@ -256,18 +259,29 @@ def fused_router(
             torch.int64,
             routed_scaling_factor=scaling,
         )
-    weights, indices = _fake(x, weight, bf16_weight, bias, renormalize, scaling)
+        # The upstream TopK kernel sets padding ids to -1 but keeps their
+        # weights; zero them so MegaMoE can skip re-masking padding rows.
+        pad = _get_padding_mask(rows)
+        if pad is not None:
+            weights.masked_fill_(pad[:, None], 0.0)
+        return weights, indices
+    weights, indices = _fake(
+        x, weight, bf16_weight, bias, renormalize, scaling, padding
+    )
     sms = torch.cuda.get_device_properties(x.device).multi_processor_count
     topk_warps = 8 if rows <= max(32, sms) else 4 if rows <= 4 * sms else 1
-    padding = _get_padding_mask(rows)
-    if padding is not None:
-        padding = padding.contiguous()
+    # An explicit mask is the rank-local sequence-parallel mask; the fused TopK
+    # below honors it directly. Without one, read the global forward-context
+    # prefix, which is only correct for the unsharded (non-SP) token set.
+    pad = padding if padding is not None else _get_padding_mask(rows)
+    if pad is not None:
+        pad = pad.contiguous()
     _reduce_router_kernel[(rows,)](
         result,
         bias,
         weights,
         indices,
-        padding,
+        pad,
         352,
         rows * 352,
         SPLIT_K=splits,
@@ -275,7 +289,7 @@ def fused_router(
         SCALING=scaling,
         IDX64=True,
         PARALLEL_TOPK=rows <= 32,
-        HAS_PADDING=padding is not None,
+        HAS_PADDING=pad is not None,
         num_warps=topk_warps,
         num_stages=2,
     )
@@ -289,6 +303,7 @@ def _fake(
     bias: torch.Tensor,
     renormalize: bool,
     scaling: float,
+    padding: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     return (
         x.new_empty((x.shape[0], 8), dtype=torch.float32),

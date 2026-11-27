@@ -176,17 +176,15 @@ def install() -> None:
     ):
         ticket = draft_context.get()
         if ticket is not None:
+            # Single consumption attempt per produce, match or not, so a stale
+            # ticket is never reused after a fallback.
             draft_context.set(None)
             predicted, padding, mode = ticket
-            # The target collective issues tickets to all ranks or none. Vote
-            # before consuming a ticket so a local mismatch cannot split the ranks.
-            _, group = dp_utils._get_device_and_group(parallel_config)
+            # The fused target all_reduce already issued tickets to all ranks or
+            # none, and the prediction is rank-invariant, so a mismatch falls
+            # back on every rank without a second collective.
             actual = (num_tokens_unpadded, num_tokens_padded, cudagraph_mode)
-            mismatch = torch.tensor(
-                int(predicted != actual), dtype=torch.int32, device="cpu"
-            )
-            dist.all_reduce(mismatch, op=dist.ReduceOp.MAX, group=group)
-            if not mismatch.item():
+            if predicted == actual:
                 return False, padding, mode
 
         return coordinate(

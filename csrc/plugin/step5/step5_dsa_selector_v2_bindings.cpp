@@ -12,20 +12,22 @@ namespace NS { \
 void step4_dsa_radix_select( \
     torch::Tensor const&, torch::Tensor const&, torch::Tensor const&, \
     torch::Tensor&, torch::Tensor&, torch::Tensor&, \
-    int64_t, int64_t, int64_t, bool); \
+    int64_t, int64_t, int64_t, bool, torch::Tensor const&); \
 }
 DECLARE_SELECTOR(step4_dsa_w256)
 DECLARE_SELECTOR(step4_dsa_w1024)
 #undef DECLARE_SELECTOR
 
 namespace {
-void step5_selector_v2_dispatch(torch::Tensor const& scores, torch::Tensor const& positions,
+void step5_selector_v2_dispatch(torch::Tensor const& scores, torch::Tensor const& current,
             torch::Tensor const& table, torch::Tensor& workspace,
             torch::Tensor& regions, torch::Tensor& starts,
             int64_t region_block, int64_t page_size, int64_t topk,
-            bool packed, int64_t threads) {
+            bool packed, int64_t threads, c10::optional<torch::Tensor> sorted) {
   TORCH_CHECK(scores.is_cuda(), "scores must be on PPU/CUDA");
-  for (auto const& tensor : {positions, table, workspace, regions, starts}) {
+  torch::Tensor sorted_t =
+      sorted.has_value() ? *sorted : torch::empty({0}, scores.options());
+  for (auto const& tensor : {current, table, workspace, regions, starts, sorted_t}) {
     TORCH_CHECK(tensor.is_cuda() && tensor.device() == scores.device(),
                 "selector tensors must share a device");
   }
@@ -40,7 +42,7 @@ void step5_selector_v2_dispatch(torch::Tensor const& scores, torch::Tensor const
               "selector geometry exceeds int32 indexing");
   for (auto const& output : {workspace, regions, starts}) {
     at::assert_no_internal_overlap(output);
-    for (auto const& input : {scores, positions, table}) {
+    for (auto const& input : {scores, current, table}) {
       at::assert_no_overlap(output, input);
     }
   }
@@ -58,15 +60,16 @@ void step5_selector_v2_dispatch(torch::Tensor const& scores, torch::Tensor const
       (threads == 0 && scores.size(0) * scores.size(1) >= 1000 && scores.size(2) <= 16384);
   auto launch = use256 ? step4_dsa_w256::step4_dsa_radix_select
                        : step4_dsa_w1024::step4_dsa_radix_select;
-  launch(scores, positions, table, workspace, regions, starts,
-         region_block, page_size, topk, packed);
+  launch(scores, current, table, workspace, regions, starts,
+         region_block, page_size, topk, packed, sorted_t);
 }
 }
 
 TORCH_LIBRARY_FRAGMENT(_ppu_C, m) {
-  m.def("step5_dsa_selector_v2(Tensor scores, Tensor positions, Tensor table, "
+  m.def("step5_dsa_selector_v2(Tensor scores, Tensor current, Tensor table, "
         "Tensor(a!) workspace, Tensor(b!) regions, Tensor(c!) starts, "
-        "int region_block, int page_size, int topk, bool packed, int threads=0) -> ()");
+        "int region_block, int page_size, int topk, bool packed, int threads=0, "
+        "Tensor(d!)? sorted=None) -> ()");
 }
 TORCH_LIBRARY_IMPL(_ppu_C, CUDA, m) {
   m.impl("step5_dsa_selector_v2", &step5_selector_v2_dispatch);

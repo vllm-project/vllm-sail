@@ -20,7 +20,6 @@ class Step5DecoderLayer:
             # PPU MODIFICATION: begin
             if (
                 _defer_shared
-                and not self.fp32_residual_connection
                 and not self.moe.fuse_all_reduce
                 and (self.moe.tp_size == 1 or self.use_sequence_parallel)
                 and shared_output is not None
@@ -134,7 +133,7 @@ class Step5DecoderLayer:
 
         # PPU MODIFICATION: begin
         if _defer_shared:
-            if residual.dtype != torch.bfloat16:
+            if residual.dtype not in (torch.bfloat16, torch.float32):
                 return self._forward_ffn(hidden_states, padding=padding), residual, None
             ffn_output, shared_output = self._forward_ffn(
                 hidden_states, padding=padding, _defer_shared=True
@@ -171,7 +170,7 @@ class Step5Model:
         pending_shared = None
         is_ppu = getattr(current_platform, "is_ppu", None)
         allow_deferred = (
-            callable(is_ppu) and is_ppu() and not self.fp32_residual_connection
+            callable(is_ppu) and is_ppu()
         )
         # PPU MODIFICATION: end
         for i in range(self.start_layer, self.end_layer):

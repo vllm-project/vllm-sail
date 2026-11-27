@@ -378,7 +378,7 @@ void run(const at::Tensor& q, const at::Tensor& cache, const at::Tensor& regions
     step5_runtime::check(hggcGetLastError());
     return;
   }
-  if (allow_paired && rows == 64 && heads == 16 &&
+  if (allow_paired && rows % 4 == 0 && rows >= 16 && rows <= 64 && heads == 16 &&
       p.groups == 1 && query_len == 4 && slots == 513 &&
       p.qh == kHeadDim && p.qs % 64 == 0 &&
       reinterpret_cast<uintptr_t>(p.q) % 128 == 0) {

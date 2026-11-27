@@ -61,9 +61,11 @@ if TYPE_CHECKING:
     VLLM_SAIL_STEP5_JOINT_PREPARE: bool = True
     VLLM_SAIL_STEP5_QKNORM_ROPE_CACHEKV: bool = True
     VLLM_SAIL_STEP5_FUSED_ROUTER: bool = True
+    VLLM_SAIL_STEP5_FUSED_SWA_DECODE: bool = True
     VLLM_SAIL_STEP5_INDEXER_PER_TOKEN: bool = True
     VLLM_SAIL_STEP5_FUSE_DP_COORDINATION: bool = False
     VLLM_SAIL_STEP5_DSA_SELECTOR_PPU: bool = False
+    VLLM_SAIL_STEP5_DSA_SELECTOR_FUSED_SORT: bool = True
     VLLM_SAIL_STEP5_DSA_PREFILL_PPU: bool = False
     VLLM_SAIL_STEP5_DSA_PREFILL_QUERY_TILE: int = 0
     VLLM_SAIL_STEP5_DSA_PREFILL_FP8: bool = False
@@ -107,9 +109,11 @@ if TYPE_CHECKING:
     VLLM_PPU_STEP5_JOINT_PREPARE: bool = True
     VLLM_PPU_STEP5_QKNORM_ROPE_CACHEKV: bool = True
     VLLM_PPU_STEP5_FUSED_ROUTER: bool = True
+    VLLM_PPU_STEP5_FUSED_SWA_DECODE: bool = True
     VLLM_PPU_STEP5_INDEXER_PER_TOKEN: bool = True
     VLLM_PPU_STEP5_FUSE_DP_COORDINATION: bool = False
     VLLM_PPU_STEP5_DSA_SELECTOR_PPU: bool = False
+    VLLM_PPU_STEP5_DSA_SELECTOR_FUSED_SORT: bool = True
     VLLM_PPU_STEP5_DSA_PREFILL_PPU: bool = False
     VLLM_PPU_STEP5_DSA_PREFILL_QUERY_TILE: int = 0
     VLLM_PPU_STEP5_DSA_PREFILL_FP8: bool = False
@@ -311,6 +315,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     ),
     # -- Step5 DSA ----------------------------------------------------------
     "VLLM_SAIL_STEP5_FUSED_ROUTER": _bool("VLLM_SAIL_STEP5_FUSED_ROUTER", True),
+    "VLLM_SAIL_STEP5_FUSED_SWA_DECODE": _bool("VLLM_SAIL_STEP5_FUSED_SWA_DECODE", True),
     "VLLM_SAIL_STEP5_INDEXER_PER_TOKEN": _bool(
         "VLLM_SAIL_STEP5_INDEXER_PER_TOKEN", True
     ),
@@ -337,6 +342,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # per_row stays the default; the new selector is opt-in only.
     "VLLM_SAIL_STEP5_DSA_SELECTOR_PPU": _bool(
         "VLLM_SAIL_STEP5_DSA_SELECTOR_PPU", False
+    ),
+    "VLLM_SAIL_STEP5_DSA_SELECTOR_FUSED_SORT": _bool(
+        "VLLM_SAIL_STEP5_DSA_SELECTOR_FUSED_SORT", True
     ),
     "VLLM_SAIL_STEP5_DSA_PREFILL_QUERY_TILE": _int(
         "VLLM_SAIL_STEP5_DSA_PREFILL_QUERY_TILE", 0

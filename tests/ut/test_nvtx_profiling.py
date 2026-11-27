@@ -258,6 +258,12 @@ def profiling_pkg(fake_vllm: SimpleNamespace, monkeypatch: pytest.MonkeyPatch):
     norm.install = lambda: False
     monkeypatch.setitem(sys.modules, norm.__name__, norm)
     monkeypatch.setattr(module, "step5_norm", norm, raising=False)
+    # Stub step5_sparse so its extra patches don't perturb the registry-count
+    # gate when upstream modules are already cached in sys.modules.
+    sparse = types.ModuleType("vllm_sail.profiling.step5_sparse")
+    sparse.install = lambda: False
+    monkeypatch.setitem(sys.modules, sparse.__name__, sparse)
+    monkeypatch.setattr(module, "step5_sparse", sparse, raising=False)
     monkeypatch.setattr(module, "_installed", False)
     return module
 

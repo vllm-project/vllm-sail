@@ -194,7 +194,8 @@ def supports_three_input_rms_norm(x, shared, residual, weight, out_dtype=None):
         and not shared.is_neg()
         and x.ndim == 2
         and x.shape[-1] == 4096
-        and x.dtype == shared.dtype == residual.dtype == torch.bfloat16
+        and x.dtype == shared.dtype == torch.bfloat16
+        and residual.dtype in (torch.bfloat16, torch.float32)
         and weight.dtype == torch.float32
         and shared.shape == x.shape
         and shared.device == x.device
@@ -215,6 +216,7 @@ def _three_input_rms_kernel(
     ZERO_CENTERED: tl.constexpr,
     H: tl.constexpr,
     BLOCK: tl.constexpr,
+    RES_FP32: tl.constexpr,
 ):
     row = tl.program_id(0).to(tl.int64)
     col = tl.arange(0, BLOCK)
@@ -222,11 +224,18 @@ def _three_input_rms_kernel(
     x = tl.load(X + offset, col < H, other=0).to(tl.float32)
     shared = tl.load(S + offset, col < H, other=0).to(tl.float32)
     residual = tl.load(R + offset, col < H, other=0).to(tl.float32)
-    # Match the two BF16 additions before the FP32 RMS reduction.
-    summed = (x + shared).to(tl.bfloat16).to(tl.float32)
-    combined = (summed + residual).to(tl.bfloat16)
-    tl.store(R_OUT + offset, combined, col < H)
-    value = combined.to(tl.float32)
+    if RES_FP32:
+        # Match add_fp32(moe, shared) then the FP32 AddRMS sum: no intermediate
+        # rounding, same conversion and add order as the unfused path.
+        combined = (x + shared) + residual
+        tl.store(R_OUT + offset, combined, col < H)
+        value = combined
+    else:
+        # Match the two BF16 additions before the FP32 RMS reduction.
+        summed = (x + shared).to(tl.bfloat16).to(tl.float32)
+        combined = (summed + residual).to(tl.bfloat16)
+        tl.store(R_OUT + offset, combined, col < H)
+        value = combined.to(tl.float32)
     variance = tl.sum(value * value, axis=0) / H
     normalized = value * tl.rsqrt(variance + EPS)
     scale = tl.load(W + col, col < H, other=0).to(tl.float32)
@@ -252,6 +261,7 @@ def three_input_rms_norm(
             zero_centered,
             x.shape[1],
             triton.next_power_of_2(x.shape[1]),
+            residual.dtype == torch.float32,
             num_warps=4,
             enable_fp_fusion=False,
         )

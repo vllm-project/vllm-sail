@@ -693,17 +693,18 @@ class ByteFP8Launch:
                     args[index] = arg.view(torch.uint8)
             # Standalone indexer launch signature at the verified vLLM pin:
             # UPDATE_CSA, HEADS, GROUPS and ROTARY are slots 16, 26, 28 and 30.
+            # Slot-first keeps the CSA update; only per-token lacks it.
             if (
                 self.optimize_indexer
                 and is_ppu
-                and not args[16]
                 and args[26] in (4, 8)
                 and args[28] == 1
                 and args[30] in (32, 64)
             ):
                 # The opt-in port keeps v0.23 norm and RoPE rounding.
                 if (
-                    envs.VLLM_SAIL_STEP5_INDEXER_PER_TOKEN
+                    not args[16]
+                    and envs.VLLM_SAIL_STEP5_INDEXER_PER_TOKEN
                     and args[29] >= 1024
                     and args[33] == 1.0
                     and current_platform.is_device_capability(89)

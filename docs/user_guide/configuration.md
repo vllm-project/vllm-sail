@@ -158,9 +158,12 @@ to enabled within the contract above; set it to `0` to disable tuning.
 
 Set `VLLM_SAIL_STEP5_QKNORM_ROPE_CACHEKV=1` to enable the Triton cache-write
 fusion on Step5 M890 BF16 inputs with head dimension 192 and rotary dimension
-64 or 192. The default is on. The joint DSA indexer preparation and FP8 KV
-cache paths keep their existing dispatch. Use separate compilation cache
-directories when comparing the setting on and off.
+64 or 192. The default is on. The same switch selects the split decode-verification
+preparation: at verification sizes (M <= 128, one KV group, 4/8 indexer heads) the
+separate PPU QK-norm/RoPE/KV and slot-first indexer kernels run instead of the joint
+prepare kernel, with the CSA ring/summary update fused in the indexer kernel. Larger
+batches and FP8 KV cache paths keep their existing dispatch. Use separate compilation
+cache directories when comparing the setting on and off.
 
 ## Step5 Score
 
@@ -667,12 +670,14 @@ Build-time settings such as `PPU_SDK`, `HGCC`, `CMAKE_HGCC_DIR` and
 | Variable | Default | Effect |
 | --- | --- | --- |
 | `VLLM_SAIL_STEP5_FUSED_ROUTER` | `1` | Fuse split-K router reduction and TopK on supported M890 MegaMoE inputs. |
+| `VLLM_SAIL_STEP5_FUSED_SWA_DECODE` | `1` | Run the upstream Triton gated SWA decode kernel on M890 instead of FlashAttention plus a separate gate. Prefill and non-uniform batches still fall back per batch; the fallback gate writes in place so no extra output copy is paid. |
 | `VLLM_SAIL_STEP5_INDEXER_PER_TOKEN` | `1` | Use the per-token norm and RoPE kernel for supported large M890 indexer batches. |
 | `VLLM_SAIL_STEP5_MEGA_MOE_OVERLAP` | `1` | Overlap shared and routed experts for eligible sequence-parallel batches. |
 | `VLLM_SAIL_STEP5_DSA_SELECTOR_PPU` | `0` | Opt in to the native PPU DSA region selector. |
+| `VLLM_SAIL_STEP5_DSA_SELECTOR_FUSED_SORT` | `1` | With the native DSA selector, emit the stable ascending region selection from the fused epilogue instead of a separate Triton stabilization launch on decode-shaped rows; prefill keeps the Triton specialization. |
 | `VLLM_SAIL_STEP5_DSA_PREFILL_FP8` | `0` | Opt in to FP8 sparse attention and its KV preparation on supported native prefill inputs. |
 | `VLLM_SAIL_STEP5_DSA_PREFILL_QUERY_TILE` | `0` | Use automatic query tiling for native BF16 prefill. Set `1`, `2`, `4`, or `8` to override it. |
-| `VLLM_SAIL_STEP5_FUSE_DP_COORDINATION` | `0` | Opt in to sharing target metadata with the first Step5 MTP pass. DP ranks check the prediction together before falling back to the regular coordination path. |
+| `VLLM_SAIL_STEP5_FUSE_DP_COORDINATION` | `0` | Opt in to sharing target metadata with the first Step5 MTP pass in one CPU all_reduce. The proposer consumes the reduced result locally (no second rendezvous); a prediction mismatch falls back on every rank because the draft count derivation is rank-invariant. |
 | `VLLM_SAIL_MEGA_MOE_ULTRA_EP` | `0` | Enable optional expert replicas for eligible MXFP4 prefill. Missing UltraEP or incompatible graph settings leave regular MegaMoE active. |
 | `VLLM_SAIL_MEGA_MOE_ULTRA_EP_MIN_TOKENS` | `256` | Minimum local tokens for UltraEP. It must exceed the largest local captured CUDA graph size when CUDA graphs are enabled. |
 | `VLLM_SAIL_MEGA_MOE_ULTRA_EP_REDUNDANT_EXPERTS` | `2` | Number of replica experts per EP rank. |

@@ -137,8 +137,15 @@ def apply_step5_three_input_rms_norm(
             return rms_norm.three_input_rms_norm(
                 x, shared, residual, weight, variance_epsilon, zero_centered, out_dtype
             )
+    if residual.dtype == torch.float32:
+        # Mirror _add_for_residual: the shared/routed sum stays FP32.
+        from vllm.models.step5.nvidia.ops.add import add_fp32
+
+        combined = add_fp32(x, shared)
+    else:
+        combined = x + shared
     return _layernorm.apply_step5_add_rms_norm(
-        x + shared, residual, weight, variance_epsilon, zero_centered, out_dtype
+        combined, residual, weight, variance_epsilon, zero_centered, out_dtype
     )
 
 

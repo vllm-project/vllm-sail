@@ -19,7 +19,7 @@ def workspace_capacity(regions, topk):
 @profiled("topk", backend="selector_v2", scope="kernel")
 def raw_select(
     scores,
-    positions,
+    current,
     table,
     workspace,
     regions,
@@ -30,16 +30,20 @@ def raw_select(
     topk=512,
     packed=False,
     threads=0,
+    sorted=None,
 ):
     """Raw unordered candidates, current in the last column.
 
-    select_regions must order tied IDs stably.
+    ``current`` holds per-row region counts (position >> 3); the radix kernel
+    consumes them directly. select_regions must order tied IDs stably. When
+    ``sorted`` is provided the native epilogue also writes the stable ascending
+    int64 selection there.
     """
     from vllm_sail import _custom_ops
 
     _custom_ops.step5_dsa_selector_v2(
         scores,
-        positions,
+        current,
         table,
         workspace,
         regions,
@@ -49,6 +53,7 @@ def raw_select(
         topk,
         packed,
         threads,
+        sorted,
     )
 
 
@@ -111,32 +116,48 @@ def select_regions(
         return output
     if paged_prefill is not None and paged_prefill.block_size not in (16, 32, 64, 128):
         raise ValueError("Unsupported prefill cache block size")
-    selection_lengths = current
-    if topk_lengths is not None:
-        if (
-            topk_lengths.shape != (rows,)
-            or topk_lengths.dtype != torch.int32
-            or topk_lengths.device != scores.device
-            or not topk_lengths.is_contiguous()
-        ):
-            raise ValueError(
-                "topk_lengths must be contiguous int32 [rows] on the same device"
-            )
-        selection_lengths = topk_lengths.to(torch.int64)
+    # topk_lengths mirrors current (position >> 3); the int64 current already
+    # carries the selection length, so casting it back would only add a copy.
+    if topk_lengths is not None and (
+        topk_lengths.shape != (rows,)
+        or topk_lengths.dtype != torch.int32
+        or topk_lengths.device != scores.device
+        or not topk_lengths.is_contiguous()
+    ):
+        raise ValueError(
+            "topk_lengths must be contiguous int32 [rows] on the same device"
+        )
     workspace, candidates, starts, table = allocate(scores, k)
+    # Long prefill scores arrive as 4096-row chunks plus a 3072-row tail.
+    prefill_special = (
+        paged_prefill is None and 3072 <= rows <= 4096 and k == 512 and regions <= 8192
+    )
+    # The native epilogue emits the stable ascending selection directly, skipping
+    # the Triton stabilization launch. prefill_special keeps the Triton
+    # _stable_prefill_regions specialization, which is faster at those shapes.
+    from vllm_sail import envs
+
+    use_native_sorted = (
+        envs.VLLM_SAIL_STEP5_DSA_SELECTOR_FUSED_SORT
+        and paged_prefill is None
+        and regions <= 16384
+        and not prefill_special
+    )
     raw_select(
         scores.view(rows, 1, regions),
-        selection_lengths * 8,
+        current,
         table,
         workspace,
         candidates,
         starts,
         topk=k,
         threads=threads,
+        sorted=output if use_native_sorted else None,
     )
+    if use_native_sorted:
+        return output
     scratch = torch.empty((rows, k + 1), device=scores.device, dtype=torch.int32)
-    # Long prefill uses 4096-row score chunks and a 3072-row tail at MBT 11264.
-    if paged_prefill is None and 3072 <= rows <= 4096 and k == 512 and regions <= 8192:
+    if prefill_special:
         from .selector_prefill import _stable_prefill_regions
 
         _stable_prefill_regions[(rows,)](

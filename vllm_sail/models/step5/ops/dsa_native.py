@@ -468,6 +468,15 @@ def request_tiles(starts, begin, end, group_rows=16):
     return [lefts, rights]
 
 
+def _upload_tiles(rows, device):
+    # Pinned async upload mirrors the per-step metadata path; a pageable
+    # torch.tensor(..., device=cuda) would copy synchronously and stall the
+    # stream every layer.
+    return (
+        torch.tensor(rows, dtype=torch.int32).pin_memory().to(device, non_blocking=True)
+    )
+
+
 class NativePrefill:
     """Prebuilt consumer keeping upstream's nine-field runtime adapter protocol."""
 
@@ -497,6 +506,7 @@ class NativePrefill:
         self._bound = None
         self._batch = None
         self._finished = False
+        self._tile_cache = None
 
     def page_metadata(self, *args, **kwargs):
         return None
@@ -506,6 +516,35 @@ class NativePrefill:
         self._batch = None
         self._next_start = 0
         self._finished = False
+
+    def _tile_tables(self, starts, n, group_rows, chunks, device):
+        """Layer-invariant tile bounds, built and uploaded once per step.
+
+        ``starts``/``n``/``group_rows``/``chunks`` are identical across the DSA
+        layers of a step (this instance is the per-step plan's consumer), so the
+        host build and the pinned H2D run once and the device tables are reused
+        by every later layer's bind.
+        """
+        key = (tuple(starts), n, group_rows, tuple(chunks))
+        if self._tile_cache is not None and self._tile_cache[0] == key:
+            return self._tile_cache[1]
+        all_tiles = _upload_tiles(request_tiles(starts, 0, n, group_rows), device)
+        chunk_tiles = []
+        begin = 0
+        for size in chunks:
+            end = begin + size
+            tiles = (
+                None
+                if self.batch_attention
+                else _upload_tiles(
+                    request_tiles(starts, begin, end, group_rows), device
+                )
+            )
+            chunk_tiles.append((begin, end, tiles))
+            begin = end
+        tables = (all_tiles, chunk_tiles)
+        self._tile_cache = (key, tables)
+        return tables
 
     def fixup_positions(self, positions):
         """Same pre-launch conversion as the reference prefill.
@@ -563,10 +602,8 @@ class NativePrefill:
         group_rows = 8 if n >= 8192 and query.shape[1] == 16 else 16
         # Check the whole group before summary/selector; only a few host tiles are
         # uploaded and query/KV are never moved.
-        all_tiles = torch.tensor(
-            request_tiles(starts, 0, n, group_rows),
-            dtype=torch.int32,
-            device=query.device,
+        all_tiles, chunk_tiles = self._tile_tables(
+            starts, n, group_rows, chunks, query.device
         )
         reason = prefill_reason(
             query,
@@ -584,20 +621,7 @@ class NativePrefill:
         )
         if reason:
             return reason
-        tiled, begin = {}, 0
-        for size in chunks:
-            end = begin + size
-            tiles = (
-                None
-                if self.batch_attention
-                else torch.tensor(
-                    request_tiles(starts, begin, end, group_rows),
-                    dtype=torch.int32,
-                    device=query.device,
-                )
-            )
-            tiled[begin] = (end, tiles)
-            begin = end
+        tiled = {begin: (end, tiles) for begin, end, tiles in chunk_tiles}
         # Cache only the selections, not query/KV; separate storage keeps the reused
         # selector buffer from overwriting the previous chunk.
         batch = None

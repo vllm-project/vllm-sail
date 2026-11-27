@@ -40,7 +40,7 @@ from vllm.models.step5.nvidia.sparse_summary_cache import (
     Step5SparseSummaryCacheLayer,
 )
 
-from vllm_sail.models.step5.ops import score_pipeline, soft_fp8
+from vllm_sail.models.step5.ops import decode_split_prep, score_pipeline, soft_fp8
 from vllm_sail.patch.bodies import bind_body
 from vllm_sail.patch.utils import patch
 from vllm_sail.step5_sparse_cases import profiled
@@ -50,11 +50,16 @@ _REASON = (
     "VLLM_STEP5_INDEXER_FP8_AS_FP16=1 stores E4M3-quantized values as FP16, "
     "using FP16 dot products with FP32 accumulation; the main attention KV cache "
     "quantization is unchanged. "
-    "Upstream only supports E4M3 storage."
+    "Upstream only supports E4M3 storage. "
+    "The joint launcher also consults the decode split gated by "
+    "VLLM_SAIL_STEP5_QKNORM_ROPE_CACHEKV: at verification sizes the separate "
+    "PPU QK-norm/RoPE/KV and slot-first indexer kernels run instead, with the "
+    "CSA update fused in the indexer kernel."
 )
 _REMOVE_WHEN = (
     "Step5 DSA supports an FP16 indexer storage mode, or PPU drops it after "
-    "native E4M3 scoring is preferred everywhere."
+    "native E4M3 scoring is preferred everywhere, and the upstream joint "
+    "prepare matches the split PPU kernels at decode shapes."
 )
 
 _LOGITS_REASON = (
@@ -562,6 +567,9 @@ def _indexer_norm_rope_launcher(*args, **kwargs):
 
 @functools.wraps(_upstream_qkv_indexer_norm_rope)
 def _qkv_indexer_norm_rope_launcher(*args, **kwargs):
+    split = decode_split_prep.maybe_split(*args, **kwargs)
+    if split is not None:
+        return split
     if not soft_fp8.indexer_fp16():
         return _upstream_qkv_indexer_norm_rope(*args, **kwargs)
     return _fp16_qkv_indexer_norm_rope(*args, **kwargs)

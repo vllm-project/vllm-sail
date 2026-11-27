@@ -321,12 +321,151 @@ __device__ __forceinline__ void choose_threshold_parallel(
   __syncthreads();
 }
 
+// Stable-sort epilogue fused into the single-CTA selector, reproducing the
+// Triton _stable_topk_regions SORT=True contract: ignore-NaN cutoff, ties filled
+// by smallest region ID, emitted as [-1 pad] + ascending IDs + [current].
+struct Step4DsaSortShared {
+  int sort_buf[2048];
+  float warp_min[kThreads / 32];
+  int warp_sums[kThreads / 32];
+  int warp_offsets[kThreads / 32];
+  float threshold_f;
+  int counter;
+  int found;
+};
+static_assert(sizeof(Step4DsaSortShared) <= sizeof(Step4DsaCachedRadixShared),
+              "sort epilogue shared memory must fit the selector allocation");
+
+__device__ __forceinline__ float step4_dsa_warp_fminf(float v) {
+#pragma unroll
+  for (int off = 16; off > 0; off >>= 1) {
+    v = fminf(v, __shfl_down_sync(0xFFFFFFFFu, v, off));
+  }
+  return v;
+}
+
+__device__ __forceinline__ void step4_dsa_stable_sort_epilogue(
+    char* raw_shared, float const* score_row, int current, int topk,
+    int const* region_output, int64_t* sorted_output, int work,
+    int output_width, int thread) {
+  auto& sh = *reinterpret_cast<Step4DsaSortShared*>(raw_shared);
+  int const nwarps = kThreads / 32;
+  int const lane = thread & 31;
+  int const warp = thread >> 5;
+  int block_sort = 1;
+  while (block_sort < topk + 1) block_sort <<= 1;
+
+  for (int i = thread; i < block_sort; i += kThreads) {
+    sh.sort_buf[i] = (i < topk) ? -1 : (i == topk ? current : 2147483647);
+  }
+  if (thread == 0) sh.counter = 0;
+  __syncthreads();
+
+  // threshold = fminf over candidate scores (invalid slots = +inf, NaN ignored).
+  float local_min = INFINITY;
+  for (int slot = thread; slot < topk; slot += kThreads) {
+    int const id = region_output[work * output_width + slot];
+    bool const valid = (id >= 0 && id < current);
+    float const val = valid ? score_row[id] : INFINITY;
+    local_min = fminf(local_min, val);
+  }
+  float const wmin = step4_dsa_warp_fminf(local_min);
+  if (lane == 0) sh.warp_min[warp] = wmin;
+  __syncthreads();
+  if (thread < 32) {
+    float v = (thread < nwarps) ? sh.warp_min[thread] : INFINITY;
+    v = step4_dsa_warp_fminf(v);
+    if (thread == 0) sh.threshold_f = v;
+  }
+  __syncthreads();
+  float const threshold = sh.threshold_f;
+
+  // Keep every candidate strictly above the cutoff (order irrelevant: sorted).
+  for (int slot = thread; slot < topk; slot += kThreads) {
+    int const id = region_output[work * output_width + slot];
+    bool const valid = (id >= 0 && id < current);
+    float const val = valid ? score_row[id] : INFINITY;
+    if (valid && val > threshold) {
+      int const pos = atomicAdd(&sh.counter, 1);
+      sh.sort_buf[pos] = id;
+    }
+  }
+  __syncthreads();
+  int const num_above = sh.counter;
+  int const needed = min(current, topk) - num_above;
+
+  // Fill ties with the smallest region IDs whose score equals the cutoff.
+  if (thread == 0) sh.found = 0;
+  __syncthreads();
+  int start = 0;
+  while (sh.found < needed && start < current) {
+    int const region = start + thread;
+    int const eq =
+        (region < current && score_row[region] == threshold) ? 1 : 0;
+    int incl = eq;
+#pragma unroll
+    for (int off = 1; off < 32; off <<= 1) {
+      int const n = __shfl_up_sync(0xFFFFFFFFu, incl, off);
+      if (lane >= off) incl += n;
+    }
+    if (lane == 31) sh.warp_sums[warp] = incl;
+    __syncthreads();
+    if (thread < 32) {
+      int const w = (thread < nwarps) ? sh.warp_sums[thread] : 0;
+      int wincl = w;
+#pragma unroll
+      for (int off = 1; off < 32; off <<= 1) {
+        int const n = __shfl_up_sync(0xFFFFFFFFu, wincl, off);
+        if (thread >= off) wincl += n;
+      }
+      if (thread < nwarps) sh.warp_offsets[thread] = wincl - w;
+    }
+    __syncthreads();
+    int const excl = sh.warp_offsets[warp] + (incl - eq);
+    int const gpos = sh.found + excl;
+    if (eq && gpos < needed) {
+      sh.sort_buf[num_above + gpos] = region;
+    }
+    int const chunk_total = sh.warp_offsets[nwarps - 1] + sh.warp_sums[nwarps - 1];
+    __syncthreads();
+    if (thread == 0) sh.found += chunk_total;
+    __syncthreads();
+    start += kThreads;
+  }
+
+  // Ascending bitonic sort over block_sort entries (-1 pad first, current last
+  // among real values, INT_MAX padding beyond topk).
+  __syncthreads();
+  for (int k = 2; k <= block_sort; k <<= 1) {
+    for (int j = k >> 1; j > 0; j >>= 1) {
+      for (int i = thread; i < block_sort; i += kThreads) {
+        int const ixj = i ^ j;
+        if (ixj > i) {
+          bool const asc = ((i & k) == 0);
+          int const a = sh.sort_buf[i];
+          int const b = sh.sort_buf[ixj];
+          if ((a > b) == asc) {
+            sh.sort_buf[i] = b;
+            sh.sort_buf[ixj] = a;
+          }
+        }
+      }
+      __syncthreads();
+    }
+  }
+  for (int col = thread; col <= topk; col += kThreads) {
+    sorted_output[work * (topk + 1) + col] =
+        static_cast<int64_t>(sh.sort_buf[col]);
+  }
+}
+
 // Selector kernel: 3 rounds [11, 11, 10].
 __global__ void step4_dsa_radix_selector_kernel(
-    float const* scores, int64_t const* query_positions,
+    float const* scores, int64_t const* query_current,
     int const* block_table, int* region_output, int* start_output, int heads,
     int regions, int topk, int region_block, int page_size,
-    int block_table_stride, int block_table_length, bool packed) {
+    int block_table_stride, int block_table_length, bool packed,
+    int64_t* sorted_output) {
   extern __shared__ char raw_shared[];
   auto& storage = *reinterpret_cast<Step4DsaCachedRadixShared*>(raw_shared);
   int const work = blockIdx.x;
@@ -334,10 +473,14 @@ __global__ void step4_dsa_radix_selector_kernel(
   int const head = work - request * heads;
   int const thread = threadIdx.x;
   int const output_width = topk + 1;
-  int64_t const position = query_positions[request];
+  int64_t const current_in = query_current[request];
   int const current = static_cast<int>(
-      position <= 0 ? 0 : min(position / region_block, int64_t(regions - 1)));
+      current_in <= 0 ? 0 : min(current_in, int64_t(regions - 1)));
   int const target = min(topk, current);
+  // Match the Triton stabilization's region count clamped to regions (not
+  // regions-1) so the fused sort agrees when context fills the score row.
+  int const sort_length = static_cast<int>(
+      current_in <= 0 ? 0 : min(current_in, int64_t(regions)));
   float const* score_row = scores + (request * heads + head) * regions;
 
   if (current <= topk) {
@@ -352,6 +495,12 @@ __global__ void step4_dsa_radix_selector_kernel(
         region_output[offset] = -1;
         start_output[offset] = -1;
       }
+    }
+    if (sorted_output != nullptr) {
+      __syncthreads();
+      step4_dsa_stable_sort_epilogue(raw_shared, score_row, sort_length, topk,
+                                     region_output, sorted_output, work,
+                                     output_width, thread);
     }
     return;
   }
@@ -647,11 +796,17 @@ __global__ void step4_dsa_radix_selector_kernel(
                  page_size / region_block, region_block, packed,
                  region_output, start_output);
   }
+  if (sorted_output != nullptr) {
+    __syncthreads();
+    step4_dsa_stable_sort_epilogue(raw_shared, score_row, sort_length, topk,
+                                   region_output, sorted_output, work,
+                                   output_width, thread);
+  }
 }
 
 // Chunk kernel: 3 rounds [11, 11, 10] (same as selector).
 __global__ void step4_dsa_radix_chunk_kernel(
-    float const* scores, int64_t const* query_positions,
+    float const* scores, int64_t const* query_current,
     int* candidate_output, int heads, int regions, int topk, int region_block,
     int num_chunks, int candidate_stride) {
   extern __shared__ char raw_shared[];
@@ -662,9 +817,9 @@ __global__ void step4_dsa_radix_chunk_kernel(
   int const request = work / heads;
   int const head = work - request * heads;
   int const thread = threadIdx.x;
-  int64_t const position = query_positions[request];
+  int64_t const current_in = query_current[request];
   int const current = static_cast<int>(
-      position <= 0 ? 0 : min(position / region_block, int64_t(regions - 1)));
+      current_in <= 0 ? 0 : min(current_in, int64_t(regions - 1)));
   int const chunk_begin = chunk * kStreamingChunkRegions;
   int const chunk_end = min(chunk_begin + kStreamingChunkRegions, current);
   int const valid_length = max(chunk_end - chunk_begin, 0);
@@ -817,7 +972,7 @@ __global__ void step4_dsa_radix_chunk_kernel(
 
 // Merge kernel: 4 rounds [11 score, 11 score, 10 score, 10 region].
 __global__ void step4_dsa_radix_merge_kernel(
-    float const* scores, int64_t const* query_positions,
+    float const* scores, int64_t const* query_current,
     int const* candidate_input, int candidate_stride,
     int const* block_table, int* region_output, int* start_output, int heads,
     int regions, int topk, int region_block, int page_size,
@@ -830,9 +985,9 @@ __global__ void step4_dsa_radix_merge_kernel(
   int const head = work - request * heads;
   int const thread = threadIdx.x;
   int const output_width = topk + 1;
-  int64_t const position = query_positions[request];
+  int64_t const current_in = query_current[request];
   int const current = static_cast<int>(
-      position <= 0 ? 0 : min(position / region_block, int64_t(regions - 1)));
+      current_in <= 0 ? 0 : min(current_in, int64_t(regions - 1)));
   int const target = min(topk, current);
   int const useful_chunks = min(
       num_chunks, (current + kStreamingChunkRegions - 1) / kStreamingChunkRegions);
@@ -979,22 +1134,23 @@ __global__ void step4_dsa_radix_merge_kernel(
 }
 
 void step4_dsa_radix_select(
-    torch::Tensor const& scores, torch::Tensor const& query_positions,
+    torch::Tensor const& scores, torch::Tensor const& query_current,
     torch::Tensor const& block_table, torch::Tensor& candidate_workspace,
     torch::Tensor& region_output, torch::Tensor& start_output,
-    int64_t region_block, int64_t page_size, int64_t topk, bool packed) {
-  TORCH_CHECK(scores.is_cuda() && query_positions.is_cuda() &&
+    int64_t region_block, int64_t page_size, int64_t topk, bool packed,
+    torch::Tensor const& sorted_output) {
+  TORCH_CHECK(scores.is_cuda() && query_current.is_cuda() &&
                   block_table.is_cuda() && candidate_workspace.is_cuda() &&
                   region_output.is_cuda() && start_output.is_cuda(),
               "Step4 DSA radix tensors must be on the CUDA device");
   TORCH_CHECK(scores.scalar_type() == torch::kFloat32 && scores.dim() == 3 &&
                   scores.is_contiguous(),
               "scores must be contiguous float32 [query,heads,regions]");
-  TORCH_CHECK(query_positions.scalar_type() == torch::kInt64 &&
-                  query_positions.dim() == 1 &&
-                  query_positions.size(0) == scores.size(0) &&
-                  query_positions.is_contiguous(),
-              "query_positions must be contiguous int64 [query]");
+  TORCH_CHECK(query_current.scalar_type() == torch::kInt64 &&
+                  query_current.dim() == 1 &&
+                  query_current.size(0) == scores.size(0) &&
+                  query_current.is_contiguous(),
+              "query_current must be contiguous int64 region counts [query]");
   TORCH_CHECK(block_table.scalar_type() == torch::kInt32 &&
                   (block_table.dim() == 1 || block_table.dim() == 2) &&
                   block_table.is_contiguous(),
@@ -1023,6 +1179,25 @@ void step4_dsa_radix_select(
                   region_output.is_contiguous() && start_output.is_contiguous(),
               "radix outputs must be contiguous int32 [query,heads,topk+1]");
 
+  bool const want_sorted = sorted_output.numel() > 0;
+  if (want_sorted) {
+    auto sorted_expected =
+        std::vector<int64_t>{scores.size(0) * scores.size(1), topk + 1};
+    TORCH_CHECK(sorted_output.scalar_type() == torch::kInt64 &&
+                    sorted_output.sizes() == sorted_expected &&
+                    sorted_output.is_contiguous() && sorted_output.is_cuda() &&
+                    sorted_output.device() == scores.device(),
+                "sorted output must be contiguous int64 [query*heads,topk+1]");
+    TORCH_CHECK(scores.size(2) <= kStreamingChunkRegions,
+                "stable-sort epilogue only supports the single-CTA path");
+    at::assert_no_internal_overlap(sorted_output);
+    at::assert_no_overlap(sorted_output, region_output);
+    at::assert_no_overlap(sorted_output, start_output);
+    at::assert_no_overlap(sorted_output, scores);
+  }
+  int64_t* sorted_ptr =
+      want_sorted ? sorted_output.data_ptr<int64_t>() : nullptr;
+
   int const query_rows = static_cast<int>(scores.size(0));
   int const heads = static_cast<int>(scores.size(1));
   int const regions = static_cast<int>(scores.size(2));
@@ -1048,11 +1223,11 @@ void step4_dsa_radix_select(
   if (regions <= kStreamingChunkRegions) {
     step4_dsa_radix_selector_kernel<<<query_rows * heads, kThreads,
                                       kSelectorSmem, stream>>>(
-        scores.data_ptr<float>(), query_positions.data_ptr<int64_t>(),
+        scores.data_ptr<float>(), query_current.data_ptr<int64_t>(),
         block_table.data_ptr<int>(), region_output.data_ptr<int>(),
         start_output.data_ptr<int>(), heads, regions, static_cast<int>(topk),
         static_cast<int>(region_block), static_cast<int>(page_size),
-        block_table_stride, block_table_length, packed);
+        block_table_stride, block_table_length, packed, sorted_ptr);
   } else {
     int const num_chunks =
         (regions + kStreamingChunkRegions - 1) / kStreamingChunkRegions;
@@ -1063,13 +1238,13 @@ void step4_dsa_radix_select(
     step4_dsa_radix_chunk_kernel<<<
         query_rows * heads * num_chunks, kThreads,
         kChunkSmem, stream>>>(
-        scores.data_ptr<float>(), query_positions.data_ptr<int64_t>(),
+        scores.data_ptr<float>(), query_current.data_ptr<int64_t>(),
         candidate_workspace.data_ptr<int>(), heads, regions,
         static_cast<int>(topk), static_cast<int>(region_block), num_chunks,
         candidate_stride);
     step4_dsa_radix_merge_kernel<<<
         query_rows * heads, kThreads, kMergeSmem, stream>>>(
-        scores.data_ptr<float>(), query_positions.data_ptr<int64_t>(),
+        scores.data_ptr<float>(), query_current.data_ptr<int64_t>(),
         candidate_workspace.data_ptr<int>(), candidate_stride,
         block_table.data_ptr<int>(), region_output.data_ptr<int>(),
         start_output.data_ptr<int>(), heads, regions, static_cast<int>(topk),
@@ -1084,9 +1259,10 @@ void step4_dsa_radix_select(
 // Expose the launcher so bindings.cpp can register the v1 operator and
 // dispatch internally between the two thread-count specializations.
 void step4_dsa_radix_select(
-    torch::Tensor const& scores, torch::Tensor const& query_positions,
+    torch::Tensor const& scores, torch::Tensor const& query_current,
     torch::Tensor const& block_table, torch::Tensor& candidate_workspace,
     torch::Tensor& region_output, torch::Tensor& start_output,
-    int64_t region_block, int64_t page_size, int64_t topk, bool packed);
+    int64_t region_block, int64_t page_size, int64_t topk, bool packed,
+    torch::Tensor const& sorted_output);
 
 }  // namespace step4_dsa_w256 / step4_dsa_w1024

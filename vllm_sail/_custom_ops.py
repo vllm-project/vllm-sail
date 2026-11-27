@@ -132,12 +132,13 @@ def step5_dsa_fp8_prefill_op():
 
 
 def step5_dsa_selector_v2(scores, positions, table, workspace, regions, starts,
-                          region_block, page_size, topk, packed, threads) -> None:
+                          region_block, page_size, topk, packed, threads,
+                          sorted=None) -> None:
     """Step5 selector v2 raw candidate selection (prebuilt op)."""
     _require("_C", "step5_dsa_selector_v2")
     torch.ops._ppu_C.step5_dsa_selector_v2(
         scores, positions, table, workspace, regions, starts,
-        region_block, page_size, topk, packed, threads)
+        region_block, page_size, topk, packed, threads, sorted)
 
 
 def top_k_per_row_prefill_bf16(
