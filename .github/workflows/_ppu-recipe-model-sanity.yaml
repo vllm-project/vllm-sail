@@ -228,6 +228,14 @@ jobs:
           repository: ${{ github.repository }}
           github-token: ${{ github.token }}
 
+      - name: Set the CI runtime image
+        if: github.event_name != 'pull_request'
+        shell: bash
+        env:
+          CI_RUNTIME_IMAGE: download.t-head.cn/docker_test/vllm:v0.34.0-20261126-e48a294
+        run: |
+          printf 'PPU_CI_RUNTIME_IMAGE=%s\n' "$CI_RUNTIME_IMAGE" >> "$GITHUB_ENV"
+
       - name: Run recipe model sanity and micro-E2E in the PPU runtime container
         id: recipe
         env:

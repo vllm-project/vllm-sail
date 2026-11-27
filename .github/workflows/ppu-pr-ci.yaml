@@ -69,6 +69,9 @@ jobs:
       contents: read
       actions: read
     uses: ./.github/workflows/ppu-build-and-test.yaml
+    secrets:
+      ci_registry_username: ${{ secrets.RELEASE_USERNAME }}
+      ci_registry_token: ${{ secrets.RELEASE_TOKEN }}
     with:
       pr_head_sha: ${{ inputs.head_sha }}
       skip_ppu: ${{ needs.validate.outputs.skip_ppu == 'true' }}

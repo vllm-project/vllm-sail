@@ -131,6 +131,31 @@ def test_rejects_changed_wheel_bytes(tmp_path: Path) -> None:
         manifest.verify(tmp_path)
 
 
+def test_vllm_fingerprint_tracks_upstream_build_inputs(tmp_path: Path) -> None:
+    source = make_native_source(tmp_path)
+    commit = "1" * 40
+    image = f"sdk@sha256:{'a' * 64}"
+    original = manifest.vllm_build_fingerprint(source, commit=commit, image=image)
+    (source / "csrc/fixture.hg").write_text("changed SAIL kernel\n")
+    assert (
+        manifest.vllm_build_fingerprint(source, commit=commit, image=image) == original
+    )
+    assert (
+        manifest.vllm_build_fingerprint(source, commit="2" * 40, image=image)
+        != original
+    )
+    assert (
+        manifest.vllm_build_fingerprint(
+            source, commit=commit, image=f"sdk@sha256:{'b' * 64}"
+        )
+        != original
+    )
+    (source / "requirements/build.txt").write_text("changed build requirements\n")
+    assert (
+        manifest.vllm_build_fingerprint(source, commit=commit, image=image) != original
+    )
+
+
 def test_rejects_manifest_version_override(tmp_path: Path) -> None:
     make_wheels(tmp_path)
     data = record(tmp_path)

@@ -46,6 +46,11 @@ on:
         description: Build wheels only, without pin-UT, model checks or upstream-reuse lanes
         type: boolean
         default: false
+    secrets:
+      ci_registry_username:
+        required: false
+      ci_registry_token:
+        required: false
   pull_request:
     branches: [main]
     types: [opened, synchronize, reopened, ready_for_review, labeled, unlabeled]
@@ -80,7 +85,8 @@ jobs:
       !github.event.pull_request.draft &&
       contains(github.event.pull_request.labels.*.name, 'ci-preview'))) }}
     runs-on: 8-ppu-m890p
-    timeout-minutes: 10
+    # A cold pull of the full runtime may exceed the Preview budget.
+    timeout-minutes: ${{ github.event_name == 'pull_request' && 10 || 25 }}
     env:
       GIT_CONFIG_NOSYSTEM: "1"
     outputs:
@@ -121,7 +127,15 @@ jobs:
           path: ${{ steps.workspace.outputs.trusted_rel }}
           persist-credentials: false
 
-      - name: Resolve the runner-configured CUDA-compatible runtime
+      - name: Set the CI runtime image
+        if: github.event_name != 'pull_request'
+        shell: bash
+        env:
+          CI_RUNTIME_IMAGE: download.t-head.cn/docker_test/vllm:v0.34.0-20261126-e48a294
+        run: |
+          printf 'PPU_CI_RUNTIME_IMAGE=%s\n' "$CI_RUNTIME_IMAGE" >> "$GITHUB_ENV"
+
+      - name: Resolve the CUDA-compatible PPU runtime
         id: image
         env:
           TRUSTED_DIR: ${{ steps.workspace.outputs.trusted }}
@@ -210,6 +224,9 @@ jobs:
       contents: read
       actions: read
     uses: ./.github/workflows/_ppu-build.yaml
+    secrets:
+      ci_registry_username: ${{ secrets.ci_registry_username }}
+      ci_registry_token: ${{ secrets.ci_registry_token }}
     with:
       pr_head_sha: ${{ inputs.pr_head_sha || github.sha }}
       resolve_native_donors: ${{ github.event_name == 'pull_request' || inputs.resolve_native_donors }}

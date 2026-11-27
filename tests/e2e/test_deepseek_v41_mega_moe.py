@@ -321,9 +321,9 @@ def test_mega_moe_single_rank_kernel_smoke(monkeypatch, tmp_path, tokens, mode):
             )
 
         def run(w2_by_expert):
-            """Load a fresh layer and run one forward.
+            """Load and process a fresh layer, then run one forward.
 
-            The first forward replaces the raw checkpoint banks with the
+            Post-load processing replaces the raw checkpoint banks with the
             kernel layout in place, so each weight variant needs its own
             layer: a shard cannot be reloaded into a transformed bank.
             """
@@ -353,6 +353,7 @@ def test_mega_moe_single_rank_kernel_smoke(monkeypatch, tmp_path, tokens, mode):
                 ):
                     load(layer, expert, shard, "weight", weight)
                     load(layer, expert, shard, "weight_scale", scale)
+            layer.process_weights_after_loading()
             output = layer(hidden, weights, ids)
             torch.cuda.synchronize()
             return layer, output

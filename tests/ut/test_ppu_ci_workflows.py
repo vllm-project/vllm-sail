@@ -193,7 +193,10 @@ def test_executor_separates_read_only_pr_execution_and_always_reporting():
     assert ppu["needs"] == "validate"
     assert ppu["uses"] == "./.github/workflows/ppu-build-and-test.yaml"
     assert ppu["permissions"] == {"contents": "read", "actions": "read"}
-    assert "secrets" not in ppu
+    assert ppu["secrets"] == {
+        "ci_registry_username": "${{ secrets.RELEASE_USERNAME }}",
+        "ci_registry_token": "${{ secrets.RELEASE_TOKEN }}",
+    }
     assert ppu["with"] == {
         "pr_head_sha": "${{ inputs.head_sha }}",
         "skip_ppu": "${{ needs.validate.outputs.skip_ppu == 'true' }}",
@@ -249,8 +252,27 @@ def test_untrusted_workflows_have_no_write_permissions_or_inherited_secrets(name
     config = workflow(name)
     assert config["cache-mode"] == "none"
     assert config["permissions"] == {"contents": "read", "actions": "read"}
-    for job in config["jobs"].values():
-        assert "secrets" not in job
+    for job_name, job in config["jobs"].items():
+        if job_name == "build" and name in {
+            "ppu-build-and-test.yaml",
+            "perf-regression.yaml",
+        }:
+            # Only the hosted container initializer receives the two named secrets.
+            assert job["uses"] == "./.github/workflows/_ppu-build.yaml"
+            secret_names = (
+                ("ci_registry_username", "ci_registry_token")
+                if name == "ppu-build-and-test.yaml"
+                else ("RELEASE_USERNAME", "RELEASE_TOKEN")
+            )
+            assert job["secrets"] == dict(
+                zip(
+                    ("ci_registry_username", "ci_registry_token"),
+                    ("${{ secrets." + secret + " }}" for secret in secret_names),
+                    strict=True,
+                )
+            )
+        else:
+            assert "secrets" not in job
         assert all(value != "write" for value in job.get("permissions", {}).values())
         for step in checkouts(job) if "steps" in job else []:
             assert step["with"]["persist-credentials"] is False
@@ -403,6 +425,9 @@ def test_pr_pipeline_structure():
     }
     runtime = jobs["runtime-image"]
     assert runtime["runs-on"] == "8-ppu-m890p"
+    assert runtime["timeout-minutes"] == (
+        "${{ github.event_name == 'pull_request' && 10 || 25 }}"
+    )
     assert "!inputs.skip_ppu" in runtime["if"]
     assert runtime["outputs"] == {
         "upstream_reuse": "${{ steps.reuse.outputs.supported }}",
@@ -413,7 +438,7 @@ def test_pr_pipeline_structure():
     resolve = next(
         step
         for step in runtime["steps"]
-        if step.get("name") == "Resolve the runner-configured CUDA-compatible runtime"
+        if step.get("name") == "Resolve the CUDA-compatible PPU runtime"
     )
     assert "ppu_runtime_image.sh" in resolve["run"]
     assert "PPU_CI_RUNTIME_IMAGE" not in resolve.get("env", {})
@@ -756,6 +781,12 @@ def test_build_leaf_preserves_retry_identity_and_image_output():
     }
     assert "if" not in build
     assert "needs" not in build
+    image_id = next(
+        step for step in build["steps"] if step.get("id") == "build-image-id"
+    )
+    assert image_id["env"] == {"CONTAINER_ID": "${{ job.container.id }}"}
+    assert image_id["continue-on-error"] is True
+    assert build["steps"].index(image_id) < build["steps"].index(checkouts(build)[0])
     caller = workflow("ppu-build-and-test.yaml")["jobs"]["build"]
     assert caller["uses"] == "./.github/workflows/_ppu-build.yaml"
     role = next(step for step in build["steps"] if step.get("id") == "donor-checkout")
@@ -777,8 +808,9 @@ def test_build_leaf_preserves_retry_identity_and_image_output():
         for step in build["steps"]
         if step.get("uses") == "actions/download-artifact@v4"
     ]
-    assert len(downloads) == 3
-    for slot, download in enumerate(downloads, 1):
+    assert len(downloads) == 4
+    for slot, download in zip((1, 2, 3, "upstream"), downloads, strict=True):
+        assert download["id"] == f"donor-{slot}"
         assert download["if"] == (
             f"steps.donors.outputs.run_{slot} != '' && steps.donors.outputs.artifact_{slot} != ''"
         )
@@ -796,11 +828,16 @@ def test_build_leaf_preserves_retry_identity_and_image_output():
         if step.get("name") == "Build or repackage wheels"
     )
     assert (
+        package["env"]["VLLM_SAIL_BUILD_IMAGE_ID"]
+        == "${{ steps.build-image-id.outputs.image_id }}"
+    )
+    assert (
         package["env"]["VLLM_SAIL_NATIVE_REUSE_ROOT"]
         == "${{ runner.temp }}/ppu-native-donors"
     )
-    for slot in range(1, 4):
-        assert package["env"][f"SOURCE_{slot}"] == (
+    assert downloads[-1]["name"] == "Download upstream vLLM wheel donor"
+    for slot in (1, 2, 3, "upstream"):
+        assert package["env"][f"SOURCE_{str(slot).upper()}"] == (
             f"${{{{ steps.donor-{slot}.outcome == 'success' && steps.donors.outputs.source_{slot} || '' }}}}"
         )
 
@@ -2467,7 +2504,7 @@ def test_accuracy_nightly_hardening_target_trust_digest_pin_and_cron_concurrency
     resolve_step = next(
         s
         for s in runtime_steps
-        if s.get("name") == "Resolve the runner-configured CUDA-compatible runtime"
+        if s.get("name") == "Resolve the CUDA-compatible PPU runtime"
     )
     assert resolve_step["env"] == {
         "TRUSTED_DIR": "${{ steps.workspace.outputs.trusted }}",

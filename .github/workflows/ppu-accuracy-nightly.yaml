@@ -146,6 +146,9 @@ jobs:
     needs: select
     if: ${{ needs.select.result == 'success' && !inputs.skip_wheel_build }}
     uses: ./.github/workflows/ppu-build-and-test.yaml
+    secrets:
+      ci_registry_username: ${{ secrets.RELEASE_USERNAME }}
+      ci_registry_token: ${{ secrets.RELEASE_TOKEN }}
     with:
       # target_sha is the exact commit selected for this run, and the same
       # value goes to the accuracy calls below, so the checkout and the wheel
@@ -462,6 +465,14 @@ jobs:
           sparse-checkout: scripts/ci
           path: ${{ steps.workspace.outputs.trusted_rel }}
           persist-credentials: false
+
+      - name: Set the CI runtime image
+        if: github.event_name != 'pull_request'
+        shell: bash
+        env:
+          CI_RUNTIME_IMAGE: download.t-head.cn/docker_test/vllm:v0.34.0-20261126-e48a294
+        run: |
+          printf 'PPU_CI_RUNTIME_IMAGE=%s\n' "$CI_RUNTIME_IMAGE" >> "$GITHUB_ENV"
 
       - name: Resolve tag to immutable digest once
         id: resolve

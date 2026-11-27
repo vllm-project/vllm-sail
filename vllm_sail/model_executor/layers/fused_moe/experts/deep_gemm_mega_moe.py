@@ -16,7 +16,7 @@ from vllm.model_executor.layers.fused_moe.deep_gemm_mega_moe import (
 from vllm.model_executor.layers.fused_moe.router.base_router import (
     eplb_map_to_physical_and_record,
 )
-from vllm.model_executor.utils import set_weight_attrs
+from vllm.model_executor.utils import is_weights_pre_processed, set_weight_attrs
 from vllm.v1.worker.ubatching import dbo_current_ubatch_id
 
 import vllm_sail.envs as sail_envs
@@ -109,6 +109,22 @@ class PPUDeepGemmMegaMoEExperts(DeepGemmMegaMoEExperts):
         if prefix in context:
             raise ValueError(f"Duplicate layer name: {prefix}")
         context[prefix] = self
+
+    @torch.no_grad()
+    def process_weights_after_loading(self) -> None:
+        """Transform the raw banks into the kernel layout once loading is done.
+
+        Mirrors the upstream post-load hook instead of relying on the SM90
+        shared-expert requantization: PPU MegaMoE requires
+        `num_shared_experts == 0`, so only the routed banks are transformed.
+        """
+        if self.w13_weight.is_meta:
+            return
+        if is_weights_pre_processed():
+            # ipc_cache installs the daemon's already transformed banks.
+            self._transformed = self.mma_format.transform is not None
+            return
+        self._transform_weights(mega_moe_api(self.mma_type))
 
     @property
     def l1_weights(self):
@@ -220,11 +236,11 @@ class PPUDeepGemmMegaMoEExperts(DeepGemmMegaMoEExperts):
 
     def _load_weight(self, dst, src, shard_id, is_scale):
         if self._transformed:
-            # The first forward overwrote the raw banks with the kernel layout,
-            # so a checkpoint shard can no longer be decoded into them.
+            # Post-load processing overwrote the raw banks with the kernel
+            # layout, so a checkpoint shard can no longer be decoded into them.
             raise RuntimeError(
-                "MegaMoE expert weights cannot be reloaded after the first "
-                "forward: the raw banks were transformed in place."
+                "MegaMoE expert weights cannot be reloaded after post-load "
+                "processing: the raw banks were transformed in place."
             )
         if shard_id not in ("w1", "w2", "w3"):
             raise ValueError(f"Unsupported expert shard id: {shard_id}")
@@ -329,7 +345,6 @@ class PPUDeepGemmMegaMoEExperts(DeepGemmMegaMoEExperts):
                 ),
             )
         api = mega_moe_api(self.mma_type)
-        self._transform_weights(api)
         l1, l2 = self.l1_weights, self.l2_weights
         if (
             self.eplb_state.logical_to_physical_map is not None

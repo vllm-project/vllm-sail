@@ -216,7 +216,11 @@ def test_pr_nightly_workflow_pins_same_head_serializes_lanes_and_keeps_ci_status
         "ppu-pr-nightly-legacy-*-${{ github.run_id }}-*",
     }
     assert all("statuses" not in job.get("permissions", {}) for job in jobs.values())
-    assert all("secrets" not in job for job in jobs.values())
+    assert jobs["build"]["secrets"] == {
+        "ci_registry_username": "${{ secrets.RELEASE_USERNAME }}",
+        "ci_registry_token": "${{ secrets.RELEASE_TOKEN }}",
+    }
+    assert all("secrets" not in job for name, job in jobs.items() if name != "build")
 
     legacy_leaf = yaml.safe_load((workflows / "_ppu-accuracy-tests.yaml").read_text())
     assert legacy_leaf["jobs"]["accuracy"]["strategy"]["max-parallel"] == 1

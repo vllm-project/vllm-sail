@@ -2030,8 +2030,8 @@ def test_invalid_tree_aborts_selection_before_an_older_matching_donor(
     assert not any(c[1].endswith("/actions/runs/554/artifacts") for c in gh.calls)
 
 
-def donor_steps(started, completed, *, reused=False):
-    return [
+def donor_steps(started, completed, *, reused=False, upstream_only=False):
+    steps = [
         {"name": "Verify checked-out revision", "conclusion": "success"},
         {
             "name": "Download native wheel donor",
@@ -2045,6 +2045,11 @@ def donor_steps(started, completed, *, reused=False):
             "completed_at": completed,
         },
     ]
+    if upstream_only:
+        steps.insert(
+            2, {"name": "Download upstream vLLM wheel donor", "conclusion": "success"}
+        )
+    return steps
 
 
 def donor_artifact(
@@ -2055,6 +2060,7 @@ def donor_artifact(
     conclusion="success",
     expired=False,
     reused=False,
+    upstream_only=False,
     wrong_attempt=False,
 ):
     gh.page(
@@ -2064,7 +2070,10 @@ def donor_artifact(
                 "name": job,
                 "conclusion": conclusion,
                 "steps": donor_steps(
-                    "2026-11-19T00:00:00Z", "2026-11-19T00:00:03Z", reused=reused
+                    "2026-11-19T00:00:00Z",
+                    "2026-11-19T00:00:03Z",
+                    reused=reused,
+                    upstream_only=upstream_only,
                 ),
             }
         ],
@@ -2087,7 +2096,18 @@ def donor_artifact(
 
 
 @pytest.mark.parametrize(
-    "nightly_result", ["success", "expired", "failed", "api_error", "wrong_attempt"]
+    "nightly_result",
+    [
+        "success",
+        "expired",
+        "failed",
+        "api_error",
+        "wrong_attempt",
+        "upstream_only",
+        "upstream_only_with_history",
+        "upstream_only_nightly_reused",
+        "upstream_pin_mismatch",
+    ],
 )
 def test_shared_selector_prioritizes_nightly_then_cold_history(
     nightly_result, github_output, capsys
@@ -2152,20 +2172,42 @@ def test_shared_selector_prioritizes_nightly_then_cold_history(
         per_page=20,
     )
     base = [tree_entry("csrc/kernel.cu")]
+    candidate_files = [*base, tree_entry(".github/workflows/_ppu-build.yaml")]
+    if nightly_result.startswith("upstream_"):
+        from scripts.ci.ppu_wheel_manifest import UPSTREAM_BUILD_INPUTS
+
+        pin = ".github/vllm-main-verified.commit"
+        base.extend(tree_entry(path) for path in (pin, *UPSTREAM_BUILD_INPUTS))
+        candidate_files = [
+            tree_entry("csrc/kernel.cu", oid=CHANGED),
+            tree_entry(
+                pin, oid=CHANGED if nightly_result.endswith("mismatch") else BLOB
+            ),
+            *(tree_entry(path) for path in UPSTREAM_BUILD_INPUTS),
+        ]
     add_tree(
         gh, newer_source, tree_payload([tree_entry("csrc/kernel.cu", oid=CHANGED)])
     )
     add_tree(gh, SHA, tree_payload(base))
-    add_tree(gh, OLD, tree_payload(base))
+    historical_upstream_only = nightly_result == "upstream_only_with_history"
+    add_tree(
+        gh, OLD, tree_payload(candidate_files if historical_upstream_only else base)
+    )
     add_tree(gh, inherited_source, tree_payload(base))
     # Use the tested candidate, distinct from the workflow revision.
     add_tree(
         gh,
         candidate,
-        tree_payload([*base, tree_entry(".github/workflows/_ppu-build.yaml")]),
+        tree_payload(candidate_files),
     )
     for ident in (553, 554):
-        donor_artifact(gh, ident, "ppu / build / PPU wheel build", reused=ident == 554)
+        donor_artifact(
+            gh,
+            ident,
+            "ppu / build / PPU wheel build",
+            reused=ident == 554,
+            upstream_only=historical_upstream_only and ident == 553,
+        )
     donor_artifact(
         gh,
         555,
@@ -2173,6 +2215,7 @@ def test_shared_selector_prioritizes_nightly_then_cold_history(
         conclusion=nightly_result if nightly_result == "failed" else "success",
         expired=nightly_result == "expired",
         wrong_attempt=nightly_result == "wrong_attempt",
+        upstream_only=nightly_result == "upstream_only_nightly_reused",
     )
     gh.add(
         "GET",
@@ -2182,10 +2225,19 @@ def test_shared_selector_prioritizes_nightly_then_cold_history(
 
     select_donors(control, candidate)
 
-    expected = [(555, SHA), (553, OLD)] if nightly_result == "success" else [(553, OLD)]
+    if nightly_result == "success":
+        expected = {1: (555, SHA), 2: (553, OLD)}
+    elif nightly_result == "upstream_only":
+        expected = {"upstream": (555, SHA)}
+    elif historical_upstream_only:
+        expected = {1: (553, OLD), "upstream": (555, SHA)}
+    elif nightly_result in {"upstream_pin_mismatch", "upstream_only_nightly_reused"}:
+        expected = {}
+    else:
+        expected = {1: (553, OLD)}
     assert dict(line.split("=") for line in github_output.read_text().splitlines()) == {
         f"{key}_{slot}": str(value)
-        for slot, (ident, source) in enumerate(expected, 1)
+        for slot, (ident, source) in expected.items()
         for key, value in {
             "run": ident,
             "artifact": 2000 + ident,

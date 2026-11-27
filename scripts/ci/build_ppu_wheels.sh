@@ -148,12 +148,33 @@ VLLM_SRC="${WORK_DIR}/vllm"
 NATIVE_REUSE_ROOT="${VLLM_SAIL_NATIVE_REUSE_ROOT:-}"
 NATIVE_REUSE_DIR="${VLLM_SAIL_NATIVE_REUSE_DIR:-}"
 NATIVE_REUSE=0
+VLLM_REUSE=0
+vllm_fingerprint=""
+build_image="${VLLM_SAIL_BUILD_IMAGE:-}"
+immutable_image=0
+if [[ "${build_image}" =~ ^[^@]+@sha256:[0-9a-f]{64}$ ]]; then
+    immutable_image=1
+elif ((PREPARED_ENV == 0)) &&
+    [[ -n "${build_image}" && "${build_image}" != *@* &&
+       "${VLLM_SAIL_BUILD_IMAGE_ID:-}" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+    # Docker's image ID hashes the config, which binds all image layers.
+    build_image="docker-image-id:${VLLM_SAIL_BUILD_IMAGE_ID}"
+    immutable_image=1
+    printf 'build_image_id=%s\n' "${VLLM_SAIL_BUILD_IMAGE_ID}" >>"${MANIFEST}"
+fi
+if ((PREPARED_ENV == 0 && immutable_image)) &&
+    [[ "${VLLM_REF}" =~ ^[0-9a-f]{40}$ &&
+       "${VLLM_REPOSITORY}" == https://github.com/vllm-project/vllm.git ]]; then
+    vllm_fingerprint="$(python "${ROOT_DIR}/scripts/ci/ppu_wheel_manifest.py" \
+        fingerprint-vllm "${ROOT_DIR}" --vllm-commit "${VLLM_REF}" \
+        --build-image "${build_image}")"
+fi
 
 # A native-reuse artifact is only a hint from the trusted controller. Every
 # donor operation is guarded so malformed or legacy artifacts fall back to a
 # full compile instead of failing the CI run.
 fingerprint_args=(
-    --build-image "${VLLM_SAIL_BUILD_IMAGE:-}"
+    --build-image "${build_image}"
     --pytorch-sail-arch "${PYTORCH_SAIL_ARCH}"
     --cmake-build-type "${CMAKE_BUILD_TYPE:-Release}"
     --cmake-hgcc-dir "${CMAKE_HGCC_DIR:-}"
@@ -168,7 +189,7 @@ prepare_native_reuse() {
     if python "${ROOT_DIR}/scripts/ci/ppu_wheel_manifest.py" reuse-native \
         "${donor_dir}" --vllm-commit "${VLLM_REF}" --sail-source "${ROOT_DIR}" \
         --output "${donor_extensions}" --wheel-output "${VLLM_WHEEL_DIR}" \
-        "${fingerprint_args[@]}" "$@"; then
+        "${fingerprint_args[@]}" --vllm-fingerprint "${vllm_fingerprint}" "$@"; then
         PREBUILT_EXT_DIR="${donor_extensions}"
         NATIVE_REUSE=1
         printf 'reuse_mode=native\nreuse_source=%s\n' \
@@ -180,9 +201,26 @@ prepare_native_reuse() {
     echo "Native reuse donor rejected: ${donor_dir}"
     return 1
 }
-if [[ "${VLLM_REF}" =~ ^[0-9a-f]{40}$ ]]; then
+prepare_vllm_reuse() {
+    local donor_dir="$1"
+    shift
+    echo "Verifying vLLM wheel donor: ${donor_dir}"
+    if python "${ROOT_DIR}/scripts/ci/ppu_wheel_manifest.py" reuse-vllm \
+        "${donor_dir}" --vllm-commit "${VLLM_REF}" \
+        --wheel-output "${VLLM_WHEEL_DIR}" --vllm-fingerprint "${vllm_fingerprint}" "$@"; then
+        printf 'reuse_mode=vllm-only\nreuse_source=%s\n' "${donor_dir}" >>"${MANIFEST}"
+        echo "vLLM build fingerprint matched; reusing vLLM wheel and compiling SAIL extensions"
+        return 0
+    fi
+    echo "vLLM wheel donor rejected: ${donor_dir}"
+    return 1
+}
+
+try_donors() {
+    local prepare="$1" slot donor_dir source_file donor_sail_commit
+    shift
     if [[ -n "${NATIVE_REUSE_ROOT}" ]]; then
-        for slot in 1 2 3; do
+        for slot in "$@"; do
             donor_dir="${NATIVE_REUSE_ROOT}/${slot}"
             source_file="${donor_dir}.source"
             [[ -d "${donor_dir}" && -f "${source_file}" ]] || continue
@@ -191,19 +229,31 @@ if [[ "${VLLM_REF}" =~ ^[0-9a-f]{40}$ ]]; then
                 echo "Native reuse donor has invalid SAIL source SHA: ${donor_dir}"
                 continue
             fi
-            if prepare_native_reuse "${donor_dir}" --sail-commit "${donor_sail_commit}"; then
-                break
+            if "${prepare}" "${donor_dir}" --sail-commit "${donor_sail_commit}"; then
+                return 0
             fi
         done
-    elif [[ -n "${NATIVE_REUSE_DIR}" && -d "${NATIVE_REUSE_DIR}" ]]; then
-        prepare_native_reuse "${NATIVE_REUSE_DIR}" || true
+    elif [[ "${prepare}" == prepare_native_reuse && -n "${NATIVE_REUSE_DIR}" &&
+        -d "${NATIVE_REUSE_DIR}" ]]; then
+        "${prepare}" "${NATIVE_REUSE_DIR}" && return 0
     fi
-    if ((NATIVE_REUSE == 0)) && [[ -n "${NATIVE_REUSE_ROOT}${NATIVE_REUSE_DIR}" ]]; then
+    return 1
+}
+
+if [[ "${VLLM_REF}" =~ ^[0-9a-f]{40}$ ]] &&
+    { ((immutable_image)) || [[ -z "${build_image}" ]]; }; then
+    if try_donors prepare_native_reuse 1 2 3; then
+        VLLM_REUSE=1
+        # A legacy paired donor may lack an independent vLLM fingerprint.
+        vllm_fingerprint=""
+    elif [[ -n "${vllm_fingerprint}" ]] && try_donors prepare_vllm_reuse 1 2 3 upstream; then
+        VLLM_REUSE=1
+    elif [[ -n "${NATIVE_REUSE_ROOT}${NATIVE_REUSE_DIR}" ]]; then
         echo "Native reuse unavailable or invalid; compiling"
     fi
 fi
 
-if ((NATIVE_REUSE == 0)); then
+if ((VLLM_REUSE == 0)); then
     git init "${VLLM_SRC}"
     git -C "${VLLM_SRC}" remote add origin "${VLLM_REPOSITORY}"
     # setuptools-scm needs history and release tags, including for commit/branch refs.
@@ -218,7 +268,7 @@ if ((NATIVE_REUSE == 0)); then
         sleep "$((2 ** (attempt - 1)))"
     done
     git -C "${VLLM_SRC}" checkout --detach FETCH_HEAD
-    if ((PREPARED_ENV)); then
+    if [[ "${VLLM_REF}" =~ ^[0-9a-f]{40}$ ]]; then
         [[ "$(git -C "${VLLM_SRC}" rev-parse HEAD)" == "${VLLM_REF}" ]] || fail "fetched vLLM commit differs from the checkout's pin"
     fi
     (
@@ -341,14 +391,15 @@ fi
 
 VLLM_COMMIT="${VLLM_REF}"
 manifest_vllm_args=(--vllm-source "${VLLM_SRC}")
-if ((NATIVE_REUSE == 1)); then
+if ((VLLM_REUSE == 1)); then
     manifest_vllm_args=(--vllm-commit "${VLLM_COMMIT}")
 else
     VLLM_COMMIT="$(git -C "${VLLM_SRC}" rev-parse HEAD)"
 fi
 python "${ROOT_DIR}/scripts/ci/ppu_wheel_manifest.py" create \
     "${ARTIFACT_DIR}/wheels" "${manifest_vllm_args[@]}" \
-    --sail-source "${ROOT_DIR}" "${fingerprint_args[@]}"
+    --sail-source "${ROOT_DIR}" "${fingerprint_args[@]}" \
+    --vllm-fingerprint "${vllm_fingerprint}"
 
 mapfile -t sail_wheels < <(
     find "${SAIL_WHEEL_DIR}" -maxdepth 1 -type f -name '*.whl' -print
@@ -367,8 +418,12 @@ python "${ROOT_DIR}/scripts/ci/ppu_image_stack.py" verify \
     printf 'status=succeeded\n'
     printf 'python=%s\n' "$(python --version 2>&1)"
     printf 'hgcc=%s\n' "$("${HGCC}" --version 2>&1 | head -n 1)"
-    printf 'reuse_mode=%s\n' "$([[ ${NATIVE_REUSE} == 1 ]] && printf native || printf full)"
-    if ((NATIVE_REUSE == 0)); then
+    if ((NATIVE_REUSE == 1)); then
+        printf 'reuse_mode=native\n'
+    elif ((VLLM_REUSE == 1)); then
+        printf 'reuse_mode=vllm-only\n'
+    else
+        printf 'reuse_mode=full\n'
         printf 'rustc=%s\n' "$(cat "${LOG_DIR}/rustc-version.log")"
         printf 'cargo=%s\n' "$(cat "${LOG_DIR}/cargo-version.log")"
     fi

@@ -19,6 +19,11 @@ whenever pipeline parallelism is on, so nothing summed the TP-sharded
 shared-expert partial. ``KimiMoE.__init__`` records when that sum is owed and
 ``KimiRoutedOutputTransform`` is where the shared output re-enters the residual
 stream, so the collective lives there.
+
+A default-on, opt-out MoE-local sequence-parallel path removes replicated
+routed-expert work when pipeline parallelism disables the model-level SP path.
+Only the MoE sees a TP token shard; its output is gathered before the
+surrounding decoder layer.
 """
 
 from __future__ import annotations
@@ -26,9 +31,16 @@ from __future__ import annotations
 import inspect
 from dataclasses import fields as dataclass_fields
 
+from vllm import envs
 from vllm.distributed import tensor_model_parallel_all_reduce
+from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.model_executor.layers.linear import UnquantizedLinearMethod
 from vllm.models.kimi_k3.common.dsa_cache import SelfAddressedMLASpec
+from vllm.models.common.ops.sequence_parallel import (
+    sp_all_gather,
+    sp_padding_mask,
+    sp_shard,
+)
 from vllm.models.kimi_k3.nvidia.latent_moe_runner import (
     LatentMoERunner,
     LatentTailTier,
@@ -38,6 +50,7 @@ from vllm.platforms import current_platform
 from vllm.utils.multi_stream_utils import maybe_execute_in_parallel
 from vllm.utils.torch_utils import aux_stream
 
+from vllm_sail import envs as sail_envs
 from vllm_sail.patch.utils import patch
 
 # Captured before patching so every replacement can fall back to upstream.
@@ -46,6 +59,7 @@ _upstream_select_tail_tier = LatentMoERunner._select_tail_tier
 _upstream_overlap_allreduce_tail = LatentMoERunner._overlap_allreduce_tail
 _upstream_transform_forward = KimiRoutedOutputTransform.forward
 _upstream_moe_init = KimiMoE.__init__
+_upstream_moe_forward = KimiMoE.forward
 
 
 @patch(
@@ -54,18 +68,53 @@ _upstream_moe_init = KimiMoE.__init__
     reason=(
         "KimiMoE.forward calls the shared expert directly on the eager MegaMoE "
         "path, so no MoERunner tail all-reduces the TP-sharded shared-expert "
-        "partial. Record on the output transform when that sum is owed; "
+        "partial. Also enable MoE-local SP when PP disables model-level SP; "
         "delegates to upstream elsewhere."
     ),
     remove_when=(
-        "the eager MegaMoE path reduces the shared-expert output itself, the "
-        "way MoERunner and LatentMoERunner do."
+        "the eager MegaMoE path reduces the shared-expert output itself and "
+        "upstream provides MoE-local sequence sharding with pipeline parallelism."
     ),
 )
 def moe_init(self, *args, **kwargs) -> None:
+    # PPU MODIFICATION: begin — model-level SP is disabled for PP>1. Opt into
+    # the same contract only inside this MoE, which both shards MegaMoE's token
+    # capacity and gives the shared expert the correct SP weight/collective
+    # semantics. Do not enable the surrounding decoder or pipeline SP path.
+    is_ppu = current_platform.is_ppu()
+    vllm_config = kwargs.get("vllm_config")
+    if vllm_config is None and len(args) > 1:
+        vllm_config = args[1]
+    use_sequence_parallel = kwargs.get(
+        "use_sequence_parallel", args[5] if len(args) > 5 else False
+    )
+    use_moe_sequence_parallel = (
+        is_ppu
+        and sail_envs.VLLM_SAIL_KIMI_K3_MOE_SEQUENCE_PARALLEL
+        and vllm_config is not None
+        and not use_sequence_parallel
+        and vllm_config.parallel_config.pipeline_parallel_size > 1
+        and vllm_config.parallel_config.enable_expert_parallel
+        and vllm_config.parallel_config.tensor_parallel_size > 1
+        and vllm_config.kernel_config.moe_backend == "deep_gemm_mega_moe"
+    )
+    if use_moe_sequence_parallel:
+        if len(args) > 5:
+            args = (*args[:5], True, *args[6:])
+        else:
+            kwargs["use_sequence_parallel"] = True
+        # The surrounding PP>1 model may have initialized GEMM-AR for dense
+        # layers. A sharded SP shared expert needs RS instead, so use its plain
+        # AG/RS collectives rather than entering the incompatible singleton.
+        if len(args) > 6:
+            args = (*args[:6], False, *args[7:])
+        else:
+            kwargs["run_gemm_rs_ar"] = False
+    # PPU MODIFICATION: end
     _upstream_moe_init(self, *args, **kwargs)
-    if not current_platform.is_ppu():
+    if not is_ppu:
         return
+    self._moe_sequence_parallel = use_moe_sequence_parallel
     # PPU MODIFICATION: begin — sequence parallelism keeps the shared expert
     # replicated (both projections are disable_tp), which is why the eager
     # MegaMoE path needs no collective at all. It turns off whenever pipeline
@@ -78,6 +127,44 @@ def moe_init(self, *args, **kwargs) -> None:
         transform._mega_shared_partial = (
             self.tp_size > 1 and not self.use_sequence_parallel
         )
+    # PPU MODIFICATION: end
+
+
+@patch(
+    "vllm.models.kimi_k3.nvidia.model",
+    "KimiMoE.forward",
+    reason=(
+        "Pipeline parallelism disables Kimi K3 model-level SP, leaving every TP "
+        "rank a full token copy for MegaMoE. The opt-out wrapper shards only the "
+        "MoE input and gathers its output, preserving decoder and PP interfaces."
+    ),
+    remove_when=(
+        "upstream supports an equivalent MoE-local sequence-sharding path for "
+        "Kimi K3 MegaMoE when pipeline parallelism is enabled."
+    ),
+)
+def moe_forward(self, hidden_states):
+    if not getattr(self, "_moe_sequence_parallel", False):
+        return _upstream_moe_forward(self, hidden_states)
+    # PPU MODIFICATION: begin — the upstream MoE runs on this rank's token
+    # shard. Padding rows need the same local mask, and the original mask must
+    # be restored before the gathered output rejoins the full residual stream.
+    num_tokens = hidden_states.shape[0]
+    forward_context = None
+    is_padding = None
+    if envs.VLLM_MOE_SKIP_PADDING and is_forward_context_available():
+        forward_context = get_forward_context()
+        is_padding = forward_context.is_padding
+        forward_context.is_padding = sp_padding_mask(
+            is_padding[:num_tokens] if is_padding is not None else None,
+            hidden_states,
+        )
+    try:
+        local_output = _upstream_moe_forward(self, sp_shard(hidden_states))
+    finally:
+        if forward_context is not None:
+            forward_context.is_padding = is_padding
+    return sp_all_gather(local_output)[:num_tokens]
     # PPU MODIFICATION: end
 
 

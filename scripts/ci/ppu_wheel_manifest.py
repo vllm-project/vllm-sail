@@ -12,6 +12,7 @@ import os
 import re
 import shutil
 import subprocess
+import sysconfig
 import tarfile
 import tempfile
 import zipfile
@@ -33,6 +34,12 @@ FINGERPRINT_COMPAT_PATHS = (
     ".github/workflows/_ppu-build.yaml",
     "scripts/ci/build_ppu_wheels.sh",
     "scripts/ci/ppu_wheel_manifest.py",
+)
+UPSTREAM_BUILD_INPUTS = (
+    ".github/workflows/_ppu-build.yaml",
+    "requirements/build.txt",
+    "scripts/ci/build_ppu_wheels.sh",
+    "scripts/ci/ppu_image_stack.py",
 )
 NATIVE_INPUTS = (
     ".github/vllm-main-verified.commit",
@@ -238,6 +245,22 @@ def _native_fingerprints(
 def native_fingerprint(source: Path, **settings: str) -> str:
     """Hash every input and build setting that can change native extensions."""
     return _native_fingerprints(source, **settings)[0]
+
+
+def vllm_build_fingerprint(source: Path, *, commit: str, image: str) -> str:
+    if not re.fullmatch(r"[0-9a-f]{40}", commit):
+        raise ValueError("vLLM wheel reuse requires a pinned upstream commit")
+    if not re.fullmatch(r"(?:[^@]+@|docker-image-id:)sha256:[0-9a-f]{64}", image):
+        raise ValueError("vLLM wheel reuse requires an immutable build image identity")
+    inputs = {
+        "schema": 1,
+        "commit": commit,
+        "image": image,
+        "python_abi": sysconfig.get_config_var("SOABI"),
+        "platform": sysconfig.get_platform(),
+        "files": {path: _sha256_file(source / path) for path in UPSTREAM_BUILD_INPUTS},
+    }
+    return hashlib.sha256(json.dumps(inputs, sort_keys=True).encode()).hexdigest()
 
 
 def _canonical_json(value: object) -> bytes:
@@ -470,6 +493,10 @@ def verify(
     manifest = json.loads((directory / MANIFEST).read_text())
     if not isinstance(manifest, dict) or manifest.get("schema") != 1:
         raise ValueError("unsupported wheel manifest schema")
+    if "vllm_build_fingerprint" in manifest and not _is_sha256(
+        manifest["vllm_build_fingerprint"]
+    ):
+        raise ValueError("invalid vLLM build fingerprint")
     if manifest.get("wheels") != wheel_records(directory):
         raise ValueError(
             "wheel filenames, versions or hashes differ from build manifest"
@@ -540,9 +567,12 @@ def reuse_native(
     vllm_commit: str,
     sail_commit: str | None,
     sail_source: Path,
+    vllm_fingerprint: str | None = None,
     **settings: str,
 ) -> None:
     manifest = verify(directory, vllm_commit=vllm_commit, sail_commit=sail_commit)
+    if vllm_fingerprint is not None and "vllm_build_fingerprint" in manifest:
+        _require_vllm_fingerprint(manifest, vllm_fingerprint)
     native = _require_native(manifest)
     if native["fingerprint"] not in _native_fingerprints(
         sail_source, include_legacy=True, **settings
@@ -550,6 +580,31 @@ def reuse_native(
         raise ValueError("native build fingerprint does not match")
 
     _extract_native(directory / manifest["wheels"]["vllm-sail"]["file"], output)
+    _copy_vllm_wheel(directory, manifest, wheel_output)
+
+
+def _require_vllm_fingerprint(manifest: dict, fingerprint: str) -> None:
+    if (
+        not _is_sha256(fingerprint)
+        or manifest.get("vllm_build_fingerprint") != fingerprint
+    ):
+        raise ValueError("vLLM build fingerprint does not match")
+
+
+def reuse_vllm(
+    directory: Path,
+    wheel_output: Path,
+    *,
+    vllm_commit: str,
+    sail_commit: str,
+    vllm_fingerprint: str,
+) -> None:
+    manifest = verify(directory, vllm_commit=vllm_commit, sail_commit=sail_commit)
+    _require_vllm_fingerprint(manifest, vllm_fingerprint)
+    _copy_vllm_wheel(directory, manifest, wheel_output)
+
+
+def _copy_vllm_wheel(directory: Path, manifest: dict, wheel_output: Path) -> None:
     wheel = directory / manifest["wheels"]["vllm"]["file"]
     # Stage on the destination filesystem so a failed copy cannot leave a wheel
     # for the next donor or the cold build to pick up.
@@ -578,13 +633,22 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "command",
-        choices=("create", "verify", "fingerprint", "extract-native", "reuse-native"),
+        choices=(
+            "create",
+            "verify",
+            "fingerprint",
+            "fingerprint-vllm",
+            "extract-native",
+            "reuse-native",
+            "reuse-vllm",
+        ),
     )
     parser.add_argument("directory", type=Path)
     parser.add_argument("--vllm-source", type=Path)
     parser.add_argument("--sail-source", type=Path)
     parser.add_argument("--vllm-commit", help="require this upstream source commit")
     parser.add_argument("--sail-commit", help="require this plugin source commit")
+    parser.add_argument("--vllm-fingerprint")
     parser.add_argument("--build-image", default="")
     parser.add_argument("--pytorch-sail-arch", default="")
     parser.add_argument("--cmake-build-type", default="Release")
@@ -616,6 +680,12 @@ def main() -> None:
         )
     elif args.command == "fingerprint":
         result = native_fingerprint(args.directory, **settings)
+    elif args.command == "fingerprint-vllm":
+        if args.vllm_commit is None:
+            parser.error("fingerprint-vllm requires --vllm-commit")
+        result = vllm_build_fingerprint(
+            args.directory, commit=args.vllm_commit, image=args.build_image
+        )
     elif args.command == "extract-native":
         if args.output is None:
             parser.error("extract-native requires --output")
@@ -639,10 +709,33 @@ def main() -> None:
                 vllm_commit=args.vllm_commit,
                 sail_commit=args.sail_commit,
                 sail_source=args.sail_source,
+                vllm_fingerprint=args.vllm_fingerprint or None,
                 **settings,
             )
         except (OSError, ValueError, zipfile.BadZipFile) as error:
             parser.exit(1, f"reuse-native: {error}\n")
+        return
+    elif args.command == "reuse-vllm":
+        if (
+            args.wheel_output is None
+            or args.vllm_commit is None
+            or args.sail_commit is None
+            or not args.vllm_fingerprint
+        ):
+            parser.error(
+                "reuse-vllm requires --wheel-output, --vllm-commit, "
+                "--sail-commit and --vllm-fingerprint"
+            )
+        try:
+            reuse_vllm(
+                args.directory,
+                args.wheel_output,
+                vllm_commit=args.vllm_commit,
+                sail_commit=args.sail_commit,
+                vllm_fingerprint=args.vllm_fingerprint,
+            )
+        except (OSError, ValueError, zipfile.BadZipFile) as error:
+            parser.exit(1, f"reuse-vllm: {error}\n")
         return
     else:
         if (
@@ -673,6 +766,10 @@ def main() -> None:
                 "extensions": native_extension_records(sail_wheel),
             },
         }
+        if args.vllm_fingerprint:
+            if not _is_sha256(args.vllm_fingerprint):
+                parser.error("invalid vLLM build fingerprint")
+            result["vllm_build_fingerprint"] = args.vllm_fingerprint
         (args.directory / MANIFEST).write_text(json.dumps(result, indent=2) + "\n")
     if isinstance(result, str):
         print(result)

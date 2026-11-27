@@ -109,7 +109,15 @@ jobs:
           repository: ${{ github.repository }}
           github-token: ${{ github.token }}
 
-      - name: Run strict M890 reuse in the runner-configured runtime
+      - name: Set the CI runtime image
+        if: github.event_name != 'pull_request'
+        shell: bash
+        env:
+          CI_RUNTIME_IMAGE: download.t-head.cn/docker_test/vllm:v0.34.0-20261126-e48a294
+        run: |
+          printf 'PPU_CI_RUNTIME_IMAGE=%s\n' "$CI_RUNTIME_IMAGE" >> "$GITHUB_ENV"
+
+      - name: Run strict M890 reuse in the CI runtime
         env:
           HF_HOME: /nas_aisw/datasets/hf_cache
           PPU_CI_REUSE_CHECKPOINT_ROOT: /nas_aisw/datasets/checkpoints/LLM
