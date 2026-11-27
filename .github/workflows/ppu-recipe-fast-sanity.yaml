@@ -18,12 +18,20 @@ jobs:
     defaults:
       run:
         shell: bash
+    env:
+      GIT_CONFIG_NOSYSTEM: "1"
     steps:
+      - name: Prepare job-local Git configuration
+        run: |
+          config="$(mktemp "$RUNNER_TEMP/pr472-git.XXXXXX")"
+          printf 'GIT_CONFIG_GLOBAL=%s\n' "$config" >> "$GITHUB_ENV"
       - uses: actions/checkout@v4
         with:
+          path: .pr472-probe-${{ github.run_id }}-${{ github.run_attempt }}
           fetch-depth: 2
           persist-credentials: false
       - name: Verify candidate and exercise the wheel
+        working-directory: .pr472-probe-${{ github.run_id }}-${{ github.run_attempt }}
         env:
           SOURCE_SHA: 21d2c37e55e280a1d32d1cda78f16637f07a6da7
           PPU_CI_RUNTIME_IMAGE: download.t-head.cn/docker_test/vllm:v0.34.0-20261127-834042f
@@ -72,6 +80,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: pr472-fp32-receipt
-          path: pr472-fp32-receipt.json
+          path: .pr472-probe-${{ github.run_id }}-${{ github.run_attempt }}/pr472-fp32-receipt.json
+          include-hidden-files: true
           if-no-files-found: error
           retention-days: 7
