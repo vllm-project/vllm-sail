@@ -435,7 +435,7 @@ def test_ci_uses_workflow_configured_build_and_runtime_image():
     assert inputs["ops_image"]["required"] is True
     assert "default" not in inputs["ops_image"]
     build = workflow["jobs"]["build"]
-    image = "download.t-head.cn/docker_test/vllm:v0.34.0-20261126-e48a294"
+    image = "download.t-head.cn/docker_test/vllm:v0.34.0-20261127-834042f"
     build_image = build["container"]["image"]
     assert "inputs.build_image ||" in build_image
     assert (

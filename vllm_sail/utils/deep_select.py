@@ -1,11 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
-"""The optional, precompiled BF16 DeepSelect backend for SAIL indexers.
+"""The optional, precompiled BF16/FP32 DeepSelect backend for SAIL indexers.
 
 The wheel API follows sglang-for-sail b76ad8286bde. Never import the CUDA
-JIT backend on PPU, and never round FP32 scores to make them fit this wheel.
+JIT backend on PPU, and never round FP32 scores to make them fit a BF16-only
+wheel; FP32 scores fall back to existing FP32 top-k unless the installed
+wheel supports FP32 directly.
 """
 
 import functools
+from pathlib import Path
 
 import torch
 from vllm.logger import init_logger
@@ -31,6 +34,28 @@ def _wheel():
     return interface
 
 
+@functools.cache
+def _wheel_supports_fp32() -> bool:
+    interface = _wheel()
+    if interface is None:
+        return False
+    backend_file = getattr(getattr(interface, "_backend", None), "__file__", None)
+    if isinstance(backend_file, str):
+        try:
+            data = Path(backend_file).read_bytes()
+        except OSError:
+            pass
+        else:
+            if b"PPU DeepSelect currently supports bfloat16 input only" in data:
+                return False
+            if b"float32" in data:
+                return True
+    doc = getattr(getattr(interface, "topk", None), "__doc__", None)
+    if isinstance(doc, str):
+        return "FP32" in doc
+    return True
+
+
 def is_deep_select_available() -> bool:
     return (
         current_platform.is_ppu()
@@ -42,11 +67,12 @@ def is_deep_select_available() -> bool:
 
 def can_use_deep_select(logits: torch.Tensor, topk: int) -> bool:
     return (
-        logits.dtype == torch.bfloat16
+        logits.dtype in (torch.bfloat16, torch.float32)
         and logits.ndim == 2
         and 0 < topk <= 4096
         and 0 < logits.shape[1] < 2**23
         and is_deep_select_available()
+        and (logits.dtype == torch.bfloat16 or _wheel_supports_fp32())
     )
 
 
@@ -62,10 +88,8 @@ def deep_select_topk(
     Rows already start at their query's first K column. Page-table conversion
     remains with vLLM's attention backend, after this local-index selection.
     """
-    if logits.dtype != torch.bfloat16:
-        raise TypeError(
-            "SAIL DeepSelect requires BF16 logits; FP32 must use FP32 top-k"
-        )
+    if logits.dtype not in (torch.bfloat16, torch.float32):
+        raise TypeError("SAIL DeepSelect requires BF16 or FP32 logits")
     if not can_use_deep_select(logits, topk):
         raise RuntimeError(
             "SAIL DeepSelect wheel, device or top-k shape is unsupported"

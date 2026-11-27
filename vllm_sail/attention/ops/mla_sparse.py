@@ -390,7 +390,8 @@ def ppu_sparse_attn_indexer(
 
             if _use_deep_select(logits, topk_tokens, topk_backend):
                 # Compressed rows start at each query's first K position;
-                # BF16 scores use the wheel with per-row valid lengths.
+                # BF16/FP32 scores go to the wheel unchanged, with per-row
+                # valid lengths.
                 deep_select_topk(logits, topk_tokens, row_ends, topk_indices)
             elif logits.dtype == torch.bfloat16:
                 warn_deep_select_fallback()
@@ -642,7 +643,7 @@ def _use_deep_select(logits, topk, backend):
     supported = can_use_deep_select(logits, topk)
     if backend == "deep_select" and not supported:
         raise RuntimeError(
-            "deep_select was requested but the SAIL BF16 wheel, device or "
+            "deep_select was requested but the SAIL DeepSelect wheel, device or "
             "shape is unsupported; FP32 logits are never rounded to BF16"
         )
     return backend in ("auto", "deep_select") and supported
