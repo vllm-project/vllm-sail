@@ -182,7 +182,7 @@ def test_ppu_fp4_constructor_delegates_then_adds_fork_state(builder_factory):
     assert builder.indexer_n_head == 64
     assert builder.indexer_q_head_dim == 128
     assert builder.num_sms == 7
-    assert builder.scheduler_metadata_buffer.shape == (7 * 8 + 1 + 4096, 4)
+    assert builder.scheduler_metadata_buffer.shape == (7 * 8 + 1, 2)
     assert builder.scheduler_metadata_buffer.dtype == "int32"
     assert builder.scheduler_metadata_buffer.device == "ppu:0"
 
@@ -200,16 +200,13 @@ def test_ppu_fp8_constructor_keeps_geometry_and_reserves_sail_schedule(builder_f
 
 
 @pytest.mark.parametrize("max_tokens", [16, 4096, 8192])
-def test_fp4_schedule_can_copy_full_expanded_query_batch(builder_factory, max_tokens):
+def test_fp4_schedule_shape_is_independent_of_query_batch(builder_factory, max_tokens):
     builder_cls, _ = builder_factory(ppu=True, fp4=True, max_tokens=max_tokens)
     builder = builder_cls("config")
-    rows, columns = builder.scheduler_metadata_buffer.shape
-    # The grouped SAIL ABI adds one row per query, including MTP queries
-    # sharing a request. The upstream copy slices rows, never columns.
-    for blocks_per_cu in (1, 2, 4, 8):
-        returned_shape = (builder.num_sms * blocks_per_cu + 1 + max_tokens, 4)
-        assert rows >= returned_shape[0]
-        assert columns == returned_shape[1]
+    # DeepGEMM-for-sail #214 returns fixed-size grouped FP4 metadata
+    # [num_sms * tb_per_cu + 1, 2]; expanded query rows (including MTP) no
+    # longer grow the schedule, so the buffer must not reserve for them.
+    assert builder.scheduler_metadata_buffer.shape == (7 * 8 + 1, 2)
 
 
 def test_legacy_indexer_derives_missing_geometry_from_model_config(builder_factory):

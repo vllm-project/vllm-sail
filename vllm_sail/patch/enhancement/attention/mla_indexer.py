@@ -140,13 +140,6 @@ def _ppu_paged_metadata(
     schedule = _ppu_deep_gemm.get_paged_mqa_logits_metadata(
         context_lens, block_size, num_sms, metadata_extra, indices=indices
     )
-    # PPU MODIFICATION: begin -- size upstream's copy buffer for the active ABI.
-    buffer = getattr(builder, "scheduler_metadata_buffer", None)
-    if buffer is not None and (
-        buffer.shape[0] < schedule.shape[0] or buffer.shape[1] != schedule.shape[1]
-    ):
-        builder.scheduler_metadata_buffer = schedule.new_empty(schedule.shape)
-    # PPU MODIFICATION: end
     if builder is not None and (
         (weighted_fp4 and getattr(builder, "supports_varlen", False) and has_varlen_ids)
         or (
@@ -363,17 +356,12 @@ def _builder_init_wrapper(self, *args, **kwargs) -> None:
     from vllm_sail.utils.deep_gemm import get_num_sms
 
     self.num_sms = get_num_sms()
-    # Grouped MXFP4 schedules contain four int32 fields per row plus one
-    # row per expanded query. Legacy INT8/FP8 schedules have two fields and
-    # no query rows. Reserve the full decode capacity before graph capture;
-    # upstream narrows only the row dimension when copying each schedule.
-    rows = self.num_sms * _indexer_module.PPU_DEEP_GEMM_TB_PER_CU + 1
-    columns = 2
-    if self.indexer_uses_fp4:
-        rows += self.vllm_config.scheduler_config.max_num_batched_tokens
-        columns = 4
+    # DeepGEMM-for-sail #214 (0f9756f) returns fixed-size grouped FP4 decode
+    # metadata: [num_sms * tb_per_cu + 1, 2], independent of the query-row
+    # count -- the same contract as legacy INT8/FP8. Size the capture-stable
+    # buffer to that shape so upstream's row-sliced copy never needs a resize.
     self.scheduler_metadata_buffer = torch.empty(
-        (rows, columns),
+        (self.num_sms * _indexer_module.PPU_DEEP_GEMM_TB_PER_CU + 1, 2),
         dtype=torch.int32,
         device=self.device,
     )

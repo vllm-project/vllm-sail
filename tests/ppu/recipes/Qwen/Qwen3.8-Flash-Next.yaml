@@ -68,6 +68,10 @@ hardware_overrides:
 presets:
   dp_ep_low_latency:
     hardware: zhenwu_m890
+    topology:
+      kind: single_node
+      nodes: 1
+      devices_per_node: 8
     remove_args:
       - --tensor-parallel-size
       - --max-num-seqs

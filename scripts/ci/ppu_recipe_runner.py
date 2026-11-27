@@ -18,7 +18,7 @@ import socket
 import subprocess
 import sys
 import time
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from http.client import HTTPConnection, HTTPException, HTTPResponse, IncompleteRead
 from pathlib import Path
 from threading import Timer
@@ -36,6 +36,10 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.append(str(REPO_ROOT))
 
 from ppu_recipe import (  # noqa: E402
+    SINGLE_NODE_MAX_DEVICES_BY_HARDWARE,
+    ValidationError,
+    _validate_resolved_topology_and_placeholders,
+    check_single_node_sanity_compatibility,
     infer_fast_sanity_layer_override,
     redact_and_verify_public_payload,
     resolve_local_checkpoint_dir,
@@ -592,15 +596,74 @@ def _extract_per_question_evalscope(
     }
 
 
+def _resolve_runner_device_budget(
+    resolved: Mapping[str, Any],
+    *,
+    max_devices: int | None = None,
+    env: Mapping[str, str] | None = None,
+) -> int | None:
+    """Resolve single-node job device quota; explicit max_devices overrides hardware default, never narrower job/visible limits."""
+    limits: list[int] = []
+    if max_devices is not None:
+        if type(max_devices) is not int or max_devices <= 0:
+            raise ValidationError(
+                f"max_devices must be a positive integer, got {max_devices!r}"
+            )
+        limits.append(max_devices)
+    eff_env = os.environ if env is None else env
+    ci_count_raw = eff_env.get("PPU_CI_DEVICE_COUNT", "").strip()
+    if ci_count_raw:
+        try:
+            ci_count = int(ci_count_raw)
+        except ValueError as exc:
+            raise ValidationError(
+                f"PPU_CI_DEVICE_COUNT must be a positive integer, got {ci_count_raw!r}"
+            ) from exc
+        if ci_count <= 0:
+            raise ValidationError(
+                f"PPU_CI_DEVICE_COUNT must be a positive integer, got {ci_count}"
+            )
+        limits.append(ci_count)
+    if "CUDA_VISIBLE_DEVICES" in eff_env:
+        cvd_raw = eff_env["CUDA_VISIBLE_DEVICES"].strip()
+        if cvd_raw in {"", "-1", "void", "none", "NoDevFiles"}:
+            limits.append(0)
+        else:
+            limits.append(
+                len([tok.strip() for tok in cvd_raw.split(",") if tok.strip()])
+            )
+    if limits:
+        return min(limits)
+    hw = resolved.get("hardware")
+    if isinstance(hw, str):
+        return SINGLE_NODE_MAX_DEVICES_BY_HARDWARE.get(hw)
+    return None
+
+
 def _launch_resolved_server(
     resolved: dict[str, Any],
     *,
     log_path: Path,
     model_dir: Path | None = None,
+    max_devices: int | None = None,
 ) -> subprocess.Popen[bytes]:
     env = dict(os.environ)
     env.update({k: str(v) for k, v in resolved.get("server_env", {}).items()})
     env.update({k: str(v) for k, v in resolved.get("runtime_env", {}).items()})
+    if "flags" in resolved and "topology" in resolved:
+        _validate_resolved_topology_and_placeholders(
+            resolved, context="launch_resolved_server", base_env=env
+        )
+    eff_max_devices = _resolve_runner_device_budget(
+        resolved, max_devices=max_devices, env=env
+    )
+    incompat_reason = check_single_node_sanity_compatibility(
+        resolved, max_devices=eff_max_devices, base_env=env
+    )
+    if incompat_reason is not None:
+        raise ValidationError(
+            f"launch_resolved_server requires OpenAI HTTP server: {incompat_reason}"
+        )
     if (
         model_dir is not None
         and model_dir.parent.name == "snapshots"
@@ -637,6 +700,7 @@ def _attempt_fast_sanity_once(
     probe: dict[str, Any],
     results_dir: Path,
     label: str,
+    max_devices: int | None = None,
 ) -> dict[str, Any]:
     base_name = f"recipe-{label}-{secrets.token_hex(4)}"
     resolved = resolve_recipe(
@@ -656,7 +720,12 @@ def _attempt_fast_sanity_once(
     t_start = time.monotonic()
     try:
         _record_phase("server_startup")
-        proc = _launch_resolved_server(resolved, log_path=log_path, model_dir=model_dir)
+        proc = _launch_resolved_server(
+            resolved,
+            log_path=log_path,
+            model_dir=model_dir,
+            max_devices=max_devices,
+        )
         cold_start_s = _wait_server_ready(
             proc,
             log_path,
@@ -723,6 +792,7 @@ def run_fast_sanity(
     layer_mode: str = "auto",
     parser_mode: str = "required",
     queue_s: float = 0.0,
+    max_devices: int | None = None,
 ) -> dict[str, Any]:
     """Run ``fast_sanity`` (2-layer dummy first, optional fallback to full-layer dummy)."""
     results_dir.mkdir(parents=True, exist_ok=True)
@@ -744,11 +814,22 @@ def run_fast_sanity(
         preset=preset,
         layer_override=None,
         assets_map_path=assets_map,
+        port=port,
     )
     effective_env = {
         **os.environ,
         **{k: str(v) for k, v in base_resolved.get("server_env", {}).items()},
     }
+    eff_max_devices = _resolve_runner_device_budget(
+        base_resolved, max_devices=max_devices, env=effective_env
+    )
+    incompat_reason = check_single_node_sanity_compatibility(
+        base_resolved, max_devices=eff_max_devices, base_env=effective_env
+    )
+    if incompat_reason is not None:
+        raise ValidationError(
+            f"run_fast_sanity requires OpenAI HTTP server: {incompat_reason}"
+        )
     model_dir = resolve_local_checkpoint_dir(
         base_resolved["resolved_model"], env=effective_env
     )
@@ -785,6 +866,7 @@ def run_fast_sanity(
             probe=probe,
             results_dir=results_dir,
             label="fast_2l",
+            max_devices=max_devices,
         )
         attempts.append(res_2l)
     did_fallback = False
@@ -820,6 +902,7 @@ def run_fast_sanity(
             probe=probe,
             results_dir=results_dir,
             label="fast_full",
+            max_devices=max_devices,
         )
         attempts.append(res_full)
 
@@ -842,7 +925,7 @@ def run_fast_sanity(
         "tier": "fast_sanity",
         "model_id": policy["model_id"],
         "variant": eff_variant,
-        "preset": preset,
+        "preset": base_resolved["preset"],
         "status": final_attempt["status"],
         "parser_checked": val_report["parser_checked"],
         "config_digest": final_attempt["config_digest"],
@@ -951,6 +1034,7 @@ def run_model_sanity(
     queue_s: float = 0.0,
     limit: int | None = None,
     post_ready_sleep: int = 30,
+    max_devices: int | None = None,
 ) -> dict[str, Any]:
     """Run ``model_sanity``: 1 server -> probe -> GSM8K 1319 -> drain/reset -> bench [1,16]."""
     results_dir.mkdir(parents=True, exist_ok=True)
@@ -992,6 +1076,20 @@ def run_model_sanity(
         port=port,
         served_model_name=f"recipe-ms-{secrets.token_hex(4)}",
     )
+    ms_effective_env = {
+        **os.environ,
+        **{k: str(v) for k, v in resolved.get("server_env", {}).items()},
+    }
+    ms_max_devices = _resolve_runner_device_budget(
+        resolved, max_devices=max_devices, env=ms_effective_env
+    )
+    ms_incompat = check_single_node_sanity_compatibility(
+        resolved, max_devices=ms_max_devices, base_env=ms_effective_env
+    )
+    if ms_incompat is not None:
+        raise ValidationError(
+            f"run_model_sanity requires OpenAI HTTP server: {ms_incompat}"
+        )
     unique_served = resolved["served_name"]
     gsm8k_path = os.environ.get("GSM8K_DATASET_PATH", "")
     if not gsm8k_path:
@@ -1004,7 +1102,9 @@ def run_model_sanity(
     proc: subprocess.Popen[bytes] | None = None
     try:
         _record_phase("server_startup")
-        proc = _launch_resolved_server(resolved, log_path=log_path)
+        proc = _launch_resolved_server(
+            resolved, log_path=log_path, max_devices=max_devices
+        )
         ready_budget = max(
             ready_timeout,
             int(
@@ -1168,7 +1268,7 @@ def run_model_sanity(
             "variant": resolved["variant"],
             "hf_model_id": resolved["hf_model_id"],
             "golden_model_key": resolved["golden_model_key"],
-            "preset": preset,
+            "preset": resolved["preset"],
             "status": "pass" if acc_ok and bench_ok else "fail",
             "parser_checked": val_report["parser_checked"],
             "config_digest": resolved["config_digest"],
@@ -1237,6 +1337,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--queue-s", type=float, default=0.0)
     parser.add_argument("--limit", type=int, default=None)
     parser.add_argument("--post-ready-sleep", type=int, default=30)
+    parser.add_argument("--max-devices", type=int, default=None)
     args = parser.parse_args(argv)
 
     if args.tier == "fast_sanity":
@@ -1252,6 +1353,7 @@ def main(argv: list[str] | None = None) -> int:
             layer_mode=args.layer_mode,
             parser_mode=args.vllm_parser,
             queue_s=args.queue_s,
+            max_devices=args.max_devices,
         )
     else:
         res = run_model_sanity(
@@ -1267,6 +1369,7 @@ def main(argv: list[str] | None = None) -> int:
             queue_s=args.queue_s,
             limit=args.limit,
             post_ready_sleep=args.post_ready_sleep,
+            max_devices=args.max_devices,
         )
     print(json.dumps(res, indent=2, ensure_ascii=False))
     return 0 if res["status"] == "pass" else 1

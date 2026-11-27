@@ -3620,7 +3620,8 @@ def test_upstream_reuse_script_protects_image_and_wheel_imports_and_is_fail_clos
     assert 'ppu_image_stack.py" capture' in text
     assert 'ppu_image_stack.py" verify' in text
     assert "trap cleanup EXIT" in text
-    assert "requirements/upstream-reuse.txt" in text
+    assert "ppu_ci_install_wheel_dependency transformers '' --no-cache-dir" in text
+    assert "'numba>=0.65'" in text
     assert "requirements/dev.txt" not in text
     assert "current_platform.is_ppu()" in text
     assert "export VLLM_PLUGINS=ppu" in text

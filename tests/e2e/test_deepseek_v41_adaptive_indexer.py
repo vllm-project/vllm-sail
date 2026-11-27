@@ -46,8 +46,10 @@ def test_mxfp4_builder_copies_grouped_schedule(monkeypatch, tokens, heads):
     metadata = deep_gemm.get_paged_mqa_logits_metadata(
         contexts, 64, builder.num_sms, (1, heads, 128, torch.int8), indices=request_ids
     )
-    assert metadata.shape[1] == 4
-    assert metadata.shape[0] > tokens
+    # DeepGEMM-for-sail #214 returns fixed-size two-column grouped FP4 metadata
+    # [num_sms * tb_per_cu + 1, 2], independent of the query-row count.
+    assert metadata.shape[1] == 2
+    assert 0 < metadata.shape[0] <= builder.scheduler_metadata_buffer.shape[0]
     # Exact operation in the upstream builder; no padding/truncation adapter.
     schedule = builder.scheduler_metadata_buffer[: metadata.shape[0]]
     schedule[:] = metadata

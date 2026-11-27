@@ -28,6 +28,7 @@ MODEL_ID="${MODEL_ID:?MODEL_ID is required}"
 RECIPE_PATH="${RECIPE_PATH:?RECIPE_PATH is required}"
 POLICY_PATH="${POLICY_PATH:?POLICY_PATH is required}"
 TIER="${TIER:-fast_sanity}"
+VARIANT="${VARIANT:-}"
 PRESET="${PRESET:-}"
 LAYER_MODE="${LAYER_MODE:-auto}"
 VLLM_PORT="${VLLM_PORT:-9985}"
@@ -203,10 +204,12 @@ if [[ "${TIER}" == "model_sanity" ]]; then
 fi
 
 if [[ "${SKIP_WHEEL_INSTALL}" == "false" ]]; then
-    python -m pip install --no-deps --force-reinstall "${vllm_wheel}"
-    python -m pip install --no-deps --force-reinstall "${sail_wheel}"
+    # shellcheck source=scripts/ci/ppu_ci_deps.sh
+    source "${CI_SCRIPT_DIR}/ppu_ci_deps.sh"
+    python -m pip install --no-index --no-deps --force-reinstall "${vllm_wheel}"
+    python -m pip install --no-index --no-deps --force-reinstall "${sail_wheel}"
     PIP_INDEX_URL=https://mirrors.aliyun.com/pypi/simple/ \
-        python -m pip install -r "${ROOT_DIR}/requirements/ci-runtime.txt"
+        ppu_ci_install_wheel_dependency transformers ''
     if [[ "${TIER}" == "model_sanity" ]]; then
         PIP_INDEX_URL=https://mirrors.aliyun.com/pypi/simple/ \
             python -m pip install "evalscope==1.14.1"
@@ -320,8 +323,14 @@ runner_args=(
     --vllm-parser required
     --queue-s "${PPU_CI_QUEUE_S}"
 )
+if [[ -n "${VARIANT}" ]]; then
+    runner_args+=(--variant "${VARIANT}")
+fi
 if [[ -n "${PRESET}" ]]; then
     runner_args+=(--preset "${PRESET}")
+fi
+if [[ -n "${PPU_CI_DEVICE_COUNT:-}" ]]; then
+    runner_args+=(--max-devices "${PPU_CI_DEVICE_COUNT}")
 fi
 
 python "${ROOT_DIR}/scripts/ci/ppu_recipe_runner.py" "${runner_args[@]}"

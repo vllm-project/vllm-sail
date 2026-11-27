@@ -152,11 +152,12 @@ were produced, even when a failed recipe did not write a result summary.
 ### Upstream test reuse
 
 Upstream reuse runs on a single M890 card in the authorized PPU pipeline, not
-automatically on PRs or a nightly schedule. Trusted CI selects its Docker runtime in the workflow. PR Preview uses
-the runner's existing runtime. Upstream reuse enables the SAIL plugin with the
-validated CI wheels. The job preserves the image's torch/torchvision stack and
-installs only the dedicated
-`requirements/upstream-reuse.txt` tooling. `requirements/dev.txt` stays unchanged.
+automatically on PRs or a nightly schedule. Trusted CI selects its Docker
+runtime in the workflow. PR Preview uses the runner's existing runtime.
+Upstream reuse enables the SAIL plugin with the validated CI wheels and
+preserves the image's torch/torchvision stack. It reuses the image's pytest,
+tblib, Numba and Transformers when they satisfy the test environment. Older
+images get any missing packages installed under the image constraints.
 
 The container reads `HF_HOME=/nas_aisw/datasets/hf_cache` in offline mode. The
 cache and `/nas_aisw/datasets/checkpoints/LLM` are mounted read-only at their host

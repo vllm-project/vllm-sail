@@ -595,3 +595,18 @@ def test_accuracy_script_redacts_raw_image_stack_in_stdout_and_artifacts(tmp_pat
     assert fail_proc.returncode != 0
     assert "example.invalid" not in (fail_proc.stdout + fail_proc.stderr)
     assert "example.invalid" not in (fail_results / "accuracy.log").read_text()
+
+
+def test_recipe_sanity_wrapper_and_entrypoint_propagate_device_quota():
+    wrapper_text = SCRIPT.read_text(encoding="utf-8")
+    recipe_branch = wrapper_text.split("\n    recipe-sanity)\n", 1)[1].split(
+        "\n        ;;", 1
+    )[0]
+    assert '--env PPU_CI_DEVICE_COUNT="${PPU_CI_DEVICE_COUNT}"' in recipe_branch
+    assert '--env VARIANT="${VARIANT:-}"' in recipe_branch
+
+    entrypoint_text = (ROOT / "scripts/ci/ppu_e2e_recipe_sanity.sh").read_text(
+        encoding="utf-8"
+    )
+    assert '--max-devices "${PPU_CI_DEVICE_COUNT}"' in entrypoint_text
+    assert '--variant "${VARIANT}"' in entrypoint_text

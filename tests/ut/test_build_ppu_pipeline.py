@@ -1055,15 +1055,34 @@ def test_runtime_scripts_capture_same_image_stack_before_installing_wheels(scrip
     assert "--constraints" in text[capture:install]
 
 
-@pytest.mark.parametrize("script", ["ppu_e2e_smoke.sh", "ppu_upstream_reuse.sh"])
-def test_runtime_lanes_upgrade_transformers_before_verifying_image_stack(
-    script, tmp_path
+@pytest.mark.parametrize(
+    ("script", "package", "extra"),
+    [
+        ("ppu_e2e_smoke.sh", "transformers", ""),
+        ("ppu_upstream_reuse.sh", "transformers", ""),
+        ("ppu_pin_ut.sh", "nvtx", "profiling"),
+    ],
+)
+@pytest.mark.parametrize("preinstalled", [True, False])
+def test_runtime_lanes_check_wheel_dependencies_before_verifying_image_stack(
+    script, package, extra, preinstalled, tmp_path
 ):
-    from packaging.requirements import Requirement
-
     text = (ROOT / "scripts/ci" / script).read_text()
     start = text.index("python -m pip install")
     end = text.index("\n\n", text.index('ppu_image_stack.py" verify', start))
+    dist_info = tmp_path / "vllm_sail-0.0.0.dist-info"
+    dist_info.mkdir()
+    (dist_info / "METADATA").write_text(
+        "Name: vllm-sail\n"
+        "Version: 0.0.0\n"
+        "Provides-Extra: profiling\n"
+        "Requires-Dist: transformers==5.19.0\n"
+        'Requires-Dist: transformers>=5.18.0; python_version >= "3.10"\n'
+        'Requires-Dist: transformers==5.20.0; python_version < "3.10"\n'
+        'Requires-Dist: nvtx>=0.2.17; extra == "profiling"\n'
+        'Requires-Dist: nvtx==9.0.0; extra == "dev"\n'
+        "Requires-Dist: unrelated>=1\n"
+    )
     calls = tmp_path / "calls.jsonl"
     python = tmp_path / "python"
     python.write_text(
@@ -1071,55 +1090,106 @@ def test_runtime_lanes_upgrade_transformers_before_verifying_image_stack(
         "import json, os, sys\n"
         "with open(os.environ['CALLS'], 'a') as log:\n"
         "    log.write(json.dumps([sys.argv[1:], os.environ.get('PIP_CONSTRAINT')]) + '\\n')\n"
+        "if sys.argv[1] == '-':\n"
+        "    os.execv(sys.executable, [sys.executable, *sys.argv[1:]])\n"
+        "if '--dry-run' in sys.argv and os.environ['PREINSTALLED'] == '0':\n"
+        "    sys.exit(1)\n"
     )
     python.chmod(0o755)
     subprocess.run(
         [
             "bash",
             "-euc",
+            'source "${ROOT_DIR}/scripts/ci/ppu_ci_deps.sh"\n'
             "vllm_wheels=(/wheels/vllm.whl)\n"
             "sail_wheels=(/wheels/vllm_sail.whl)\n" + text[start:end],
         ],
         env={
             "PATH": str(tmp_path) + os.pathsep + os.environ["PATH"],
+            "PYTHONPATH": str(tmp_path),
             "ROOT_DIR": str(ROOT),
             "WHEELS_DIR": str(tmp_path),
             "REUSE_RESULTS_DIR": str(tmp_path),
+            "UT_RESULTS_DIR": str(tmp_path),
             "PIP_CONSTRAINT": str(tmp_path / "image-constraints.txt"),
             "CALLS": str(calls),
+            "PREINSTALLED": str(int(preinstalled)),
             "BASH_ENV": "/dev/null",
         },
+        cwd=tmp_path,
         check=True,
     )
     recorded = [json.loads(line) for line in calls.read_text().splitlines()]
     assert recorded[-1][0][1] == "verify"
+    metadata_index = next(
+        i for i, (args, _) in enumerate(recorded) if args == ["-", package, extra]
+    )
+    installed_wheels = recorded[:metadata_index]
+    assert installed_wheels
+    assert all("--force-reinstall" in args for args, _ in installed_wheels)
 
-    def requirements(path):
-        for line in path.read_text().splitlines():
-            line = line.split("#", 1)[0].strip()
-            if line:
-                yield Requirement(line)
+    extra_args = {
+        "ppu_upstream_reuse.sh": [
+            "--no-cache-dir",
+            "pytest==9.1.0",
+            "tblib==3.1.0",
+            "numba>=0.65",
+        ],
+        "ppu_pin_ut.sh": ["-r", str(ROOT / "requirements/dev.txt")],
+    }.get(script, [])
+    selected = {
+        "transformers": ["transformers==5.19.0", "transformers>=5.18.0"],
+        "nvtx": ["nvtx>=0.2.17"],
+    }[package]
+    pip = ["-m", "pip", "install"]
+    expected = [[*pip, "--dry-run", "--no-index", *extra_args, *selected]]
+    if not preinstalled:
+        expected.append([*pip, *extra_args, *selected])
+    constraint = str(tmp_path / "image-constraints.txt")
+    assert recorded[metadata_index + 1 : -1] == [
+        [args, constraint] for args in expected
+    ]
 
-    installed = []
-    for args, constraint in recorded[:-1]:
-        if args[:3] != ["-m", "pip", "install"]:
-            continue
-        assert constraint == str(tmp_path / "image-constraints.txt")
-        for index, arg in enumerate(args[:-1]):
-            if arg == "-r":
-                installed.extend(requirements(Path(args[index + 1])))
-    transformers = [req for req in installed if req.name == "transformers"]
-    assert len(transformers) == 1, "runtime must upgrade the image's transformers"
-    assert "5.16.1" in transformers[0].specifier
-    assert "5.15.0" not in transformers[0].specifier
-    assert "5.20.0" not in transformers[0].specifier
-    for filename in ("dev.txt", "ppu.txt"):
-        expected = next(
-            req
-            for req in requirements(ROOT / "requirements" / filename)
-            if req.name == "transformers"
-        )
-        assert transformers[0].specifier == expected.specifier
+
+@pytest.mark.parametrize(
+    ("spec", "error"),
+    [
+        ("nvtx", "Missing active transformers requirement"),
+        (
+            "transformers @ https://example.invalid/transformers.whl",
+            "Expected an index requirement for transformers",
+        ),
+    ],
+)
+def test_runtime_wheel_dependency_rejects_invalid_inputs_before_pip(
+    spec, error, tmp_path
+):
+    metadata = tmp_path / "vllm_sail-0.0.0.dist-info" / "METADATA"
+    metadata.parent.mkdir()
+    metadata.write_text(f"Name: vllm-sail\nVersion: 0.0.0\nRequires-Dist: {spec}\n")
+    result = subprocess.run(
+        [
+            "bash",
+            "-euc",
+            'source "$CI_DEPS"\n'
+            'python() { "$TEST_PYTHON" "$@"; }\n'
+            'ppu_ci_install_if_missing() { echo "unexpected pip invocation"; }\n'
+            "ppu_ci_install_wheel_dependency transformers ''",
+        ],
+        cwd=tmp_path,
+        env={
+            "PATH": os.environ["PATH"],
+            "PYTHONPATH": str(tmp_path),
+            "BASH_ENV": "/dev/null",
+            "CI_DEPS": str(ROOT / "scripts/ci/ppu_ci_deps.sh"),
+            "TEST_PYTHON": sys.executable,
+        },
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode != 0
+    assert error in result.stderr
+    assert not result.stdout
 
 
 @pytest.mark.parametrize(

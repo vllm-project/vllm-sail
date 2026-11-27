@@ -68,8 +68,6 @@ vllm_sail = [
 
 [tool.setuptools.dynamic]
 dependencies = { file = ["requirements/ppu.txt"] }
-optional-dependencies.profiling = { file = ["requirements/profiling.txt"] }
-optional-dependencies.dev = { file = ["requirements/dev.txt"] }
 
 # ---------------------------------------------------------------------------
 [tool.ruff]
