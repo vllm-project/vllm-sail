@@ -275,7 +275,7 @@ def test_scheduled_recipe_replaces_only_the_glm53_flash_legacy_case(
     ("policy_file", "legacy_case"),
     [
         ("qwen3.8-flash-next.yaml", "qwen3.8-flash-next-tp4"),
-        ("qwen3.8-flash-next-dp-ep.yaml", "qwen3.8-flash-next-dp-ep"),
+        ("qwen3.8-flash-next-dp8-ep.yaml", "qwen3.8-flash-next-dp-ep"),
     ],
 )
 def test_scheduled_recipe_replaces_qwen38_flash_next_legacy_cases(

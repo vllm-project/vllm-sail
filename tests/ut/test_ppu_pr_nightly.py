@@ -473,3 +473,21 @@ def test_trusted_runtime_container_never_executes_candidate_runtime_image_on_hos
     assert f"source={candidate_dir.resolve()},target=/source,readonly" in (
         docker_log.read_text()
     )
+
+
+def test_resolves_qwen38_flash_next_recipe_and_legacy_without_ambiguity() -> None:
+    recipe_cases, recipe_matrix, legacy_cases = resolve_cases(
+        ROOT, "qwen3.8-flash-next,qwen3.8-flash-next-dp8-ep", True
+    )
+    assert recipe_cases == ["qwen3.8-flash-next", "qwen3.8-flash-next-dp8-ep"]
+    assert recipe_matrix == build_recipe_matrix(
+        "qwen3.8-flash-next,qwen3.8-flash-next-dp8-ep", "model_sanity"
+    )
+    assert legacy_cases == []
+
+    for recipe_enabled in (True, False):
+        assert resolve_cases(ROOT, "qwen3.8-flash-next-dp-ep", recipe_enabled) == (
+            [],
+            None,
+            ["qwen3.8-flash-next-dp-ep"],
+        )

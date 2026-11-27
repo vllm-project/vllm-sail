@@ -2671,7 +2671,7 @@ def test_short_layer_dummy_empty_stream_content_falls_back_to_full_layers(
 def test_qwen38_flash_next_tp4_and_dp_ep_match_legacy_contracts() -> None:
     recipe = RECIPES_DIR / "Qwen" / "Qwen3.8-Flash-Next.yaml"
     tp4_policy_path = POLICY_DIR / "models" / "qwen3.8-flash-next.yaml"
-    dpep_policy_path = POLICY_DIR / "models" / "qwen3.8-flash-next-dp-ep.yaml"
+    dpep_policy_path = POLICY_DIR / "models" / "qwen3.8-flash-next-dp8-ep.yaml"
     catalog = {
         case["key"]: case
         for case in json.loads((CI_DIR / "ppu_e2e_models.json").read_text())
@@ -2703,7 +2703,9 @@ def test_qwen38_flash_next_tp4_and_dp_ep_match_legacy_contracts() -> None:
     assert resolved_tp4["served_name"] == tp4_legacy["served_name"]
     assert resolved_tp4["server_env"] == tp4_legacy["server_env"]
     tp4_flags = flags(resolved_tp4["flags"])
-    for key, value in flags(tp4_legacy["server_cmd"][9:]).items():
+    tp4_legacy_flags = flags(tp4_legacy["server_cmd"][9:])
+    assert set(tp4_flags) == set(tp4_legacy_flags)
+    for key, value in tp4_legacy_flags.items():
         if key.endswith("-config"):
             assert json.loads(tp4_flags[key]) == json.loads(value)
         else:
@@ -2712,7 +2714,7 @@ def test_qwen38_flash_next_tp4_and_dp_ep_match_legacy_contracts() -> None:
     # DP8+EP Model Sanity strictly matches legacy qwen3.8-flash-next-dp-ep.
     dpep_legacy = catalog["qwen3.8-flash-next-dp-ep"]
     dpep_matrix = ppu_e2e_select.build_recipe_matrix(
-        "qwen3.8-flash-next-dp-ep", "model_sanity"
+        "qwen3.8-flash-next-dp8-ep", "model_sanity"
     )
     (dpep_entry,) = dpep_matrix["include"]
     resolved_dpep = ppu_recipe.resolve_recipe(
@@ -2735,7 +2737,9 @@ def test_qwen38_flash_next_tp4_and_dp_ep_match_legacy_contracts() -> None:
     assert "--max-num-seqs" not in resolved_dpep["flags"]
     assert resolved_dpep["flags"].count("--gpu-memory-utilization") == 1
     dpep_flags = flags(resolved_dpep["flags"])
-    for key, value in flags(dpep_legacy["server_cmd"][9:]).items():
+    dpep_legacy_flags = flags(dpep_legacy["server_cmd"][9:])
+    assert set(dpep_flags) - {"--enable-prefix-caching"} == set(dpep_legacy_flags)
+    for key, value in dpep_legacy_flags.items():
         if key.endswith("-config"):
             assert json.loads(dpep_flags[key]) == json.loads(value)
         else:
@@ -2744,4 +2748,4 @@ def test_qwen38_flash_next_tp4_and_dp_ep_match_legacy_contracts() -> None:
     fast_matrix = ppu_e2e_select.build_recipe_matrix("", "fast_sanity")["include"]
     fast_keys = {item["key"] for item in fast_matrix}
     assert "qwen3.8-flash-next" in fast_keys
-    assert "qwen3.8-flash-next-dp-ep" not in fast_keys
+    assert "qwen3.8-flash-next-dp8-ep" not in fast_keys
