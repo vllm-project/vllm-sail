@@ -1,44 +1,77 @@
-name: PPU recipe fast sanity dispatch
-run-name: "PPU recipe fast_sanity: ${{ inputs.models || 'all' }}"
+name: PPU FP32 DeepSelect probe
+run-name: M890 FP32 DeepSelect probe for 21d2c37e
 
-on:
-  workflow_dispatch:
-    inputs:
-      models:
-        description: Comma-separated recipe policy slugs (blank = all)
-        required: false
-        default: glm-5.3,deepseek-v4-flash
-        type: string
+on: workflow_dispatch
 
 permissions:
   contents: read
-  actions: read
-cache-mode: none
+
+concurrency:
+  group: pr472-fp32-probe
+  cancel-in-progress: false
 
 jobs:
-  build:
-    name: Build PPU wheels
-    if: vars.PPU_RECIPE_PUBLIC_ENABLED == 'true'
-    uses: ./.github/workflows/_ppu-build.yaml
-    secrets:
-      ci_registry_username: ${{ secrets.RELEASE_USERNAME }}
-      ci_registry_token: ${{ secrets.RELEASE_TOKEN }}
-    with:
-      pr_head_sha: ${{ github.sha }}
-
-  recipe-fast-sanity:
-    name: Recipe fast sanity
-    needs: build
-    if: >-
-      ${{ !cancelled() && vars.PPU_RECIPE_PUBLIC_ENABLED == 'true' &&
-      needs.build.result == 'success' }}
-    permissions:
-      contents: read
-      actions: read
-    uses: ./.github/workflows/_ppu-recipe-fast-sanity.yaml
-    with:
-      pr_mode: false
-      pr_head_sha: ${{ github.sha }}
-      wheel_source_sha: ${{ github.sha }}
-      build_run_id: ${{ github.run_id }}
-      models: ${{ inputs.models }}
+  probe:
+    name: Native FP32 top-k on one M890
+    runs-on: 8-ppu-m890p
+    timeout-minutes: 18
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+          persist-credentials: false
+      - name: Verify candidate and exercise the wheel
+        env:
+          SOURCE_SHA: 21d2c37e55e280a1d32d1cda78f16637f07a6da7
+          PPU_CI_RUNTIME_IMAGE: download.t-head.cn/docker_test/vllm:v0.34.0-20261127-834042f
+          PPU_CI_RUNTIME_IMAGE_TAG: v0.34.0-20261127-834042f
+        run: |
+          set -Eeuo pipefail
+          umask 077
+          test "$(git rev-parse HEAD^)" = "$SOURCE_SHA"
+          git diff --exit-code "$SOURCE_SHA" -- vllm_sail
+          temp_dir="$(mktemp -d "$RUNNER_TEMP/pr472-fp32.XXXXXX")"
+          container="vllm-sail-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-fp32-probe"
+          exec 9>/tmp/vllm-sail-ppu-ci.lock
+          flock -n 9
+          cleanup() {
+            docker rm -f "$container" 9>&- >/dev/null 2>&1 || true
+            rm -r -- "$temp_dir"
+          }
+          trap cleanup EXIT
+          trap 'exit 130' INT
+          trap 'exit 143' TERM
+          git show "$SOURCE_SHA:vllm_sail/utils/deep_select.py" > "$temp_dir/deep_select.py"
+          cp scripts/ci/pr472_fp32_probe.py "$temp_dir/probe.py"
+          image_id="$(env -u PPU_CI_RUNTIME_IMAGE_REPO -u PPU_CI_RUNTIME_IMAGE_DIGEST \
+            PPU_CI_RUNTIME_VERSION=main PPU_CI_RUNTIME_DIGEST_OUT="$temp_dir/digest" \
+            timeout 720 bash scripts/ci/ppu_runtime_image.sh 9>&-)"
+          image_digest="$(<"$temp_dir/digest")"
+          [[ "$image_id" =~ ^sha256:[0-9a-f]{64}$ && "$image_digest" =~ ^@sha256:[0-9a-f]{64}$ ]]
+          printf 'Runtime %s%s image ID %s\n' "$PPU_CI_RUNTIME_IMAGE" "$image_digest" "$image_id"
+          if ! timeout --kill-after=10s 180s docker run --rm --name "$container" \
+            --runtime=runc --network=none --ipc=private \
+            --device=/dev/alixpu --device=/dev/alixpu_ctl --device=/dev/alixpu_sep \
+            --device=/dev/alixpu_ppu0 --env CUDA_VISIBLE_DEVICES=0 \
+            --env NVIDIA_VISIBLE_DEVICES=void --env VLLM_SAIL_USE_DEEPSELECT=1 \
+            --env "PROBE_IMAGE_DIGEST=$image_digest" --env "PROBE_IMAGE_ID=$image_id" \
+            --mount "type=bind,source=$temp_dir,target=/probe,readonly" \
+            --entrypoint python "$image_id" /probe/probe.py 9>&- >"$temp_dir/probe.log" 2>&1; then
+            sed -nE 's/^PROBE_STAGE ([a-z_]+)$/FP32 probe reached \1/p' "$temp_dir/probe.log"
+            if grep -Fq "PPU DeepSelect currently supports bfloat16 input only" "$temp_dir/probe.log"; then
+              echo "DeepSelect rejected FP32 with the BF16-only error"
+            fi
+            exit 1
+          fi
+          sed -n 's/^PPU_FP32_RECEIPT //p' "$temp_dir/probe.log" > pr472-fp32-receipt.json
+          test -s pr472-fp32-receipt.json
+          cat pr472-fp32-receipt.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pr472-fp32-receipt
+          path: pr472-fp32-receipt.json
+          if-no-files-found: error
+          retention-days: 7
