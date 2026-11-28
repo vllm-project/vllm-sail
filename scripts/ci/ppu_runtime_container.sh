@@ -225,6 +225,11 @@ case "${mode}" in
             echo "Reuse checkpoint root is missing" >&2
             exit 2
         }
+        reuse_shard=${PPU_CI_REUSE_SHARD:-strict}
+        [[ "${reuse_shard}" == strict || "${reuse_shard}" =~ ^[0-9]+$ ]] || {
+            echo "Invalid upstream reuse shard" >&2
+            exit 2
+        }
         create+=(
             --shm-size=8g
             --mount "type=bind,source=${hf_home},target=${hf_home},readonly"
@@ -240,6 +245,8 @@ case "${mode}" in
             --mount "type=bind,source=${upstream_dir},target=/upstream,readonly"
             --env VLLM_SOURCE_ROOT=/upstream
             --env REUSE_RESULTS_DIR=/artifacts/reuse
+            --env REUSE_SHARD="${reuse_shard}"
+            --env REUSE_SHARDS="${PPU_CI_REUSE_SHARDS:-1}"
             --env TESTED_SAIL_COMMIT="${PPU_CI_SOURCE_SHA}"
             --env VLLM_USE_RUST_FRONTEND=0
             --env VLLM_USE_RUST_BENCH=0

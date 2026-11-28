@@ -504,6 +504,11 @@ def test_pr_pipeline_structure():
                     "ready_epoch": "${{ needs.build.outputs.ready_epoch || needs.runtime-image.outputs.ready_epoch || '' }}",
                 }
             )
+        elif job_id == "upstream-reuse":
+            expected_with["model_asset_probe"] = (
+                "${{ github.event_name == 'pull_request' && "
+                "contains(github.event.pull_request.body, '<!-- ppu-model-asset-probe -->') }}"
+            )
         assert job["with"] == expected_with
     # kernel-perf is no longer in the gate; it lives in kernel-perf-label.yaml
     assert "kernel-perf" not in jobs
@@ -3428,15 +3433,20 @@ def test_upstream_reuse_only_runs_in_the_authorized_pipeline():
 def test_upstream_reuse_leaf_uses_exact_pin_and_dual_source_identity():
     config = workflow("_ppu-upstream-reuse.yaml")
     assert set(config[True]) == {"workflow_call"}
-    assert set(config[True]["workflow_call"]["inputs"]) == {
+    inputs = config[True]["workflow_call"]["inputs"]
+    assert set(inputs) == {
         "pr_mode",
         "pr_head_sha",
         "build_run_id",
         "wheel_source_sha",
+        "model_asset_probe",
     }
+    assert inputs["model_asset_probe"]["default"] is False
     assert set(config["jobs"]) == {"upstream-reuse"}
     job = config["jobs"]["upstream-reuse"]
-    assert "container" not in job and "strategy" not in job
+    assert "container" not in job
+    assert job["strategy"]["fail-fast"] is False
+    assert job["strategy"]["max-parallel"] == 4
     assert job["env"]["GIT_CONFIG_NOSYSTEM"] == "1"
     assert "mktemp" in job["steps"][0]["run"]
     upstream = checkouts(job)[1]

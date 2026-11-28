@@ -340,6 +340,10 @@ jobs:
       pr_head_sha: ${{ inputs.pr_head_sha || github.sha }}
       build_run_id: ${{ inputs.existing_build_run_id || github.run_id }}
       wheel_source_sha: ${{ inputs.wheel_source_sha || '' }}
+      # Model loads are opt-in even when a maintainer enables CI preview.
+      model_asset_probe: >-
+        ${{ github.event_name == 'pull_request' &&
+        contains(github.event.pull_request.body, '<!-- ppu-model-asset-probe -->') }}
 
   gate:
     name: PPU CI gate

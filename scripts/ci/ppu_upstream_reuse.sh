@@ -45,7 +45,11 @@ cleanup() {
     cd /tmp
     rm -rf "${WORK_DIR}"
     if [[ "${code}" == "0" ]]; then
-        echo "PPU UPSTREAM REUSE PASS (M890)"
+        if [[ "${REUSE_SHARD:-strict}" == strict ]]; then
+            echo "PPU UPSTREAM REUSE PASS (M890)"
+        else
+            echo "PPU MODEL ASSET PROBE COMPLETE (M890, shard ${REUSE_SHARD})"
+        fi
     fi
     exit "${code}"
 }
@@ -117,6 +121,11 @@ PY
 
 cp -a "${ROOT_DIR}/tests" "${WORK_DIR}/tests"
 cp "${ROOT_DIR}/pyproject.toml" "${WORK_DIR}/pyproject.toml"
+if [[ "${REUSE_SHARD:-strict}" != strict ]]; then
+    python -m tests.upstream_reuse.model_assets.run \
+        --shard "${REUSE_SHARD}" --shards "${REUSE_SHARDS:?REUSE_SHARDS is required}"
+    exit
+fi
 python -m pytest tests/upstream_reuse -q -rs -m upstream_source \
     --require-upstream-source --strict-upstream-reuse \
     --upstream-reuse-target=890p --upstream-reuse-report-dir=/artifacts/reuse \

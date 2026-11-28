@@ -17,6 +17,10 @@ on:
         description: Validated SAIL source of the reused wheels
         type: string
         default: ""
+      model_asset_probe:
+        description: Run sharded model-asset diagnostics for the preview PR
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -25,9 +29,14 @@ cache-mode: none
 
 jobs:
   upstream-reuse:
-    name: Upstream reuse (M890 single card)
+    name: ${{ matrix.shard == 'strict' && 'Upstream reuse (M890 single card)' || format('Model assets (M890 shard {0})', matrix.shard) }}
     runs-on: 8-ppu-m890p
-    timeout-minutes: 90
+    timeout-minutes: ${{ matrix.shard == 'strict' && 90 || 150 }}
+    strategy:
+      fail-fast: false
+      max-parallel: 4
+      matrix:
+        shard: ${{ fromJSON(inputs.model_asset_probe && '["strict","0","1","2","3","4","5","6","7","8","9","10","11","12","13","14","15"]' || '["strict"]') }}
     env:
       GIT_CONFIG_NOSYSTEM: "1"
     defaults:
@@ -36,13 +45,15 @@ jobs:
     steps:
       - name: Prepare private runtime directories and Git configuration
         id: runtime
+        env:
+          REUSE_SHARD: ${{ matrix.shard }}
         run: |
           config="$(mktemp "${RUNNER_TEMP}/git-config.XXXXXX")"
           wheels="$(mktemp -d "${RUNNER_TEMP}/ppu-reuse-wheels.XXXXXX")"
           artifacts="$(mktemp -d "${RUNNER_TEMP}/ppu-reuse-artifacts.XXXXXX")"
-          source_rel=".ppu-reuse-source-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          source_rel=".ppu-reuse-source-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${REUSE_SHARD}"
           source="${GITHUB_WORKSPACE}/${source_rel}"
-          upstream_rel=".ppu-reuse-upstream-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          upstream_rel=".ppu-reuse-upstream-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${REUSE_SHARD}"
           upstream="${GITHUB_WORKSPACE}/${upstream_rel}"
           {
             printf 'GIT_CONFIG_GLOBAL=%s\n' "$config"
@@ -117,7 +128,7 @@ jobs:
         run: |
           printf 'PPU_CI_RUNTIME_IMAGE=%s\n' "$CI_RUNTIME_IMAGE" >> "$GITHUB_ENV"
 
-      - name: Run strict M890 reuse in the CI runtime
+      - name: ${{ matrix.shard == 'strict' && 'Run strict M890 reuse in the CI runtime' || 'Run M890 model-asset candidates' }}
         env:
           HF_HOME: /nas_aisw/datasets/hf_cache
           PPU_CI_REUSE_CHECKPOINT_ROOT: /nas_aisw/datasets/checkpoints/LLM
@@ -129,13 +140,15 @@ jobs:
           PPU_CI_DEVICE_COUNT: "1"
           PPU_CI_REQUIRE_PR_ARTIFACT: ${{ inputs.pr_mode }}
           PPU_CI_WHEEL_SOURCE_SHA: ${{ inputs.wheel_source_sha || inputs.pr_head_sha || github.sha }}
+          PPU_CI_REUSE_SHARD: ${{ matrix.shard }}
+          PPU_CI_REUSE_SHARDS: "16"
         run: bash "${PPU_CI_SOURCE_DIR}/scripts/ci/ppu_runtime_container.sh" upstream-reuse
 
       - name: Upload upstream reuse diagnostics
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: ppu-upstream-reuse-m890-${{ github.run_id }}-${{ github.run_attempt }}
+          name: ppu-upstream-reuse-m890-${{ github.run_id }}-${{ github.run_attempt }}${{ matrix.shard != 'strict' && format('-assets-{0}', matrix.shard) || '' }}
           path: |
             ${{ steps.runtime.outputs.artifacts }}/**
             ${{ steps.runtime.outputs.wheels }}/wheel-manifest.json
