@@ -236,11 +236,16 @@ def test_quant_registration_is_lazy_idempotent_and_preserves_v4(modules, ppu):
         register_quantization_config=lambda name: lambda cls: calls.append((name, cls)),
     )
     mixed = type("Mixed", (), {"get_name": staticmethod(lambda: "mixed_precision_w4")})
+    w4a8 = type("W4A8", (), {"get_name": staticmethod(lambda: "w4a8_int8")})
     v4 = type("V4", (), {})
     v41 = type("V41", (), {"get_name": staticmethod(lambda: "deepseek_v41_fp8")})
     modules(
         "vllm_sail.model_executor.layers.quantization.mixed_precision_w4",
         MixedPrecisionW4Config=mixed,
+    )
+    modules(
+        "vllm_sail.model_executor.layers.quantization.w4a8_int8",
+        W4A8Int8Config=w4a8,
     )
     modules("vllm_sail.models.deepseek_v4.quant_config", DeepseekV4FP8Config=v4)
     modules("vllm_sail.models.deepseek_v41.quant_config", DeepseekV41FP8Config=v41)
@@ -260,7 +265,7 @@ def test_quant_registration_is_lazy_idempotent_and_preserves_v4(modules, ppu):
     assert calls == []
     registry.register()
     registry.register()
-    assert calls == [("mixed_precision_w4", mixed)] + (
+    assert calls == [("mixed_precision_w4", mixed), ("w4a8_int8", w4a8)] + (
         conversions + [("deepseek_v4_fp8", v4), ("deepseek_v41_fp8", v41)]
         if ppu
         else []

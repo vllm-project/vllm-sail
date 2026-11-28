@@ -964,6 +964,7 @@ def test_deepep_factory_uses_bound_globals_and_quantized_protocol(
     provider = modules(
         "vllm.model_executor.layers.fused_moe.all2all_utils",
         current_platform=platform,
+        logger=ns(info=lambda *a, **k: None, info_once=lambda *a, **k: None),
         torch=ns(int8="int8"),
         maybe_make_prepare_finalize=original,
         maybe_roundup_layer_hidden_size=lambda *args: "upstream-roundup",

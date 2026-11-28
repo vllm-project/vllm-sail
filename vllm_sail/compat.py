@@ -110,6 +110,28 @@ def vllm_version_at_least(target: str) -> bool:
     return current >= wanted
 
 
+def fused_moe_use_batched(config) -> bool:
+    """Read ``use_batched_activation_format`` from either upstream home.
+
+    vLLM <=0.33 keeps the flag on ``FusedMoEParallelConfig``
+    (``config.moe_parallel_config``); >=0.34 moved it onto ``FusedMoEConfig``
+    itself. Probe the new home first, then the old one. ``False`` is a legal
+    value, so only an absent attribute (``None``) triggers the fallback; raise
+    only when neither home carries it. Attribute probing, not a version gate,
+    so this is safe to call from construction paths.
+    """
+    for obj in (config, getattr(config, "moe_parallel_config", None)):
+        if obj is not None:
+            value = getattr(obj, "use_batched_activation_format", None)
+            if value is not None:
+                return bool(value)
+    raise AttributeError(
+        "use_batched_activation_format found on neither FusedMoEConfig nor "
+        "FusedMoEParallelConfig; the upstream attribute moved again — update "
+        "vllm_sail.compat.fused_moe_use_batched"
+    )
+
+
 def check_vllm_compatibility(*, force: bool = False) -> None:
     """Validate the installed vLLM against its exact pin or release range.
 
