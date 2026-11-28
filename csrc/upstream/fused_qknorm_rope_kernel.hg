@@ -201,7 +201,7 @@ __global__ void fusedQKNormRopeKernel(
 
     // PDL: wait for the predecessor kernel (the QKV projection that produces
     // `qkv`) to complete before touching any global memory.
-#if defined(COMPATIBLE_ARCH) && (COMPATIBLE_ARCH >= 900)
+#if defined(COMPATIBLE_ARCH) && (COMPATIBLE_ARCH >= 900) && VLLM_SAIL_PDL_AVAILABLE
     hggcGridDependencySynchronize();
 #endif
 
@@ -317,7 +317,7 @@ __global__ void fusedQKNormRopeKernel(
     }
 
     // PDL: signal completion so a dependent successor may launch early.
-#if defined(COMPATIBLE_ARCH) && (COMPATIBLE_ARCH >= 900)
+#if defined(COMPATIBLE_ARCH) && (COMPATIBLE_ARCH >= 900) && VLLM_SAIL_PDL_AVAILABLE
     hggcTriggerProgrammaticLaunchCompletion();
 #endif
 
@@ -409,7 +409,7 @@ __global__ void fusedQKNormRopeKernelNTokenHeads(
     // PDL: wait for the predecessor kernel (the QKV projection that produces
     // `qkv`) to complete before touching any global memory -- cp.async reads
     // global memory, so this must precede the first commit group.
-#if defined(COMPATIBLE_ARCH) && (COMPATIBLE_ARCH >= 900)
+#if defined(COMPATIBLE_ARCH) && (COMPATIBLE_ARCH >= 900) && VLLM_SAIL_PDL_AVAILABLE
     hggcGridDependencySynchronize();
 #endif
 
@@ -560,7 +560,7 @@ __global__ void fusedQKNormRopeKernelNTokenHeads(
     }
 
     // PDL: signal completion so a dependent successor may launch early.
-#if defined(COMPATIBLE_ARCH) && (COMPATIBLE_ARCH >= 900)
+#if defined(COMPATIBLE_ARCH) && (COMPATIBLE_ARCH >= 900) && VLLM_SAIL_PDL_AVAILABLE
     hggcTriggerProgrammaticLaunchCompletion();
 #endif
 

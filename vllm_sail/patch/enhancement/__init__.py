@@ -24,6 +24,9 @@ from vllm_sail.patch.enhancement import deep_gemm_redirect  # noqa: F401
 from vllm_sail.patch.enhancement import fused_moe_ppu
 from vllm_sail.patch.enhancement import int8_quant  # noqa: F401
 from vllm_sail.patch.enhancement import kernel_warmup  # noqa: F401
+from vllm_sail.patch.enhancement import cute_dsl_router  # noqa: F401
+from vllm_sail.patch.enhancement import flashinfer_sampler  # noqa: F401
+from vllm_sail.patch.enhancement import flashinfer_allreduce  # noqa: F401
 from vllm_sail.patch.enhancement import mega_moe
 from vllm_sail.patch.enhancement import triton_warmup
 from vllm_sail.patch.enhancement import modular_kernel  # noqa: F401

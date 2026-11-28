@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Optional PPU 1.5 BF16 dense DeepGEMM selection with a compile-safe op."""
+"""PPU BF16 dense DeepGEMM selection with a compile-safe op."""
 
 from __future__ import annotations
 
@@ -27,9 +27,10 @@ def ppu_unquantized_gemm(
     weight: torch.Tensor,
     bias: torch.Tensor | None = None,
 ):
-    # PPU NOTE: when VLLM_PPU_DENSE_BF16_DEEPGEMM is enabled, route K-major
-    # BF16 dense GEMMs on PPU 1.5 to DeepGEMM; everything else keeps the
-    # default acblas path (F.linear).
+    # PPU NOTE: unquantized BF16 dense GEMMs route to DeepGEMM where the gate
+    # allows it (default on PPU 1.7, opt-in on PPU 1.5); everything else keeps
+    # the default acblas path (F.linear). A bias does not force the fallback:
+    # DeepGEMM adds it after the GEMM instead of using the vendor fused kernel.
     from vllm_sail.utils.deep_gemm import should_use_deepgemm_for_bf16_linear
 
     if should_use_deepgemm_for_bf16_linear(x, weight, bias):
@@ -49,7 +50,15 @@ def ppu_bf16_deepgemm_linear_impl(
 def ppu_bf16_deepgemm_linear_fake(
     x: torch.Tensor, weight: torch.Tensor, bias: torch.Tensor | None = None
 ) -> torch.Tensor:
-    return x.new_empty((*x.shape[:-1], weight.shape[0]))
+    from vllm_sail.utils.deep_gemm import is_ppu_17
+
+    if not is_ppu_17():
+        # PPU 1.0/1.5 keep the original fake verbatim (the gate never selects
+        # DeepGEMM with a bias there).
+        return x.new_empty((*x.shape[:-1], weight.shape[0]))
+    # The bias is added after the GEMM, so promotion follows `output + bias`.
+    dtype = x.dtype if bias is None else torch.result_type(x, bias)
+    return x.new_empty((*x.shape[:-1], weight.shape[0]), dtype=dtype)
 
 
 direct_register_custom_op(

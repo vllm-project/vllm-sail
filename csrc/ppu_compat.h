@@ -65,9 +65,25 @@ typedef __ppu_bfloat162_raw __nv_bfloat162_raw;
 #define COMPATIBLE_ARCH 800
 #elif __HGGC_ARCH__ == 150
 #define COMPATIBLE_ARCH 890
+#elif __HGGC_ARCH__ == 170
+#define COMPATIBLE_ARCH 900
 #else
 #define COMPATIBLE_ARCH __HGGC_ARCH__
 #endif
+#endif
+
+// PDL (programmatic dependent launch) device APIs are not usable on ppu_17 yet:
+// SDK 2.3.0-483ca6 links the clang/18 device bitcode whose
+// __ppukernel_trigger_programmatic_launch_completion_void() emits
+// llvm.ppu.pre.exit, and the ppu0017 backend has no ISel pattern for it
+// (hgcc crashes: "LLVM ERROR: Cannot select: intrinsic %llvm.ppu.pre.exit").
+// Keep PDL disabled for ppu_17 so the arch can build; correctness is unaffected,
+// only the early-launch overlap optimisation is lost.
+// TODO(ppu_17): drop this exclusion once the SDK provides the missing ISel.
+#if defined(__HGGC_ARCH__) && (__HGGC_ARCH__ == 170)
+#define VLLM_SAIL_PDL_AVAILABLE 0
+#else
+#define VLLM_SAIL_PDL_AVAILABLE 1
 #endif
 
 // hgcc defines this only for device code, like __CUDA_ARCH_LIST__.

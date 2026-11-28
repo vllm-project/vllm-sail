@@ -329,7 +329,7 @@ __launch_bounds__(WARPS_PER_CTA* WARP_SIZE_PARAM) __global__
     const int thread_row_in_warp = threadIdx.x / THREADS_PER_ROW;
     const int thread_row = warp_base_row + thread_row_in_warp;
 
-#if defined(COMPATIBLE_ARCH) && COMPATIBLE_ARCH >= 900
+#if defined(COMPATIBLE_ARCH) && COMPATIBLE_ARCH >= 900 && VLLM_SAIL_PDL_AVAILABLE
     // PDL permits early launch, but logits/metadata still depend on the producer.
     hggcGridDependencySynchronize();
     hggcTriggerProgrammaticLaunchCompletion();

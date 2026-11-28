@@ -410,7 +410,7 @@ __global__ void fusedKimiK3MLAKeyConcatKVCacheInsertKernel(
   int const slotIdx = globalWarpIdx % slotsPerToken;
   if (tokenIdx >= num_tokens) return;
 
-#if defined(COMPATIBLE_ARCH) && (COMPATIBLE_ARCH >= 900)
+#if defined(COMPATIBLE_ARCH) && (COMPATIBLE_ARCH >= 900) && VLLM_SAIL_PDL_AVAILABLE
   hggcGridDependencySynchronize();
 #endif
 
@@ -441,7 +441,7 @@ __global__ void fusedKimiK3MLAKeyConcatKVCacheInsertKernel(
     }
   }
 
-#if defined(COMPATIBLE_ARCH) && (COMPATIBLE_ARCH >= 900)
+#if defined(COMPATIBLE_ARCH) && (COMPATIBLE_ARCH >= 900) && VLLM_SAIL_PDL_AVAILABLE
   hggcTriggerProgrammaticLaunchCompletion();
 #endif
 }
@@ -479,7 +479,7 @@ __global__ void fusedKimiK3MLAQKVQuantKVCacheFp8Kernel(
   int const slotIdx = globalWarpIdx % slotsPerToken;
   if (tokenIdx >= num_tokens) return;
 
-#if defined(COMPATIBLE_ARCH) && (COMPATIBLE_ARCH >= 900)
+#if defined(COMPATIBLE_ARCH) && (COMPATIBLE_ARCH >= 900) && VLLM_SAIL_PDL_AVAILABLE
   hggcGridDependencySynchronize();
 #endif
 
@@ -524,7 +524,7 @@ __global__ void fusedKimiK3MLAQKVQuantKVCacheFp8Kernel(
     }
   }
 
-#if defined(COMPATIBLE_ARCH) && (COMPATIBLE_ARCH >= 900)
+#if defined(COMPATIBLE_ARCH) && (COMPATIBLE_ARCH >= 900) && VLLM_SAIL_PDL_AVAILABLE
   hggcTriggerProgrammaticLaunchCompletion();
 #endif
 }
@@ -555,7 +555,7 @@ __global__ void fusedKimiK3MLAKVConcatPackKernel(
   int64_t const totalRows = static_cast<int64_t>(num_tokens) * num_heads;
   if (globalWarpIdx * 2 >= totalRows) return;
 
-#if defined(COMPATIBLE_ARCH) && (COMPATIBLE_ARCH >= 900)
+#if defined(COMPATIBLE_ARCH) && (COMPATIBLE_ARCH >= 900) && VLLM_SAIL_PDL_AVAILABLE
   hggcGridDependencySynchronize();
 #endif
 
@@ -590,7 +590,7 @@ __global__ void fusedKimiK3MLAKVConcatPackKernel(
     }
   }
 
-#if defined(COMPATIBLE_ARCH) && (COMPATIBLE_ARCH >= 900)
+#if defined(COMPATIBLE_ARCH) && (COMPATIBLE_ARCH >= 900) && VLLM_SAIL_PDL_AVAILABLE
   hggcTriggerProgrammaticLaunchCompletion();
 #endif
 }
@@ -628,7 +628,7 @@ __global__ void fusedKimiK3MLAKeyConcatDsMlaInsertKernel(
   int const slotIdx = globalWarpIdx % slotsPerToken;
   if (tokenIdx >= num_tokens) return;
 
-#if defined(COMPATIBLE_ARCH) && (COMPATIBLE_ARCH >= 900)
+#if defined(COMPATIBLE_ARCH) && (COMPATIBLE_ARCH >= 900) && VLLM_SAIL_PDL_AVAILABLE
   hggcGridDependencySynchronize();
 #endif
 
@@ -659,7 +659,7 @@ __global__ void fusedKimiK3MLAKeyConcatDsMlaInsertKernel(
     }
   }
 
-#if defined(COMPATIBLE_ARCH) && (COMPATIBLE_ARCH >= 900)
+#if defined(COMPATIBLE_ARCH) && (COMPATIBLE_ARCH >= 900) && VLLM_SAIL_PDL_AVAILABLE
   hggcTriggerProgrammaticLaunchCompletion();
 #endif
 }
@@ -725,7 +725,7 @@ __global__ void fusedKimiK3MLADecodeQConcatKVCacheKernel(
         ql_nope + tokenIdx * qn_tok_stride + slotIdx * qn_head_stride;
     const scalar_t* const pe_src =
         q_pe + tokenIdx * qpe_tok_stride + slotIdx * qpe_head_stride;
-#if defined(COMPATIBLE_ARCH) && (COMPATIBLE_ARCH >= 900)
+#if defined(COMPATIBLE_ARCH) && (COMPATIBLE_ARCH >= 900) && VLLM_SAIL_PDL_AVAILABLE
     hggcGridDependencySynchronize();
 #endif
     writeLatent576<scalar_t, Q_FP8, APPLY_ROPE>(
@@ -744,7 +744,7 @@ __global__ void fusedKimiK3MLADecodeQConcatKVCacheKernel(
     }
   }
 
-#if defined(COMPATIBLE_ARCH) && (COMPATIBLE_ARCH >= 900)
+#if defined(COMPATIBLE_ARCH) && (COMPATIBLE_ARCH >= 900) && VLLM_SAIL_PDL_AVAILABLE
   hggcTriggerProgrammaticLaunchCompletion();
 #endif
 }
@@ -772,7 +772,7 @@ __global__ void fusedKimiK3MLADecodeQConcatDsMlaKernel(
   int const slotIdx = globalWarpIdx % slotsPerToken;
   if (tokenIdx >= num_tokens) return;
 
-#if defined(COMPATIBLE_ARCH) && (COMPATIBLE_ARCH >= 900)
+#if defined(COMPATIBLE_ARCH) && (COMPATIBLE_ARCH >= 900) && VLLM_SAIL_PDL_AVAILABLE
   hggcGridDependencySynchronize();
 #endif
 
@@ -799,7 +799,7 @@ __global__ void fusedKimiK3MLADecodeQConcatDsMlaKernel(
     }
   }
 
-#if defined(COMPATIBLE_ARCH) && (COMPATIBLE_ARCH >= 900)
+#if defined(COMPATIBLE_ARCH) && (COMPATIBLE_ARCH >= 900) && VLLM_SAIL_PDL_AVAILABLE
   hggcTriggerProgrammaticLaunchCompletion();
 #endif
 }

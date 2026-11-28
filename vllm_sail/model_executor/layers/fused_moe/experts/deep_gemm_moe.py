@@ -63,6 +63,7 @@ from vllm_sail.utils.deep_gemm import (
     has_fused_act_quant,
     is_deep_gemm_supported,
     is_ppu_15,
+    is_ppu_17,
     m_grouped_bf16_gemm_nt_nopad,
     m_grouped_fp4_gemm_nt_fused,
     m_grouped_fp4_gemm_nt_nopad,
@@ -285,6 +286,16 @@ class PPUDeepGemmExperts(mk.FusedMoEExpertsModular):
             (kInt4Static32, None),
             (kMxfp4Static, None),
         ]
+        if (weight_key, activation_key) == (
+            kFp8StaticChannelSym,
+            kFp8DynamicTokenSym,
+        ) and is_ppu_17():
+            # DeepGEMM 2.6 on SM90 only accepts 128-block K-granularity scales
+            # (csrc/apis/gemm.hpp:519 wants [m, k/128]); channelwise FP8 hands
+            # it one scale per token. Let the oracle pick the portable Triton
+            # MoE experts for that recipe on PPU 1.7. Blockwise FP8, INT8,
+            # INT4 and MXFP4 keep this backend, and PPU 1.0/1.5 are unchanged.
+            return False
         return (weight_key, activation_key) in SUPPORTED_W_A
 
     @staticmethod

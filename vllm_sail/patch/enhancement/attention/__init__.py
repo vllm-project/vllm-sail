@@ -18,6 +18,9 @@ Import order notes:
 * ``dsv41_kv_record`` patches a module-level helper of
   ``vllm.models.deepseek_v41.attention`` consumed at layer ``__init__`` time
   only, so it is order-independent with respect to the other patches here.
+* ``glm5next_kda`` likewise patches a module-level resolver of
+  ``vllm.models.glm5next.common.kda`` that only runs at layer ``__init__`` time,
+  so it is order-independent too.
 """
 
 from vllm_sail.patch.enhancement.attention import (
@@ -25,6 +28,7 @@ from vllm_sail.patch.enhancement.attention import (
     gdn,  # noqa: F401
     gdn_decode,  # noqa: F401
     kda,  # noqa: F401
+    glm5next_kda,  # noqa: F401
     flash_attn,  # noqa: F401
     flashmla_ops,  # noqa: F401
     flashmla_backend,  # noqa: F401

@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Advertise 810E-safe paged-KV block sizes to the GLM-5.3-Flash kpool indexer.
+"""Advertise PPU-safe paged-KV block sizes to the GLM-5.3-Flash kpool indexer.
 
 Zhenwu 810E cannot address ``page_kv`` values that are not a positive multiple of
 64 in the SAIL DeepGEMM paged-MQA kernel. The GLM-5.3-Flash kpool indexer derives
@@ -9,6 +9,10 @@ declares as supported must keep ``page_kv`` on a 64-token boundary. Upstream onl
 exempts the SM120 family (``get_paged_mqa_page_sizes`` returns ``(64,)`` there and
 ``(32, 64)`` elsewhere), so an 810E launch can select a 32-token page and abort
 during CUDA-graph warm-up.
+
+PPU 1.7 (V900) with DeepGEMM 2.6 is stricter still: the paged-MQA entry
+asserts ``page_kv == 64`` exactly, so the indexer advertises the single block
+size ``index_kpool * 64`` there.
 """
 
 from __future__ import annotations
@@ -45,7 +49,8 @@ def _resolve_index_kpool(kv_cache_spec) -> int:
         "SM120. Advertise block sizes that are multiples of index_kpool * 64 on "
         "810E so the launched page_kv always satisfies the kernel contract, while "
         "leaving the common-block selector free to pick a block compatible with "
-        "other cache groups (for example the 640-token mamba pages)."
+        "other cache groups (for example the 640-token mamba pages). PPU 1.7 "
+        "needs page_kv == 64 exactly, so it advertises index_kpool * 64 only."
     ),
     affected_versions=_AFFECTED,
     remove_when=(
@@ -56,6 +61,17 @@ def _resolve_index_kpool(kv_cache_spec) -> int:
 def get_supported_kernel_block_sizes(
     kv_cache_spec=None,
 ) -> list[int | MultipleOf]:
+    if (
+        current_platform.is_ppu()
+        and current_platform.is_device_capability((9, 0))
+    ):
+        # DeepGEMM 2.6 on PPU 1.7 asserts page_kv == 64 exactly
+        # (csrc/apis/attention.hpp:375), not merely a multiple of 64, so the
+        # indexer must advertise the single block size that yields 64 stored
+        # rows per page. With index_kpool=4 that is a 256-token block; the
+        # upstream default let the selector pick 128 (page_kv=32) and abort.
+        index_kpool = _resolve_index_kpool(kv_cache_spec)
+        return [index_kpool * 64]
     if (
         current_platform.is_ppu()
         and current_platform.is_device_capability((8, 0))

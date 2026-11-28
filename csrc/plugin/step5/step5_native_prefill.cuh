@@ -212,7 +212,7 @@ __global__ void step5_prepare_union_kernel(Params p) {
 template <int BQ, int HT, int BS, int PARTS>
 __global__ __launch_bounds__((BQ == 1 ? 1 : BQ / 2) * HT * 32 * PARTS)
 void step5_paged_attention_kernel(Params p) {
-#if __HGGC_ARCH__ >= 150
+#if __HGGC_ARCH__ == 150
   constexpr int TG = BS / 8, NT = BS / 16;
   static_assert(BQ == 1 || BQ == 2 || BQ == 4);
   static_assert((BQ == 1) == (PARTS > 1));
@@ -393,7 +393,7 @@ template <int Heads> __device__ __forceinline__ __ppu_bfloat16* paired_cube(__pp
 }
 template <int Cubes> __device__ __forceinline__ void stage_region_cubes(__ppu_bfloat16* dst,
     const __ppu_bfloat16* src, int extent, int start, int64_t row_bytes) {
-#if __HGGC_ARCH__ >= 150
+#if __HGGC_ARCH__ == 150
   const unsigned addr = __cvta_generic_to_shared(dst);
   asm volatile("ppu.cp.async.aiu.bulk.tensor.shared.global.2d.tile.LLC::128B.padz.swzl.b16 "
     "[%0], [%1], {%2, %3, %4}, {%2, %5, %4}, {%6, %7}, {%8, %9, %8}, %8;"
@@ -411,7 +411,7 @@ template <int Heads> __device__ __forceinline__ void stage_shared_region(__ppu_b
 }
 template <bool Transpose> __device__ __forceinline__ void load_paired(MmaOperand& fragment,
     const __ppu_bfloat16* src, int leading_offset, int secondary_offset) {
-#if __HGGC_ARCH__ >= 150
+#if __HGGC_ARCH__ == 150
   auto* words = fragment.x; const uint32_t addr = uint32_t(__cvta_generic_to_shared(src)) / 16;
   if constexpr (Transpose)
     asm volatile("ppu.tc02.ldmatrix.swzl.sync.bulk.tensor.m8n8.x4.b16.trans {%0, %1, %2, %3}, [%4], %5, %6, %7;"
@@ -423,7 +423,7 @@ template <bool Transpose> __device__ __forceinline__ void load_paired(MmaOperand
 }
 template <bool Private, int Heads> __device__ __forceinline__ void native_tile(const Params& p,
     int first, int end_row, int walk, int row_offset = 0) {
-#if __HGGC_ARCH__ >= 150
+#if __HGGC_ARCH__ == 150
   constexpr bool TwoRows = Heads == 8 && !Private;
   constexpr int Halves = Heads == 16 || TwoRows ? 2 : 1, StageWarps = Heads == 8 ? 4 : 8;
   constexpr int BS = Private ? 16 : 64, TG = BS / 8, NT = BS / 16;
@@ -644,7 +644,7 @@ template <bool Private, int Heads> __device__ __forceinline__ void native_tile(c
 }
 template <int Heads> __global__ __launch_bounds__(Heads * 16)
 void step5_native_attention_kernel(Params p) {
-#if __HGGC_ARCH__ >= 150
+#if __HGGC_ARCH__ == 150
   constexpr int tiles = kGroupRows / 8;
   const int group = p.groups - 1 - (Heads == 16 ? blockIdx.x : blockIdx.x / tiles);
   if (!p.valid_group(group)) return;

@@ -96,7 +96,7 @@ __launch_bounds__(128) __global__
                         token_id >= image_sentinel_lo &&
                         token_id < image_sentinel_lo + 5;
 
-  #if defined(COMPATIBLE_ARCH) && (COMPATIBLE_ARCH >= 900)
+  #if defined(COMPATIBLE_ARCH) && (COMPATIBLE_ARCH >= 900) && VLLM_SAIL_PDL_AVAILABLE
   hggcGridDependencySynchronize();
   #endif
   int expert = 0;
@@ -182,7 +182,7 @@ __launch_bounds__(128) __global__
     weight_sum += VLLM_SHFL_XOR_SYNC(weight_sum, mask);
   }
 
-  #if defined(COMPATIBLE_ARCH) && (COMPATIBLE_ARCH >= 900)
+  #if defined(COMPATIBLE_ARCH) && (COMPATIBLE_ARCH >= 900) && VLLM_SAIL_PDL_AVAILABLE
   hggcTriggerProgrammaticLaunchCompletion();
   #endif
   if (lane < 6) {
@@ -343,7 +343,7 @@ __launch_bounds__(WARPS_PER_CTA* WARP_SIZE_PARAM) __global__
   // Finally, we pull in the data from global mem
   float row_chunk[VPT];
 
-#if (defined(COMPATIBLE_ARCH) && (COMPATIBLE_ARCH >= 900))
+#if (defined(COMPATIBLE_ARCH) && (COMPATIBLE_ARCH >= 900)) && VLLM_SAIL_PDL_AVAILABLE
   hggcGridDependencySynchronize();
 #endif
 
@@ -487,7 +487,7 @@ __launch_bounds__(WARPS_PER_CTA* WARP_SIZE_PARAM) __global__
         }
       }
     }
-#if (defined(COMPATIBLE_ARCH) && (COMPATIBLE_ARCH >= 900))
+#if (defined(COMPATIBLE_ARCH) && (COMPATIBLE_ARCH >= 900)) && VLLM_SAIL_PDL_AVAILABLE
     hggcTriggerProgrammaticLaunchCompletion();
 #endif
     return;
@@ -621,7 +621,7 @@ __launch_bounds__(WARPS_PER_CTA* WARP_SIZE_PARAM) __global__
         output[idx] = output[idx] * scale;
       }
     }
-#if (defined(COMPATIBLE_ARCH) && (COMPATIBLE_ARCH >= 900))
+#if (defined(COMPATIBLE_ARCH) && (COMPATIBLE_ARCH >= 900)) && VLLM_SAIL_PDL_AVAILABLE
     hggcTriggerProgrammaticLaunchCompletion();
 #endif
   }

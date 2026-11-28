@@ -193,7 +193,10 @@ def _ppu_deep_gemm_warmup_enabled() -> bool:
     import vllm.envs as envs
 
     import vllm_sail.envs as ppu_envs
-    from vllm_sail.utils.deep_gemm import is_deep_gemm_supported
+    from vllm_sail.utils.deep_gemm import (
+        bf16_dense_deepgemm_enabled,
+        is_deep_gemm_supported,
+    )
 
     if envs.VLLM_DEEP_GEMM_WARMUP == "skip" or not is_deep_gemm_supported():
         return False
@@ -202,7 +205,7 @@ def _ppu_deep_gemm_warmup_enabled() -> bool:
     return (
         (not moe_backend or moe_backend == "deepgemm")
         or (not dense_backend or dense_backend == "deepgemm")
-        or (ppu_envs.VLLM_SAIL_DENSE_BF16_DEEPGEMM)
+        or bf16_dense_deepgemm_enabled()
     )
 
 

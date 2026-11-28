@@ -33,6 +33,9 @@ CANDIDATE_Ms = [1, 2, 4, 8] + list(range(16, MAX_DECODE_BS, 16))
 
 @functools.cache
 def get_deep_gemm_best_configs():
+    # The modern SM90 API does not consume the legacy HGGC tuned-config table.
+    if is_ppu_17():
+        return None
     config_dir = os.path.join(
         os.path.dirname(os.path.realpath(__file__)), "deepgemm_configs"
     )
@@ -247,6 +250,11 @@ _quant_mode_impl: Any | None = None
 _activation_and_mul_impl: Callable[..., Any] | None = None
 _activation_and_mul_masked_impl: Callable[..., Any] | None = None
 
+# Per-feature symbol table; load the SDK on first use instead of guessing
+# capabilities from the distribution version.
+_deep_gemm_apis: dict[str, Callable[..., Any] | None] = {}
+_deep_gemm_initialized = False
+
 
 def _lazy_init() -> None:
     """Import deep_gemm and resolve symbols on first use."""
@@ -284,43 +292,11 @@ def _lazy_init() -> None:
         _activation_and_mul_impl, \
         _activation_and_mul_masked_impl
 
-    # fast path
-    if (
-        _fp8_gemm_nt_impl is not None
-        or _fp8_einsum_impl is not None
-        or _grouped_masked_impl is not None
-        or _fp8_grouped_nopad_impl is not None
-        or _int8_gemm_nt_impl is not None
-        or _int8_einsum_impl is not None
-        or _int8_grouped_nopad_impl is not None
-        or _int8_grouped_masked_impl is not None
-        or _bf16_gemm_nt_impl is not None
-        or _bf16_grouped_nopad_impl is not None
-        or _bf16_grouped_masked_impl is not None
-        or _fp4_grouped_nopad_impl is not None
-        or _fp4_grouped_fused_impl is not None
-        or _fp4_grouped_masked_impl is not None
-        or _fp8_fp4_grouped_nopad_impl is not None
-        or _fp8_fp4_grouped_fused_impl is not None
-        or _fp8_fp4_grouped_masked_impl is not None
-        or _preprocess_weights_and_scales_impl is not None
-        or _w4a16_grouped_nopad_impl is not None
-        or _w4a16_grouped_fused_impl is not None
-        or _w4a16_grouped_masked_impl is not None
-        or _fp8_mqa_logits_impl is not None
-        or _fp8_paged_mqa_logits_impl is not None
-        or _int8_mqa_logits_impl is not None
-        or _int8_paged_mqa_logits_impl is not None
-        or _fp8_fp4_mqa_logits_impl is not None
-        or _fp8_fp4_paged_mqa_logits_impl is not None
-        or _get_paged_mqa_logits_metadata_impl is not None
-        or _tf32_hc_prenorm_gemm_impl is not None
-        or _mega_mhc_impl is not None
-        or _get_mk_alignment_for_contiguous_layout_impl is not None
-        or _transform_sf_into_required_layout_impl is not None
-        or _moe_align_block_size_impl is not None
-        or _activation_and_mul_impl is not None
-    ):
+    global _deep_gemm_initialized
+
+    # Cache only after a full resolution; a partial symbol set does not make
+    # the whole API family available.
+    if _deep_gemm_initialized:
         return
 
     if not has_deep_gemm():
@@ -401,13 +377,104 @@ def _lazy_init() -> None:
     _quant_mode_impl = getattr(_dg, "QuantMode", None)
     _activation_and_mul_impl = getattr(_dg, "activation_and_mul", None)
     _activation_and_mul_masked_impl = getattr(_dg, "activation_and_mul_masked", None)
+
+    if is_ppu_17():
+        # Legacy HGGC aliases are not used on SM90; missing symbols stay
+        # unavailable so callers fall back first.
+        _fp8_gemm_nt_impl = getattr(_dg, "fp8_gemm_nt", None)
+        _bf16_gemm_nt_impl = getattr(_dg, "bf16_gemm_nt", None)
+        _bf16_grouped_masked_impl = getattr(_dg, "m_grouped_bf16_gemm_nt_masked", None)
+        for name in (
+            "m_grouped_fp8_gemm_nt_contiguous",
+            "m_grouped_fp8_gemm_nt_nopad",
+            "m_grouped_fp8_gemm_nt_fused",
+            "m_grouped_fp8_fp4_gemm_nt_contiguous",
+            "m_grouped_fp8_fp4_gemm_nt_nopad",
+            "m_grouped_fp8_fp4_gemm_nt_masked",
+            "m_grouped_fp8_fp4_gemm_nt_fused",
+            "m_grouped_bf16_gemm_nt_contiguous",
+            "m_grouped_bf16_gemm_nt_fused",
+            "get_mk_alignment_for_contiguous_layout",
+        ):
+            function = getattr(_dg, name, None)
+            _deep_gemm_apis[name] = function if callable(function) else None
+    _deep_gemm_apis.update(
+        fp8_gemm_nt=_fp8_gemm_nt_impl,
+        bf16_gemm_nt=_bf16_gemm_nt_impl,
+        int8_gemm_nt=_int8_gemm_nt_impl,
+        int8_einsum=_int8_einsum_impl,
+        bf16_m_grouped_gemm_nt_masked=_bf16_grouped_masked_impl,
+        fp8_m_grouped_gemm_nt_masked=_grouped_masked_impl,
+        fp8_einsum=_fp8_einsum_impl,
+    )
     DeepGemmQuantScaleFMT.init_oracle_cache()
+    _deep_gemm_initialized = True
+
+
+def has_deep_gemm_api(name: str) -> bool:
+    """Look up one adapted API; an installed package does not make every
+    quantization combination executable."""
+    _lazy_init()
+    return callable(_deep_gemm_apis.get(name))
+
+
+def _require_deep_gemm_api(name: str) -> Callable[..., Any]:
+    _lazy_init()
+    function = _deep_gemm_apis.get(name)
+    if not callable(function):
+        raise RuntimeError(
+            f"SAIL DeepGEMM has no adapted interface {name}; select an "
+            "available portable backend or install the SAIL SDK matching "
+            "this device."
+        )
+    return function
+
+
+def m_grouped_fp8_gemm_nt_contiguous(a, b, d, grouped_layout, **kwargs):
+    """Modern block-padded contiguous layout; rejects compact nopad rows."""
+    kwargs.setdefault("disable_ue8m0_cast", True)
+    return _require_deep_gemm_api("m_grouped_fp8_gemm_nt_contiguous")(
+        a, b, d, grouped_layout, **kwargs
+    )
+
+
+def m_grouped_fp8_gemm_nt_compact(a, b, d, m_rows, expected_m: int, **kwargs):
+    """Modern true nopad; m_rows and the legacy per-row expert_ids are not
+    interchangeable."""
+    if type(expected_m) is not int or expected_m < 0:
+        raise ValueError(
+            "compact nopad expected_m must be a non-negative host integer"
+        )
+    kwargs.setdefault("disable_ue8m0_cast", True)
+    return _require_deep_gemm_api("m_grouped_fp8_gemm_nt_nopad")(
+        a, b, d, m_rows, expected_m, **kwargs
+    )
+
+
+def m_grouped_bf16_gemm_nt_contiguous(a, b, d, grouped_layout, **kwargs):
+    """Modern BF16 contiguous; no alias is fabricated when BF16 nopad is
+    absent."""
+    return _require_deep_gemm_api("m_grouped_bf16_gemm_nt_contiguous")(
+        a, b, d, grouped_layout, **kwargs
+    )
 
 
 def get_num_sms() -> int:
     _lazy_init()
     _dg = importlib.import_module("deep_gemm")
     return int(_dg.get_num_sms())
+
+
+@functools.cache
+def get_deep_gemm_contiguous_alignment() -> int:
+    """Logical M/K alignment of the modern contiguous layout, not the
+    quantization scale group size."""
+    alignment = _require_deep_gemm_api("get_mk_alignment_for_contiguous_layout")()
+    if type(alignment) is not int or alignment <= 0:
+        raise RuntimeError(
+            "SAIL DeepGEMM contiguous alignment must be a positive integer"
+        )
+    return alignment
 
 
 @functools.cache
@@ -423,6 +490,11 @@ def get_mk_alignment_for_contiguous_layout(
         block = 128
     else:
         block = 1
+    if is_ppu_17():
+        # Existing callers use the second entry as the scale group/storage
+        # unit; it must not become TMA alignment. Modern callers query the
+        # logical K alignment via get_deep_gemm_contiguous_alignment.
+        return [get_deep_gemm_contiguous_alignment(), block]
     return [1, block]
 
 
@@ -438,14 +510,38 @@ def fp8_gemm_nt(*args, **kwargs):
     _lazy_init()
     if _fp8_gemm_nt_impl is None:
         return _missing(*args, **kwargs)
+    if is_ppu_17():
+        kwargs.setdefault("disable_ue8m0_cast", True)
     return _fp8_gemm_nt_impl(*args, **kwargs)
 
 
-def m_grouped_fp8_gemm_nt_nopad(*args, **kwargs):
+def m_grouped_fp8_gemm_nt_nopad(a, b, d, rows, counts=None, **kwargs):
     _lazy_init()
-    if _fp8_grouped_nopad_impl is None:
-        return _missing(*args, **kwargs)
-    return _fp8_grouped_nopad_impl(*args, **kwargs)
+    if _fp8_grouped_nopad_impl is not None:
+        if counts is None:
+            return _fp8_grouped_nopad_impl(a, b, d, rows, **kwargs)
+        return _fp8_grouped_nopad_impl(a, b, d, rows, counts, **kwargs)
+    modern_impl = _deep_gemm_apis.get("m_grouped_fp8_gemm_nt_nopad")
+    if not (is_ppu_17() and callable(modern_impl)):
+        return _missing()
+    # The PPU 1.7 build exposes only the 2.6 signature, which takes the
+    # per-expert token counts as ``m_rows`` and a host ``expected_m``. The row
+    # ids are only needed when no counts are passed (warmup).
+    num_groups = b[0].shape[0]
+    if counts is None:
+        counts = torch.bincount(
+            rows[rows >= 0], minlength=num_groups
+        ).to(torch.int32)
+    align = get_mk_alignment_for_contiguous_layout(is_blockwise=True)[0]
+    expected_m = max(
+        1, -(-(d.shape[0] - num_groups * (align - 1)) // num_groups)
+    )
+    kwargs.setdefault("disable_ue8m0_cast", True)
+    # FP8 activation quant emits column-major scale views for the contiguous
+    # kernels; the nopad entry asserts a plain contiguous 2-D scale tensor.
+    if not a[1].is_contiguous():
+        a = (a[0], a[1].contiguous())
+    return modern_impl(a, b, d, counts, expected_m, **kwargs)
 
 
 def fp8_m_grouped_gemm_nt_masked(*args, **kwargs):
@@ -547,11 +643,22 @@ def m_grouped_fp8_fp4_gemm_nt_nopad(*args, **kwargs):
     return _fp8_fp4_grouped_nopad_impl(*args, **kwargs)
 
 
-def m_grouped_fp8_fp4_gemm_nt_fused(*args, **kwargs):
+def _fp8_fp4_fused_impl() -> Callable[..., Any] | None:
+    """Resolve the fused FP8-activation grouped GEMM for the installed build."""
     _lazy_init()
-    if _fp8_fp4_grouped_fused_impl is None:
+    if _fp8_fp4_grouped_fused_impl is not None:
+        return _fp8_fp4_grouped_fused_impl
+    modern_impl = _deep_gemm_apis.get("m_grouped_fp8_fp4_gemm_nt_fused")
+    if is_ppu_17() and callable(modern_impl):
+        return modern_impl
+    return None
+
+
+def m_grouped_fp8_fp4_gemm_nt_fused(*args, **kwargs):
+    impl = _fp8_fp4_fused_impl()
+    if impl is None:
         return _missing(*args, **kwargs)
-    return _fp8_fp4_grouped_fused_impl(*args, **kwargs)
+    return impl(*args, **kwargs)
 
 
 def fp8_fp4_m_grouped_gemm_nt_masked(*args, **kwargs):
@@ -627,6 +734,24 @@ def has_fused_act_quant() -> bool:
     """
     _lazy_init()
     return _activation_and_mul_impl is not None and _quant_mode_impl is not None
+
+
+def has_fused_moe() -> bool:
+    """Whether DeepGEMM exposes the PPU1.7 double-fused MoE entry points.
+
+    `moe_align_block_size` produces the route/block metadata,
+    `m_grouped_fp8_fp4_gemm_nt_fused` consumes it (gather-read GEMM), and
+    `activation_and_mul(route_ids=...)` skips the invalid routes in place.
+    """
+    _lazy_init()
+    return (
+        _moe_align_block_size_impl is not None
+        and _fp8_fp4_fused_impl() is not None
+        and _activation_mode_impl is not None
+        and _quant_mode_impl is not None
+        and _activation_and_mul_impl is not None
+        and "route_ids" in (_activation_and_mul_impl.__doc__ or "")
+    )
 
 
 def has_masked_fused_act_quant() -> bool:
@@ -984,6 +1109,12 @@ def tf32_hc_prenorm_gemm(
 def get_compile_mode(*args, **kwargs):
     _lazy_init()
     if _get_compile_mode_impl is None:
+        # Optional JIT tuning knob: the PPU deep_gemm 2.6.2 build does not
+        # expose it, and warmup only uses it to force mode 1 around its
+        # shape sweep, so its absence must not abort warmup. PPU 1.0/1.5
+        # keep the original missing-symbol behaviour.
+        if is_ppu_17():
+            return None
         return _missing(*args, **kwargs)
     return _get_compile_mode_impl(*args, **kwargs)
 
@@ -991,6 +1122,8 @@ def get_compile_mode(*args, **kwargs):
 def set_compile_mode(*args, **kwargs):
     _lazy_init()
     if _set_compile_mode_impl is None:
+        if is_ppu_17():
+            return None
         return _missing(*args, **kwargs)
     return _set_compile_mode_impl(*args, **kwargs)
 
@@ -1087,6 +1220,68 @@ def is_ppu_15() -> bool:
     return current_platform.is_ppu() and current_platform.is_device_capability((8, 9))
 
 
+@functools.cache
+def is_ppu_17() -> bool:
+    """Return `True` on PPU 1.7 (V900), which reports capability (9, 0).
+
+    Exact match: NVIDIA SM90 and the other PPU generations must not hit the
+    1.7-only branches.
+    """
+    return current_platform.is_ppu() and current_platform.is_device_capability((9, 0))
+
+
+def bf16_dense_deepgemm_enabled() -> bool:
+    """Whether unquantized BF16 dense GEMMs should run on DeepGEMM.
+
+    An explicit `VLLM_SAIL_DENSE_BF16_DEEPGEMM` / `VLLM_SAIL_DENSE_BACKEND`
+    always wins. When unset, PPU 1.7 (capability 9.0) defaults to enabled:
+    ``F.linear`` there lands on the vendor runtime-compiled BF16 GEMM whose
+    fused-bias kernel faults on device (``Invalid instruction``), while the
+    DeepGEMM BF16 NT kernel is numerically equivalent. PPU 1.0/1.5 keep the
+    original explicit-switch-only semantics.
+    """
+    if not is_ppu_17():
+        # PPU 1.0/1.5 keep the pre-existing semantics verbatim: only the
+        # explicit VLLM_SAIL_DENSE_BF16_DEEPGEMM switch decides.
+        return ppu_envs.VLLM_SAIL_DENSE_BF16_DEEPGEMM
+    dense_backend = ppu_envs.VLLM_SAIL_DENSE_BACKEND
+    if dense_backend and dense_backend != "deepgemm":
+        return False
+    if ppu_envs.is_set("VLLM_SAIL_DENSE_BF16_DEEPGEMM"):
+        return ppu_envs.VLLM_SAIL_DENSE_BF16_DEEPGEMM
+    return True
+
+
+def bf16_dense_deepgemm_available() -> bool:
+    """Platform + API half of the BF16 dense DeepGEMM gate."""
+    if not bf16_dense_deepgemm_enabled():
+        return False
+    if not (current_platform.is_ppu() and has_deep_gemm()):
+        return False
+    if is_ppu_15():
+        return True
+    if not is_ppu_17():
+        return False
+    return is_deep_gemm_supported() and has_deep_gemm_api("bf16_gemm_nt")
+
+
+def bf16_dense_deepgemm_weight_ok(weight: torch.Tensor) -> bool:
+    """Layout/shape half of the gate, shared by dispatch and warmup."""
+    if weight.dtype != torch.bfloat16 or weight.dim() != 2:
+        return False
+    if weight.shape[0] <= 0 or weight.shape[1] <= 0:
+        return False
+    if not (weight.is_cuda and weight.is_contiguous()):
+        return False
+    if is_ppu_15():
+        # The 1.5 NT kernel tiles N in pairs and rejects an odd N at JIT time
+        # (``BF16 dense GEMM requires even N``), N == 1 included.
+        return weight.shape[0] % 2 == 0
+    # 1.7 accepts arbitrary M/N/K (verified down to K=4 and odd N), so no
+    # extra alignment is imposed.
+    return True
+
+
 def should_use_deepgemm_for_bf16_linear(
     x: torch.Tensor,
     weight: torch.Tensor,
@@ -1094,41 +1289,61 @@ def should_use_deepgemm_for_bf16_linear(
 ) -> bool:
     """Decide whether an unquantized BF16 dense GEMM should run on DeepGEMM.
 
-    Requires `VLLM_SAIL_DENSE_BF16_DEEPGEMM` and PPU 1.5; DeepGEMM dense
-    GEMM only supports K-major (nt) operands, so both A `[..., K]` and
-    B `[N, K]` must be contiguous BF16.  When *bias* is present the caller
-    must fall back to acblas (``F.linear``) to avoid the extra elementwise
-    add overhead.  Otherwise (no bias) callers can use DeepGEMM when all
-    conditions are satisfied.
-
-    The BF16 dense NT kernel tiles ``N`` in pairs and rejects an odd ``N``
-    at JIT time (``BF16 dense GEMM requires even N``).  Every odd ``N`` --
-    including ``N == 1``, which the kernel does not specialise (e.g. the 1-D
-    Kimi-K3 AttnRes projections) -- is rejected here so it falls back to
-    acblas instead of failing inside the kernel.
+    ``bias`` is accepted and added after the GEMM by
+    :func:`bf16_dense_linear`: the kernel has no bias epilogue, and on PPU 1.7
+    the fused-bias variant of the vendor runtime-compiled GEMM is exactly the
+    kernel that faults, so a bias must not force the acblas fallback.
     """
-    if bias is not None:
-        return False
+    if not is_ppu_17():
+        # PPU 1.0/1.5: pre-existing gate, unchanged (bias forces acblas,
+        # explicit switch required, 1.5 only, even N, contiguous operands).
+        if bias is not None:
+            return False
 
-    if not ppu_envs.VLLM_SAIL_DENSE_BF16_DEEPGEMM:
-        return False
+        if not ppu_envs.VLLM_SAIL_DENSE_BF16_DEEPGEMM:
+            return False
 
-    if not (current_platform.is_ppu() and has_deep_gemm()):
-        return False
+        if not (current_platform.is_ppu() and has_deep_gemm()):
+            return False
 
-    # BF16 dense GEMM is only optimized on PPU 1.5 for now; PPU 1.0 will be
-    # enabled once the kernel-side optimization lands.
-    if not is_ppu_15():
-        return False
+        if not is_ppu_15():
+            return False
 
+        return (
+            x.dtype == torch.bfloat16
+            and weight.dtype == torch.bfloat16
+            and weight.dim() == 2
+            and weight.shape[0] % 2 == 0
+            and x.is_contiguous()
+            and weight.is_contiguous()
+        )
+    if not bf16_dense_deepgemm_available():
+        return False
+    if not bf16_dense_deepgemm_weight_ok(weight):
+        return False
     return (
         x.dtype == torch.bfloat16
-        and weight.dtype == torch.bfloat16
-        and weight.dim() == 2
-        and weight.shape[0] % 2 == 0
+        and x.is_cuda
+        and x.device == weight.device
+        and x.dim() >= 1
+        and x.shape[-1] == weight.shape[1]
         and x.is_contiguous()
-        and weight.is_contiguous()
     )
+
+
+# The TMA descriptors built by the DeepGEMM JIT require 16-byte-aligned
+# global addresses; an unaligned operand makes
+# ``lazy_cuTensorMapEncodeTiled`` fail with a driver error that PPU surfaces
+# as 999 HGGC_ERROR_UNKNOWN. Contiguous views into stacked pixel data can
+# start at an odd-element offset, so a fresh (allocator-aligned) copy is
+# taken when the base address is misaligned.
+_TMA_ADDR_ALIGNMENT_BYTES = 16
+
+
+def _tma_aligned(tensor: torch.Tensor) -> torch.Tensor:
+    if tensor.data_ptr() % _TMA_ADDR_ALIGNMENT_BYTES == 0:
+        return tensor
+    return tensor.clone()
 
 
 def bf16_dense_linear(
@@ -1138,14 +1353,20 @@ def bf16_dense_linear(
 ) -> torch.Tensor:
     """BF16 dense linear via DeepGEMM (K-major operands only).
 
-    Callers must check `should_use_deepgemm_for_bf16_linear` first.
+    Callers must check `should_use_deepgemm_for_bf16_linear` first. Operands
+    whose base address is not TMA-aligned are copied, not rejected.
     """
     original_shape = x.shape
     x_2d = x.reshape(-1, original_shape[-1])
     m = x_2d.shape[0]
     n = weight.shape[0]
     output = torch.empty((m, n), dtype=torch.bfloat16, device=x.device)
-    bf16_gemm_nt(x_2d, weight, output)
+    if is_ppu_17():
+        if m != 0:
+            bf16_gemm_nt(_tma_aligned(x_2d), _tma_aligned(weight), output)
+    else:
+        # PPU 1.0/1.5 keep the original call verbatim.
+        bf16_gemm_nt(x_2d, weight, output)
     if bias is not None:
         output = output + bias
     return output.view(*original_shape[:-1], n)
@@ -1295,6 +1516,9 @@ __all__ = [
     "fp8_gemm_nt",
     "fp8_einsum",
     "m_grouped_fp8_gemm_nt_nopad",
+    "m_grouped_fp8_gemm_nt_contiguous",
+    "m_grouped_fp8_gemm_nt_compact",
+    "m_grouped_bf16_gemm_nt_contiguous",
     "fp8_m_grouped_gemm_nt_masked",
     "int8_gemm_nt",
     "bf16_gemm_nt",
@@ -1327,7 +1551,13 @@ __all__ = [
     "is_deep_gemm_e8m0_used",
     "is_deep_gemm_supported",
     "is_ppu_15",
+    "is_ppu_17",
+    "has_deep_gemm_api",
+    "get_deep_gemm_contiguous_alignment",
     "should_use_deepgemm_for_bf16_linear",
+    "bf16_dense_deepgemm_enabled",
+    "bf16_dense_deepgemm_available",
+    "bf16_dense_deepgemm_weight_ok",
     "get_num_sms",
     "should_use_deepgemm_for_fp8_linear",
     "get_col_major_tma_aligned_tensor",

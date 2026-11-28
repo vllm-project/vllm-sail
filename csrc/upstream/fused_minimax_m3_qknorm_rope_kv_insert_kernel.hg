@@ -708,7 +708,7 @@ __global__ void fusedMiniMaxM3QNormRopeKVInsertKernel(
     // produces ``qkv``) to finish before touching any global memory.  No-op
     // when PDL is not enabled on the launch.  The CUDA runtime wrapper emits
     // the griddepcontrol.wait PTX with the required memory clobber internally.
-#if defined(COMPATIBLE_ARCH) && (COMPATIBLE_ARCH >= 900)
+#if defined(COMPATIBLE_ARCH) && (COMPATIBLE_ARCH >= 900) && VLLM_SAIL_PDL_AVAILABLE
     hggcGridDependencySynchronize();
 #endif
 
@@ -786,7 +786,7 @@ __global__ void fusedMiniMaxM3QNormRopeKVInsertKernel(
 
     // PDL: signal that this kernel is done so a dependent successor may launch
     // early.  No-op when PDL is not enabled on the launch.
-#if defined(COMPATIBLE_ARCH) && (COMPATIBLE_ARCH >= 900)
+#if defined(COMPATIBLE_ARCH) && (COMPATIBLE_ARCH >= 900) && VLLM_SAIL_PDL_AVAILABLE
     hggcTriggerProgrammaticLaunchCompletion();
 #endif
 #if (!defined(COMPATIBLE_ARCH) || COMPATIBLE_ARCH < 800) && !defined(USE_ROCM)

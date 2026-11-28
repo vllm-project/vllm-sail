@@ -51,6 +51,7 @@ from vllm_sail.utils.deep_gemm import (
     is_deep_gemm_e8m0_used,
     is_deep_gemm_supported,
     is_ppu_15,
+    is_ppu_17,
     w4a16_m_grouped_gemm_nt_masked,
 )
 
@@ -1038,6 +1039,14 @@ class PPUBatchedDeepGemmExperts(mk.FusedMoEExpertsModular):
             (kInt4Static32, None),
             (kMxfp4Static, None),
         ]
+        if (weight_key, activation_key) == (
+            kFp8StaticChannelSym,
+            kFp8DynamicTokenSym,
+        ) and is_ppu_17():
+            # Same PPU 1.7 recipe boundary as the non-batched PPU experts: the
+            # masked grouped FP8 entry also requires [m, k/128] scales, so
+            # channelwise FP8 must use the portable batched Triton experts.
+            return False
         return (weight_key, activation_key) in SUPPORTED_W_A
 
     @staticmethod

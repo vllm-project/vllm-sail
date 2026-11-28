@@ -520,7 +520,7 @@ __global__ void fusedDeepseekV4QNormRopeKVRopeQuantInsertKernel(
     // before touching any global memory.  No-op when PDL is not enabled on
     // the launch.  The CUDA runtime wrapper emits the griddepcontrol.wait
     // PTX with the required memory clobber internally.
-#if defined(COMPATIBLE_ARCH) && (COMPATIBLE_ARCH >= 900)
+#if defined(COMPATIBLE_ARCH) && (COMPATIBLE_ARCH >= 900) && VLLM_SAIL_PDL_AVAILABLE
     hggcGridDependencySynchronize();
 #endif
 
@@ -548,7 +548,7 @@ __global__ void fusedDeepseekV4QNormRopeKVRopeQuantInsertKernel(
         k_cache, slot_mapping, position_ids, cos_sin_cache, cache_block_size,
         kv_block_stride, kv_mxfp8, apply_q_rope);
 
-#if defined(COMPATIBLE_ARCH) && (COMPATIBLE_ARCH >= 900)
+#if defined(COMPATIBLE_ARCH) && (COMPATIBLE_ARCH >= 900) && VLLM_SAIL_PDL_AVAILABLE
     hggcTriggerProgrammaticLaunchCompletion();
 #endif
 #if (!defined(COMPATIBLE_ARCH) || COMPATIBLE_ARCH < 800) && !defined(USE_ROCM)
@@ -589,7 +589,7 @@ __global__ void fusedDeepseekV4QNormRopeKVRopeQuantInsertKernelReducedGrid(
     int const tokenIdx = blockIdx.x;
     if (tokenIdx >= num_tokens_full) return;
 
-#if defined(COMPATIBLE_ARCH) && (COMPATIBLE_ARCH >= 900)
+#if defined(COMPATIBLE_ARCH) && (COMPATIBLE_ARCH >= 900) && VLLM_SAIL_PDL_AVAILABLE
     hggcGridDependencySynchronize();
 #endif
 
@@ -642,7 +642,7 @@ __global__ void fusedDeepseekV4QNormRopeKVRopeQuantInsertKernelReducedGrid(
       }  // while
     }  // if (warpId < slot_end)
 
-#if defined(COMPATIBLE_ARCH) && (COMPATIBLE_ARCH >= 900)
+#if defined(COMPATIBLE_ARCH) && (COMPATIBLE_ARCH >= 900) && VLLM_SAIL_PDL_AVAILABLE
     hggcTriggerProgrammaticLaunchCompletion();
 #endif
 #if (!defined(COMPATIBLE_ARCH) || COMPATIBLE_ARCH < 800) && !defined(USE_ROCM)
@@ -840,7 +840,7 @@ __global__ void fusedDeepseekV4FullCacheKernel(
     // KV branch: skip DP-padded tokens (no slot reserved for them).
     if (isKV && tokenIdx >= num_tokens_insert) return;
 
-#if defined(COMPATIBLE_ARCH) && (COMPATIBLE_ARCH >= 900)
+#if defined(COMPATIBLE_ARCH) && (COMPATIBLE_ARCH >= 900) && VLLM_SAIL_PDL_AVAILABLE
     hggcGridDependencySynchronize();
 #endif
 
@@ -984,7 +984,7 @@ __global__ void fusedDeepseekV4FullCacheKernel(
       }
     }
 
-#if defined(COMPATIBLE_ARCH) && (COMPATIBLE_ARCH >= 900)
+#if defined(COMPATIBLE_ARCH) && (COMPATIBLE_ARCH >= 900) && VLLM_SAIL_PDL_AVAILABLE
     hggcTriggerProgrammaticLaunchCompletion();
 #endif
 #if (!defined(COMPATIBLE_ARCH) || COMPATIBLE_ARCH < 800) && !defined(USE_ROCM)

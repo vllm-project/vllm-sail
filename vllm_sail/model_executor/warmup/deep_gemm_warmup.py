@@ -51,7 +51,6 @@ from vllm_sail.utils.deep_gemm import (
     get_deep_gemm_config,
     get_mk_alignment_for_contiguous_layout,
     int8_gemm_nt,
-    is_ppu_15,
     m_grouped_bf16_gemm_nt_nopad,
     m_grouped_fp4_gemm_nt_nopad,
     m_grouped_fp8_fp4_gemm_nt_nopad,
@@ -462,7 +461,43 @@ def _bf16_linear_may_use_deep_gemm(module: torch.nn.Module) -> bool:
     """
     Return True if the input module/layer could be processed with DeepGEMM.
     """
-    if not ppu_envs.VLLM_SAIL_DENSE_BF16_DEEPGEMM:
+    from vllm_sail.utils.deep_gemm import (
+        bf16_dense_deepgemm_available,
+        bf16_dense_deepgemm_weight_ok,
+        is_ppu_15,
+        is_ppu_17,
+    )
+
+    if not is_ppu_17():
+        # PPU 1.0/1.5 keep the original warmup predicate verbatim: explicit
+        # switch, no bias, even N, 1.5 only, contiguous BF16 weights.
+        if not ppu_envs.VLLM_SAIL_DENSE_BF16_DEEPGEMM:
+            return False
+
+        if not (
+            isinstance(module, LinearBase)
+            and isinstance(module.quant_method, UnquantizedLinearMethod)
+        ):
+            return False
+
+        w = getattr(module, "weight", None)
+        if not isinstance(w, torch.Tensor):
+            return False
+
+        if getattr(module, "bias", None) is not None:
+            return False
+
+        if w.ndim != 2 or w.shape[0] % 2 != 0:
+            return False
+
+        return (
+            has_deep_gemm()
+            and is_ppu_15()
+            and w.dtype == torch.bfloat16
+            and w.is_contiguous()
+        )
+
+    if not bf16_dense_deepgemm_available():
         return False
 
     if not (
@@ -475,26 +510,10 @@ def _bf16_linear_may_use_deep_gemm(module: torch.nn.Module) -> bool:
     if not isinstance(w, torch.Tensor):
         return False
 
-    if getattr(module, "bias", None) is not None:
-        return False
-
-    # DeepGEMM dense GEMM only supports K-major operands, and the BF16
-    # kernel is only optimized on PPU 1.5 for now.  Its BF16 dense NT
-    # kernel tiles N in pairs and rejects any odd N at JIT time ("BF16 dense
-    # GEMM requires even N"), N == 1 included, so only even N is eligible.
-    # Keep this in sync with `should_use_deepgemm_for_bf16_linear`, which is
-    # what actually decides the runtime path; skipping an odd N here avoids
-    # warming up (and crashing on) a shape the hot path never sends to
-    # DeepGEMM.
-    if w.ndim != 2 or w.shape[0] % 2 != 0:
-        return False
-
-    return (
-        has_deep_gemm()
-        and is_ppu_15()
-        and w.dtype == torch.bfloat16
-        and w.is_contiguous()
-    )
+    # Same predicate as `should_use_deepgemm_for_bf16_linear`, which decides
+    # the runtime path: bias is added outside the kernel, so biased linears
+    # (the vision tower's wo/wqkv/projections) are eligible too.
+    return bf16_dense_deepgemm_weight_ok(w)
 
 
 def _fused_moe_grouped_gemm_may_use_deep_gemm_int8(module: torch.nn.Module) -> bool:

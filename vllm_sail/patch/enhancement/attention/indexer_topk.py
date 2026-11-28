@@ -24,6 +24,7 @@ _original_stride = _topk.get_deep_select_stride_requirement
 _original_supported = _topk.is_deep_select_supported
 _original_topk = _topk.deep_select_topk
 _original_resolve = _topk.SparseIndexerTopk.resolve_backend
+_original_cooperative_constraints = _topk.SparseIndexerTopk._cooperative_constraints
 
 
 @patch(
@@ -169,6 +170,31 @@ def _rebind_consumers():
                     affected_versions=_AFFECTED,
                     remove_when=_REMOVE_WHEN,
                 )(replacement)
+
+
+
+
+@patch(
+    _MODULE,
+    "SparseIndexerTopk._cooperative_constraints",
+    reason=(
+        "cooperative_topk has no PPU implementation, but upstream treats PPU 1.7 "
+        "(capability 9.0) as SM90+ and auto-selects it; the persistent kernel is "
+        "the implemented PPU path."
+    ),
+    affected_versions=_AFFECTED,
+    remove_when=_REMOVE_WHEN,
+)
+def _cooperative_constraints(self, logits, topk_tokens, num_rows):
+    failures = _original_cooperative_constraints(self, logits, topk_tokens, num_rows)
+    if current_platform.is_ppu() and current_platform.is_device_capability((9, 0)):
+        # PPU 1.7 reports capability (9, 0), so upstream's SM90+ probe enables a
+        # kernel the SAIL wheel does not implement. Mark it unmet so the auto
+        # chain falls through to persistent_topk, which PPU does implement.
+        failures = list(failures) + [
+            "cooperative_topk has no PPU implementation; use persistent_topk"
+        ]
+    return failures
 
 
 _rebind_consumers()

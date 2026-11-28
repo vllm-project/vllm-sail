@@ -119,7 +119,7 @@ __global__ void per_token_group_quant_8bit_kernel(
   using scale_element_t = float;
   static_assert(sizeof(scale_packed_t) % sizeof(scale_element_t) == 0);
 
-#if (defined(COMPATIBLE_ARCH) && (COMPATIBLE_ARCH >= 900))
+#if (defined(COMPATIBLE_ARCH) && (COMPATIBLE_ARCH >= 900)) && VLLM_SAIL_PDL_AVAILABLE
   hggcGridDependencySynchronize();
 #endif
 
@@ -168,7 +168,7 @@ __global__ void per_token_group_quant_8bit_kernel(
                                 threads_per_group, y_s, min_8bit, max_8bit);
   }
 
-#if (defined(COMPATIBLE_ARCH) && (COMPATIBLE_ARCH >= 900))
+#if (defined(COMPATIBLE_ARCH) && (COMPATIBLE_ARCH >= 900)) && VLLM_SAIL_PDL_AVAILABLE
   hggcTriggerProgrammaticLaunchCompletion();
 #endif
 }
@@ -210,12 +210,12 @@ __global__ void per_token_group_quant_8bit_register_kernel(
         (static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x) /
         THREADS_PER_GROUP;
 
-#if (defined(COMPATIBLE_ARCH) && (COMPATIBLE_ARCH >= 900))
+#if (defined(COMPATIBLE_ARCH) && (COMPATIBLE_ARCH >= 900)) && VLLM_SAIL_PDL_AVAILABLE
     hggcGridDependencySynchronize();
 #endif
 
     if (group_id >= num_groups) {
-#if (defined(COMPATIBLE_ARCH) && (COMPATIBLE_ARCH >= 900))
+#if (defined(COMPATIBLE_ARCH) && (COMPATIBLE_ARCH >= 900)) && VLLM_SAIL_PDL_AVAILABLE
       hggcTriggerProgrammaticLaunchCompletion();
 #endif
       return;
@@ -297,7 +297,7 @@ __global__ void per_token_group_quant_8bit_register_kernel(
     *reinterpret_cast<uint4*>(group_output) =
         make_uint4(packed[0], packed[1], packed[2], packed[3]);
 
-#if (defined(COMPATIBLE_ARCH) && (COMPATIBLE_ARCH >= 900))
+#if (defined(COMPATIBLE_ARCH) && (COMPATIBLE_ARCH >= 900)) && VLLM_SAIL_PDL_AVAILABLE
     hggcTriggerProgrammaticLaunchCompletion();
 #endif
   }
@@ -571,12 +571,12 @@ __global__ void per_token_group_quant_8bit_packed_register_kernel(
   const int sf_k_idx = blockIdx.y * kGroupsPerBlockX + sf_k_local;
   const int mn_idx = blockIdx.x * kRowsPerBlock + row_local;
 
-#if (defined(COMPATIBLE_ARCH) && (COMPATIBLE_ARCH >= 900))
+#if (defined(COMPATIBLE_ARCH) && (COMPATIBLE_ARCH >= 900)) && VLLM_SAIL_PDL_AVAILABLE
   hggcGridDependencySynchronize();
 #endif
 
   if (mn_idx >= tma_aligned_mn) {
-#if (defined(COMPATIBLE_ARCH) && (COMPATIBLE_ARCH >= 900))
+#if (defined(COMPATIBLE_ARCH) && (COMPATIBLE_ARCH >= 900)) && VLLM_SAIL_PDL_AVAILABLE
     hggcTriggerProgrammaticLaunchCompletion();
 #endif
     return;
@@ -720,7 +720,7 @@ __global__ void per_token_group_quant_8bit_packed_register_kernel(
   }
   *reinterpret_cast<uint4*>(group_output) = packed_out;
 
-#if (defined(COMPATIBLE_ARCH) && (COMPATIBLE_ARCH >= 900))
+#if (defined(COMPATIBLE_ARCH) && (COMPATIBLE_ARCH >= 900)) && VLLM_SAIL_PDL_AVAILABLE
   hggcTriggerProgrammaticLaunchCompletion();
 #endif
 }

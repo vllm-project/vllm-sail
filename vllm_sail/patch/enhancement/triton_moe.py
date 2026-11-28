@@ -143,10 +143,17 @@ def invoke_fused_moe_triton_kernel(
     # `tl.aiu_load` below is a PPU Triton-fork builtin, so the block-ptr path it
     # gates must never be compiled on NVIDIA. has_device_capability() is a >=
     # test and would match sm_90+, so is_ppu() is required on top of it.
+    # PPU 1.7 is excluded as well: the V900 SDK compiler (2.3.0-483ca6) cannot
+    # select the AIU load it lowers to ("Cannot select ...
+    # VMEM_AIU_LD_TSM_KP_PREF") and aborts, so 1.7 takes the plain block-ptr
+    # tl.load, which produces bit-identical results.
+    from vllm_sail.utils.deep_gemm import is_ppu_17
+
     even_Ks = (
         B.size(2) % BLOCK_SIZE_K == 0
         and current_platform.is_ppu()
         and current_platform.has_device_capability((8, 9))
+        and not is_ppu_17()
     )
 
     # PPU MODIFICATION: end

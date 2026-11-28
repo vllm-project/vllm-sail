@@ -180,6 +180,29 @@ if current_platform.is_ppu():
     )
 
 
+def _int8_scaled_mm_azp_portable(
+    a: torch.Tensor,
+    b: torch.Tensor,
+    scale_a: torch.Tensor,
+    scale_b: torch.Tensor,
+    azp_adj: torch.Tensor,
+    azp: torch.Tensor | None,
+    out_dtype: torch.dtype,
+    bias: torch.Tensor | None,
+) -> torch.Tensor:
+    """SM90 asymmetric INT8 fallback; B is [K, N] and the correction is
+    applied before scaling."""
+    acc = torch.mm(a.float(), b.float())
+    correction = azp_adj.float().reshape(1, -1)
+    if azp is not None:
+        correction = azp.float().reshape(-1, 1) * correction
+    acc = (acc - correction) * scale_a.float().reshape(-1, 1)
+    acc = acc * scale_b.float().reshape(1, -1)
+    if bias is not None:
+        acc = acc + bias.float()
+    return acc.to(out_dtype)
+
+
 class PPUInt8ScaledMMLinearKernel(Int8ScaledMMLinearKernel):
     @classmethod
     def is_supported(
@@ -242,6 +265,23 @@ class PPUInt8ScaledMMLinearKernel(Int8ScaledMMLinearKernel):
             )
         ):
             self.use_deepgemm_int8_gemm = True
+
+        if not (
+            current_platform.is_device_capability((8, 0))
+            or current_platform.is_device_capability((8, 9))
+        ):
+            from vllm_sail.utils.deep_gemm import has_deep_gemm_api, is_ppu_17
+
+            # An installed package is not a substitute for the INT8 symbol
+            # check; legacy aliases must not select SM90.
+            self.use_deepgemm_int8_gemm = (
+                self.use_deepgemm_int8_gemm
+                and is_ppu_17()
+                and has_deep_gemm_api("int8_gemm_nt")
+            )
+            if not self.config.input_symmetric:
+                self.use_acext_int8_gemm = False
+                self.use_deepgemm_int8_gemm = False
 
         w_s_name, i_s_name, i_zp_name, azp_adj_name = self.layer_param_names[1:]
         config = self.config
@@ -356,16 +396,30 @@ class PPUInt8ScaledMMLinearKernel(Int8ScaledMMLinearKernel):
             # Currently, static is always per-tensor and dynamic is per-token
             static = i_zp is not None
             azp = None if static else x_zp
-            out = ops.cutlass_scaled_mm_azp(
-                x_q,
-                w_q,
-                scale_a=x_s,
-                scale_b=w_s,
-                out_dtype=x.dtype,
-                azp_adj=azp_adj,
-                azp=azp,
-                bias=bias,
-            )
+            if current_platform.is_ppu() and current_platform.is_device_capability(
+                (9, 0)
+            ):
+                out = _int8_scaled_mm_azp_portable(
+                    x_q,
+                    w_q.t() if self.weight_RowMajor else w_q,
+                    scale_a=x_s,
+                    scale_b=w_s,
+                    out_dtype=x.dtype,
+                    azp_adj=azp_adj,
+                    azp=azp,
+                    bias=bias,
+                )
+            else:
+                out = ops.cutlass_scaled_mm_azp(
+                    x_q,
+                    w_q,
+                    scale_a=x_s,
+                    scale_b=w_s,
+                    out_dtype=x.dtype,
+                    azp_adj=azp_adj,
+                    azp=azp,
+                    bias=bias,
+                )
         elif bias is None and self.use_deepgemm_int8_gemm and x.dtype == torch.bfloat16:
             out = torch.ops.vllm.w8a8_int8_matmul_deepgemm(
                 x_q, w_q, scale_x=x_s, scale_w=w_s, out_dtype=x.dtype
@@ -404,6 +458,21 @@ class PPUDeepGemmFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
             return False, "FP8 DeepGEMM is not supported on SM80 devices."
         if not is_deep_gemm_supported():
             return False, "DeepGEMM library is not available."
+        if not current_platform.is_device_capability((8, 9)):
+            from vllm_sail.utils.deep_gemm import has_deep_gemm_api, is_ppu_17
+
+            if not is_ppu_17() or not has_deep_gemm_api("fp8_gemm_nt"):
+                return False, "Requires a supported PPU and the FP8 DeepGEMM API."
+            # The 2.6 SM90 FP8 path only accepts K-granularity 32 or 128
+            # (csrc/apis/layout.hpp:108, csrc/apis/gemm.hpp:136-142), so the
+            # channel/tensor scales this kernel serves ([M,1]/[N,1], i.e. one
+            # scale per whole K row) are rejected by the library's entry
+            # assertion. Route them to the portable kernel instead; blockwise
+            # FP8 has its own kernel class and is unaffected.
+            return False, (
+                "PPU 1.7 DeepGEMM FP8 accepts only 32/128 K-granularity scales; "
+                "channel/tensor FP8 uses the portable kernel."
+            )
         return True, None
 
     @classmethod
@@ -464,6 +533,11 @@ class PPUDeepGemmFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
 
 
 class PPUCutlassFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
+    # No __init__ override: upstream constructs kernels as
+    # ``kernel_type(config, layer_param_names=[...])``, so an override that only
+    # accepts ``config`` raises TypeError before the layer is built. The PPU 1.7
+    # portable decision is made in apply_scaled_mm instead.
+
     @classmethod
     def is_supported(
         cls, compute_capability: int | None = None
@@ -487,10 +561,30 @@ class PPUCutlassFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
         bias: torch.Tensor | None,
         output_shape: list,
     ) -> torch.Tensor:
-        # Fused GEMM_DQ
-        output = ops.cutlass_scaled_mm(
-            A, B, out_dtype=out_dtype, scale_a=As, scale_b=Bs, bias=bias
-        )
+        if current_platform.is_ppu() and current_platform.is_device_capability((9, 0)):
+            from vllm.model_executor.layers.quantization.compressed_tensors.triton_scaled_mm import (  # noqa: E501
+                triton_scaled_mm,
+            )
+
+            # triton_scaled_mm asserts [M,1]/[N,1] (or scalar) scales and a
+            # [K, N] weight. Normalize whatever layout the quant method left
+            # behind, exactly as the DeepGEMM channelwise path does; the values
+            # are unchanged, only the shape/stride.
+            As = As.reshape(-1, 1).expand(A.shape[0], 1).contiguous()
+            Bs = Bs.reshape(-1, 1).expand(B.shape[1], 1).contiguous()
+            output = triton_scaled_mm(
+                A,
+                B,
+                out_dtype=out_dtype,
+                scale_a=As,
+                scale_b=Bs,
+                bias=bias,
+                use_td=False,
+            )
+        else:
+            output = ops.cutlass_scaled_mm(
+                A, B, out_dtype=out_dtype, scale_a=As, scale_b=Bs, bias=bias
+            )
         return output.view(*output_shape)
 
 
@@ -507,6 +601,9 @@ class PPUCutlassFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
             column_major_scales=True,
         )
         self.is_hopper = current_platform.is_device_capability(90)
+        self.use_portable = (
+            current_platform.is_ppu() and current_platform.is_device_capability((9, 0))
+        )
 
     @classmethod
     def is_supported(cls, compute_capability=None):
@@ -538,6 +635,31 @@ class PPUCutlassFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
     ) -> torch.Tensor:
         out_dtype = self.config.out_dtype
 
+        if getattr(self, "use_portable", False):
+            # Dequantization fallback with public FP32 block scales when
+            # DeepGEMM is absent. Packed UE8M0 is not an FP32 value and must
+            # not be silently converted here.
+            if As.dtype != torch.float32 or Bs.dtype != torch.float32:
+                raise RuntimeError("FP8 portable block GEMM requires FP32 scales.")
+            group = self.weight_group_shape
+            n, k = B.shape
+            group_n = n if group.row == -1 else group.row
+            group_k = k if group.col == -1 else group.col
+            expected = ((n + group_n - 1) // group_n, (k + group_k - 1) // group_k)
+            if tuple(Bs.shape) != expected or tuple(As.shape) != (
+                A.shape[0],
+                (k + 127) // 128,
+            ):
+                raise RuntimeError(
+                    "FP8 portable block GEMM scale shape mismatch."
+                )
+            a = A.float() * As.repeat_interleave(128, dim=1)[:, :k]
+            b_scales = Bs.repeat_interleave(group_n, dim=0).repeat_interleave(
+                group_k, dim=1
+            )[:n, :k]
+            b = B.float() * b_scales
+            return torch.mm(a, b.t()).to(out_dtype)
+
         return ops.cutlass_scaled_mm(
             A,
             B.T,
@@ -568,7 +690,17 @@ class PPUDeepGemmFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
         if current_platform.is_device_capability((8, 0)):
             return False, "FP8 DeepGEMM is not supported on SM80 devices."
         if not is_deep_gemm_supported():
+            from vllm_sail.utils.deep_gemm import is_ppu_17
+
+            if is_ppu_17():
+                return False, "DeepGEMM library is not available."
+            # PPU 1.0/1.5 keep the original rejection message verbatim.
             return False, "Currently, only sm89 PPU are supported."
+        if not current_platform.is_device_capability((8, 9)):
+            from vllm_sail.utils.deep_gemm import has_deep_gemm_api, is_ppu_17
+
+            if not is_ppu_17() or not has_deep_gemm_api("fp8_gemm_nt"):
+                return False, "Requires a supported PPU and the FP8 DeepGEMM API."
         return True, None
 
     @classmethod
