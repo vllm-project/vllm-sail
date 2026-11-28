@@ -83,6 +83,8 @@ def clean_environment(environment, repo, isolated):
             "VLLM_VERSION",
             "VLLM_VERSION_OVERRIDE",
             "VLLM_PPU_USE_PLA",
+            "VLLM_SAIL_CANDIDATE_UPSTREAM_COMMIT",
+            "VLLM_PPU_CANDIDATE_UPSTREAM_COMMIT",
             "VLLM_SOURCE_ROOT",
             "VLLM_USE_PRECOMPILED",
             "VLLM_USE_PRECOMPILED_RUST",
@@ -92,6 +94,15 @@ def clean_environment(environment, repo, isolated):
         }
         and not k.startswith("SETUPTOOLS_SCM_PRETEND_VERSION")
     }
+    expected_vllm = str(environment.get("EXPECTED_VLLM_COMMIT", "")).strip()
+    verified_file = Path(repo) / ".github" / "vllm-main-verified.commit"
+    if (
+        len(expected_vllm) == 40
+        and all(ch in "0123456789abcdef" for ch in expected_vllm)
+        and verified_file.is_file()
+        and expected_vllm != verified_file.read_text(encoding="utf-8").strip()
+    ):
+        env["VLLM_SAIL_CANDIDATE_UPSTREAM_COMMIT"] = expected_vllm
     env.update(
         PYTEST_DISABLE_PLUGIN_AUTOLOAD="1",
         VLLM_SAIL_USE_PLA="1",

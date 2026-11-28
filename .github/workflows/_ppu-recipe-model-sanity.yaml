@@ -30,6 +30,10 @@ on:
         description: Nightly runtime version selected by the workflow ref
         type: string
         default: ''
+      vllm_ref:
+        description: Upstream vLLM commit SHA override (blank uses .github/vllm-main-verified.commit)
+        type: string
+        default: ""
       image_tag:
         description: Allowed runtime image tag (tag only, no registry or repository prefix)
         type: string
@@ -251,6 +255,7 @@ jobs:
           PPU_CI_RUNTIME_VERSION: ${{ inputs.runtime_version }}
           PPU_CI_RUNTIME_IMAGE_TAG: ${{ inputs.image_tag }}
           PPU_CI_RUNTIME_IMAGE_DIGEST: ${{ inputs.image_digest }}
+          VLLM_REF_OVERRIDE: ${{ inputs.vllm_ref }}
           MODEL_ID: ${{ matrix.model.model_id }}
           RECIPE_PATH: ${{ matrix.model.recipe_path }}
           POLICY_PATH: ${{ matrix.model.policy_path }}
@@ -261,6 +266,7 @@ jobs:
           umask 077
           python3 -I - >"${PPU_CI_ARTIFACT_DIR}/launcher.log" 2>&1 <<'PY'
           import os
+          from pathlib import Path
 
           trusted = os.environ.get("TRUSTED_CI_DIR") or os.environ["PPU_CI_SOURCE_DIR"]
           wrapper = os.path.join(trusted, "scripts", "ci", "ppu_runtime_container.sh")
@@ -271,8 +277,19 @@ jobs:
               for key, value in os.environ.items()
               if not key.startswith(blocked_prefixes)
               and (not key.startswith("GITHUB_") or key in keep_github)
-              and key != "TRUSTED_CI_DIR"
+              and key not in {"TRUSTED_CI_DIR", "VLLM_REF_OVERRIDE"}
           }
+          override = os.environ.get("VLLM_REF_OVERRIDE", "").strip()
+          if override:
+              verified = (
+                  Path(os.environ["PPU_CI_SOURCE_DIR"])
+                  .joinpath(".github", "vllm-main-verified.commit")
+                  .read_text(encoding="utf-8")
+                  .strip()
+              )
+              child["PPU_CI_EXPECTED_VLLM_COMMIT"] = override
+              if override != verified:
+                  child["PPU_CI_CANDIDATE_UPSTREAM_COMMIT"] = override
           os.execvpe("bash", ["bash", wrapper, "recipe-sanity"], child)
           PY
 

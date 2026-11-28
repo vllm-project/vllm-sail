@@ -78,6 +78,7 @@ def test_defaults_and_canonical_snapshot() -> None:
     expected["VLLM_GDN_DECODE_KERNEL"] = "auto"
     expected["VLLM_SAIL_FP8_LOAD_POLICY"] = None
     expected["VLLM_SAIL_STEP5_DSA_PREFILL_BACKEND"] = "flashinfer"
+    expected["VLLM_SAIL_CANDIDATE_UPSTREAM_COMMIT"] = None
     assert envs.snapshot() == expected
     assert set(envs.environment_variables) == set(expected)
     for suffix in (*BOOL_DEFAULTS, *INT_DEFAULTS, *BACKENDS):
@@ -448,6 +449,37 @@ def test_qsa_kernel_sail_name_wins_over_ppu_alias(monkeypatch):
     monkeypatch.setenv("VLLM_PPU_QSA_KERNEL", "triton")
     assert envs.VLLM_SAIL_QSA_KERNEL == "cuda"
     assert envs.VLLM_PPU_QSA_KERNEL == "cuda"
+
+
+def test_candidate_upstream_commit_requires_exact_40_hex_sha(monkeypatch):
+    sha_a = "8b10bda57ceab3a741d2fb3718af48cef691023e"
+    sha_b = "5df63a7203cdb9328d824a27b682e77c7b9928be"
+    assert envs.VLLM_SAIL_CANDIDATE_UPSTREAM_COMMIT is None
+    assert not envs.is_set("VLLM_SAIL_CANDIDATE_UPSTREAM_COMMIT")
+    monkeypatch.setenv("VLLM_PPU_CANDIDATE_UPSTREAM_COMMIT", f"  {sha_a}  ")
+    assert envs.VLLM_SAIL_CANDIDATE_UPSTREAM_COMMIT == sha_a
+    monkeypatch.setenv("VLLM_SAIL_CANDIDATE_UPSTREAM_COMMIT", sha_b)
+    assert envs.VLLM_PPU_CANDIDATE_UPSTREAM_COMMIT == sha_b
+    for invalid in (
+        "",
+        " ",
+        "\t\n",
+        "*",
+        "true",
+        "1",
+        "main",
+        "8b10bda",
+        "A" * 40,
+        "g" * 40,
+    ):
+        monkeypatch.setenv("VLLM_SAIL_CANDIDATE_UPSTREAM_COMMIT", invalid)
+        with pytest.raises(ValueError, match="VLLM_SAIL_CANDIDATE_UPSTREAM_COMMIT"):
+            _ = envs.VLLM_SAIL_CANDIDATE_UPSTREAM_COMMIT
+    monkeypatch.delenv("VLLM_SAIL_CANDIDATE_UPSTREAM_COMMIT")
+    for empty_alias in ("", "   "):
+        monkeypatch.setenv("VLLM_PPU_CANDIDATE_UPSTREAM_COMMIT", empty_alias)
+        with pytest.raises(ValueError, match="VLLM_PPU_CANDIDATE_UPSTREAM_COMMIT"):
+            _ = envs.VLLM_SAIL_CANDIDATE_UPSTREAM_COMMIT
 
 
 def test_env_specs_cover_all_variables_and_match_defaults() -> None:

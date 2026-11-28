@@ -39,7 +39,10 @@ def compat(monkeypatch: pytest.MonkeyPatch) -> Iterator[types.ModuleType]:
 
     monkeypatch.delenv("VLLM_SAIL_STRICT_COMPAT", raising=False)
     monkeypatch.delenv("VLLM_PPU_STRICT_COMPAT", raising=False)
+    monkeypatch.delenv("VLLM_SAIL_CANDIDATE_UPSTREAM_COMMIT", raising=False)
+    monkeypatch.delenv("VLLM_PPU_CANDIDATE_UPSTREAM_COMMIT", raising=False)
     monkeypatch.delenv("VLLM_VERSION", raising=False)
+    monkeypatch.delenv("VLLM_VERSION_OVERRIDE", raising=False)
     monkeypatch.delitem(sys.modules, "vllm_sail.compat", raising=False)
     module = importlib.import_module("vllm_sail.compat")
 
@@ -231,6 +234,88 @@ def test_strict_env_var_enables_fail_closed_check(
         compat.check_vllm_compatibility(force=True)
     # Explicit strict=False still overrides the env var.
     compat.check_vllm_compatibility(force=True, strict=False)
+
+
+def test_candidate_upstream_commit_allows_exact_match_without_touching_manifest(
+    compat, monkeypatch, caplog
+):
+    candidate = "e29c741da8d11e2ae7ba381bb78b6f703812cae1"
+    monkeypatch.delenv("VLLM_VERSION", raising=False)
+    monkeypatch.setattr(compat, "_upstream_ref", lambda: PIN)
+    monkeypatch.setenv("VLLM_SAIL_CANDIDATE_UPSTREAM_COMMIT", candidate)
+    monkeypatch.setattr(
+        compat,
+        "installed_vllm_version",
+        lambda: f"0.33.0rc1.dev4+g{candidate}.d20261122.empty",
+    )
+    with caplog.at_level(logging.WARNING):
+        compat.check_vllm_compatibility(force=True)
+    assert compat._checked is True
+    assert compat._last_matched is True
+    assert "candidate mode" in caplog.text
+    assert candidate in caplog.text
+    assert PIN in caplog.text
+
+
+@pytest.mark.parametrize(
+    ("env_val", "installed", "err_match"),
+    [
+        ("", f"0.33.0.dev1+g{PIN}.empty", "40-character lowercase"),
+        ("   ", f"0.33.0.dev1+g{PIN}.empty", "40-character lowercase"),
+        ("*", f"0.33.0.dev1+g{'a' * 40}.empty", "40-character lowercase"),
+        ("true", f"0.33.0.dev1+g{'a' * 40}.empty", "40-character lowercase"),
+        ("8b10bda", "0.33.0.dev1+g8b10bda.empty", "40-character lowercase"),
+        (
+            "a" * 40,
+            f"0.33.0.dev1+g{'b' * 40}.empty",
+            "candidate mode requires exact vLLM commit",
+        ),
+        ("a" * 40, "0.33.0", "candidate mode requires exact vLLM commit"),
+    ],
+)
+def test_candidate_upstream_commit_rejects_wildcards_and_mismatches(
+    compat, monkeypatch, env_val, installed, err_match
+):
+    monkeypatch.delenv("VLLM_VERSION", raising=False)
+    monkeypatch.delenv("VLLM_VERSION_OVERRIDE", raising=False)
+    monkeypatch.setattr(compat, "_upstream_ref", lambda: PIN)
+    monkeypatch.setenv("VLLM_SAIL_CANDIDATE_UPSTREAM_COMMIT", env_val)
+    monkeypatch.setattr(compat, "installed_vllm_version", lambda: installed)
+    with pytest.raises(RuntimeError, match=err_match):
+        compat.check_vllm_compatibility(force=True)
+    assert compat._checked is False
+
+
+def test_candidate_and_pin_reject_vllm_version_and_version_override(
+    compat, monkeypatch
+):
+    candidate = "e29c741da8d11e2ae7ba381bb78b6f703812cae1"
+    other = "5df63a7203cdb9328d824a27b682e77c7b9928be"
+    monkeypatch.setattr(compat, "_upstream_ref", lambda: PIN)
+    monkeypatch.setenv("VLLM_SAIL_CANDIDATE_UPSTREAM_COMMIT", candidate)
+
+    # 1. Numeric VLLM_VERSION_OVERRIDE on an otherwise matching SCM build fails closed.
+    monkeypatch.delenv("VLLM_VERSION", raising=False)
+    monkeypatch.setenv("VLLM_VERSION_OVERRIDE", "0.32.0")
+    monkeypatch.setattr(
+        compat,
+        "installed_vllm_version",
+        lambda: f"0.33.0rc1.dev4+g{candidate}.empty",
+    )
+    with pytest.raises(RuntimeError, match="candidate mode requires exact vLLM commit"):
+        compat.check_vllm_compatibility(force=True)
+    assert compat._checked is False
+
+    # 2. SCM-shaped VLLM_VERSION cannot mask an actual installed commit mismatch.
+    monkeypatch.delenv("VLLM_VERSION_OVERRIDE", raising=False)
+    monkeypatch.setenv("VLLM_VERSION", f"0.33.0rc1.dev4+g{candidate}.empty")
+    monkeypatch.setattr(
+        compat,
+        "installed_vllm_version",
+        lambda: f"0.33.0rc1.dev4+g{other}.empty",
+    )
+    with pytest.raises(RuntimeError, match="candidate mode requires exact vLLM commit"):
+        compat.check_vllm_compatibility(force=True)
 
 
 @pytest.mark.parametrize("override", ["0.33.0", f"0.33.0.dev1+g{PIN}"])

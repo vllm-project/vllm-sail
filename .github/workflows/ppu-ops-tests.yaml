@@ -109,7 +109,13 @@ jobs:
           persist-credentials: false
           fetch-depth: 0
       - name: Build qualification wheels for this run
-        run: bash scripts/ci/build_ppu_wheels.sh
+        shell: bash
+        run: |
+          verified="$(tr -d '[:space:]' < .github/vllm-main-verified.commit)"
+          if [ -n "${VLLM_REF:-}" ] && [ "${VLLM_REF}" != "${verified}" ]; then
+            export VLLM_SAIL_CANDIDATE_UPSTREAM_COMMIT="${VLLM_REF}"
+          fi
+          bash scripts/ci/build_ppu_wheels.sh
       - uses: actions/upload-artifact@v4
         with:
           name: ppu-wheels-${{ github.run_id }}

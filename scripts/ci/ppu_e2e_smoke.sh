@@ -56,9 +56,16 @@ EXPECTED_VLLM_COMMIT="${EXPECTED_VLLM_COMMIT:?EXPECTED_VLLM_COMMIT is required}"
 EXPECTED_SAIL_COMMIT="${EXPECTED_SAIL_COMMIT:?EXPECTED_SAIL_COMMIT is required}"
 python "${ROOT_DIR}/scripts/ci/ppu_wheel_manifest.py" verify "${WHEELS_DIR}"
 if [[ "${REQUIRE_PR_ARTIFACT}" == "true" ]]; then
-    python "${ROOT_DIR}/scripts/ci/ppu_wheel_manifest.py" verify "${WHEELS_DIR}" \
+    if ! python "${ROOT_DIR}/scripts/ci/ppu_wheel_manifest.py" verify "${WHEELS_DIR}" \
         --vllm-commit "${EXPECTED_VLLM_COMMIT}" \
-        --sail-commit "${EXPECTED_SAIL_COMMIT}"
+        --sail-commit "${EXPECTED_SAIL_COMMIT}"; then
+        echo "PPU E2E SMOKE UNVERIFIED: wheel manifest does not match required PR/upstream commits" >&2
+        exit 1
+    fi
+elif ! python "${ROOT_DIR}/scripts/ci/ppu_wheel_manifest.py" verify "${WHEELS_DIR}" \
+    --vllm-commit "${EXPECTED_VLLM_COMMIT}"; then
+    echo "PPU E2E SMOKE UNVERIFIED: wheel manifest does not match expected vLLM commit ${EXPECTED_VLLM_COMMIT}" >&2
+    exit 1
 fi
 # Match the vLLM wheel first, excluding the vllm_sail wheel (underscore prefix).
 mapfile -t vllm_wheels < <(

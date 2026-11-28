@@ -562,16 +562,27 @@ def extract_native(directory: Path, output: Path) -> dict:
 def reuse_native(
     directory: Path,
     output: Path,
-    wheel_output: Path,
+    wheel_output: Path | None,
     *,
-    vllm_commit: str,
+    vllm_commit: str | None = None,
     sail_commit: str | None,
     sail_source: Path,
+    sail_only: bool = False,
     vllm_fingerprint: str | None = None,
     **settings: str,
 ) -> None:
-    manifest = verify(directory, vllm_commit=vllm_commit, sail_commit=sail_commit)
-    if vllm_fingerprint is not None and "vllm_build_fingerprint" in manifest:
+    if not sail_only and vllm_commit is None:
+        raise ValueError("vllm_commit is required unless sail_only is enabled")
+    manifest = verify(
+        directory,
+        vllm_commit=None if sail_only else vllm_commit,
+        sail_commit=sail_commit,
+    )
+    if (
+        not sail_only
+        and vllm_fingerprint is not None
+        and "vllm_build_fingerprint" in manifest
+    ):
         _require_vllm_fingerprint(manifest, vllm_fingerprint)
     native = _require_native(manifest)
     if native["fingerprint"] not in _native_fingerprints(
@@ -580,6 +591,10 @@ def reuse_native(
         raise ValueError("native build fingerprint does not match")
 
     _extract_native(directory / manifest["wheels"]["vllm-sail"]["file"], output)
+    if sail_only:
+        return
+    if wheel_output is None:
+        raise ValueError("wheel_output is required unless sail_only is enabled")
     _copy_vllm_wheel(directory, manifest, wheel_output)
 
 
@@ -662,6 +677,7 @@ def main() -> None:
     )
     parser.add_argument("--output", type=Path)
     parser.add_argument("--wheel-output", type=Path)
+    parser.add_argument("--sail-only", action="store_true")
     args = parser.parse_args()
     settings = {
         "build_image": args.build_image,
@@ -693,13 +709,15 @@ def main() -> None:
     elif args.command == "reuse-native":
         if (
             args.output is None
-            or args.wheel_output is None
             or args.sail_source is None
-            or args.vllm_commit is None
+            or (
+                not args.sail_only
+                and (args.wheel_output is None or args.vllm_commit is None)
+            )
         ):
             parser.error(
-                "reuse-native requires --output, --wheel-output, "
-                "--sail-source and --vllm-commit"
+                "reuse-native requires --output, --sail-source, and "
+                "(--sail-only or both --wheel-output and --vllm-commit)"
             )
         try:
             reuse_native(
@@ -709,6 +727,7 @@ def main() -> None:
                 vllm_commit=args.vllm_commit,
                 sail_commit=args.sail_commit,
                 sail_source=args.sail_source,
+                sail_only=args.sail_only,
                 vllm_fingerprint=args.vllm_fingerprint or None,
                 **settings,
             )

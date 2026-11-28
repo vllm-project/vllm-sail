@@ -19,13 +19,16 @@ EXPECTED_SAIL_COMMIT="${EXPECTED_SAIL_COMMIT:?EXPECTED_SAIL_COMMIT is required}"
 : "${VLLM_SOURCE_ROOT:?VLLM_SOURCE_ROOT is required}"
 python "${ROOT_DIR}/scripts/ci/ppu_wheel_manifest.py" verify "${WHEELS_DIR}"
 if [[ "${REQUIRE_PR_ARTIFACT}" == "true" ]]; then
-    python "${ROOT_DIR}/scripts/ci/ppu_wheel_manifest.py" verify "${WHEELS_DIR}" \
+    if ! python "${ROOT_DIR}/scripts/ci/ppu_wheel_manifest.py" verify "${WHEELS_DIR}" \
         --vllm-commit "${EXPECTED_VLLM_COMMIT}" \
-        --sail-commit "${EXPECTED_SAIL_COMMIT}"
+        --sail-commit "${EXPECTED_SAIL_COMMIT}"; then
+        echo "PPU PIN UT UNVERIFIED: wheel manifest does not match required PR/upstream commits" >&2
+        exit 1
+    fi
 elif ! python "${ROOT_DIR}/scripts/ci/ppu_wheel_manifest.py" verify "${WHEELS_DIR}" \
     --vllm-commit "${EXPECTED_VLLM_COMMIT}"; then
-    echo "PPU PIN UT SKIP: build does not contain the current main-verified vLLM pin"
-    exit 0
+    echo "PPU PIN UT UNVERIFIED: wheel manifest does not match expected vLLM commit ${EXPECTED_VLLM_COMMIT}" >&2
+    exit 1
 fi
 
 # Copy the read-only wheel mount outside the checkout so packaging UT does not
@@ -73,4 +76,19 @@ python -m pytest tests/ut -q -rs \
     --require-upstream-source \
     --junitxml="${UT_RESULTS_DIR}/pin-ut.xml" \
     2>&1 | tee "${UT_RESULTS_DIR}/pin-ut.log"
+python - "${UT_RESULTS_DIR}/pin-ut.xml" <<'PY'
+import sys
+import xml.etree.ElementTree as ET
+
+root = ET.parse(sys.argv[1]).getroot()
+suites = [root] if root.tag == "testsuite" else list(root.findall(".//testsuite"))
+tests = sum(int(s.attrib.get("tests", "0")) for s in suites)
+skipped = sum(int(s.attrib.get("skipped", "0")) for s in suites)
+if tests <= 0 or tests - skipped <= 0:
+    print(
+        f"PPU PIN UT UNVERIFIED: zero executed tests (tests={tests}, skipped={skipped})",
+        file=sys.stderr,
+    )
+    raise SystemExit(1)
+PY
 echo "PPU PIN UT PASS"

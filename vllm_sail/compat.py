@@ -40,6 +40,14 @@ def _is_commit_sha(ref: str) -> bool:
     return bool(re.fullmatch(r"[0-9a-f]{40}", ref))
 
 
+def _candidate_upstream_commit() -> str | None:
+    """Read an explicit 40-hex candidate upstream commit override, if set."""
+    try:
+        return envs.VLLM_SAIL_CANDIDATE_UPSTREAM_COMMIT
+    except ValueError as exc:
+        raise RuntimeError(str(exc)) from exc
+
+
 def installed_vllm_version() -> str:
     """Read the version reported by the installed vLLM package."""
     try:
@@ -59,14 +67,33 @@ def _release_line(version: str) -> str | None:
     return f"{major.lstrip('0') or '0'}.{minor.lstrip('0') or '0'}"
 
 
+def _installed_vllm_commit(version: str) -> str | None:
+    """Extract the verified 40-hex commit from ``version`` or ``vllm._version``."""
+    match = re.search(r"(?:\+|\.)g([0-9a-f]{40})(?=\.|$)", version)
+    if match is not None:
+        return match.group(1)
+    if re.search(r"(?:\+|\.)g[0-9a-f]+", version) is not None:
+        return None
+    for mod_name in ("vllm._version", "vllm.version"):
+        try:
+            mod = __import__(mod_name, fromlist=["__commit_id__"])
+            raw = getattr(mod, "__commit_id__", None)
+        except Exception:
+            continue
+        if isinstance(raw, str):
+            cid = re.fullmatch(r"g?([0-9a-f]{40})(?:\.d\d+)?", raw.strip())
+            if cid is not None:
+                return cid.group(1)
+    return None
+
+
 def _mismatch_reason(version: str, ref: str) -> str | None:
     """Return a human-readable mismatch message, or ``None`` when compatible."""
     if _is_commit_sha(ref):
         # Main and release tags may live on different branches. SCM's numeric
         # prefix then describes an older tag, while its full hash still names
         # the source precisely. An abbreviation cannot establish this identity.
-        commit = re.search(r"(?:\+|\.)g([0-9a-f]{40})(?=\.|$)", version)
-        if commit is not None and commit.group(1) == ref:
+        if _installed_vllm_commit(version) == ref:
             return None
         return (
             f"vllm-sail {_plugin_version()} was built against verified vLLM commit "
@@ -101,14 +128,21 @@ def check_vllm_compatibility(
     Called once from :func:`vllm_sail.register_out_of_tree`. By default, a
     mismatch logs a warning and allows startup to proceed; set
     ``VLLM_SAIL_STRICT_COMPAT=1`` or pass ``strict=True`` (used in CI) to raise
-    :class:`RuntimeError` instead.
+    :class:`RuntimeError` instead. When ``VLLM_SAIL_CANDIDATE_UPSTREAM_COMMIT``
+    is set, candidate verification always fails closed against that exact 40-hex
+    commit SHA without mutating the packaged manifest.
 
     Raises:
-        RuntimeError: Strict mode is enabled and the installed vLLM build does
-            not match the manifest's ``upstream_ref``.
+        RuntimeError: Strict or candidate mode is enabled and the installed vLLM
+            build does not match the required upstream ref.
     """
     global _checked, _last_matched
-    effective_strict = envs.VLLM_SAIL_STRICT_COMPAT if strict is None else strict
+    candidate_active = envs.is_set("VLLM_SAIL_CANDIDATE_UPSTREAM_COMMIT")
+    effective_strict = (
+        True
+        if candidate_active
+        else (envs.VLLM_SAIL_STRICT_COMPAT if strict is None else strict)
+    )
     if _checked and not force and (_last_matched or not effective_strict):
         return
 
@@ -117,6 +151,38 @@ def check_vllm_compatibility(
     _last_matched = False
 
     ref = _upstream_ref()
+    candidate = _candidate_upstream_commit()
+    if candidate is not None:
+        raw_version = installed_vllm_version()
+        has_version_override = (
+            os.getenv("VLLM_VERSION") is not None
+            or os.getenv("VLLM_VERSION_OVERRIDE") is not None
+        )
+        commit = None if has_version_override else _installed_vllm_commit(raw_version)
+        if commit != candidate:
+            shown_version = (
+                os.getenv("VLLM_VERSION")
+                or os.getenv("VLLM_VERSION_OVERRIDE")
+                or raw_version
+            )
+            raise RuntimeError(
+                f"vllm-sail {_plugin_version()} candidate mode requires exact "
+                f"vLLM commit {candidate}, but the installed version is "
+                f"{shown_version!r} (VLLM_VERSION / VLLM_VERSION_OVERRIDE must "
+                "be unset). Build that exact candidate source with the full "
+                "SCM commit hash and unset VLLM_VERSION and "
+                "VLLM_VERSION_OVERRIDE."
+            )
+        _checked = True
+        _last_matched = True
+        logger.warning(
+            "vllm-sail %s is running in candidate mode against upstream vLLM "
+            "commit %s (verified manifest ref remains %s).",
+            _plugin_version(),
+            candidate,
+            ref,
+        )
+        return
     # Only release-line checks accept a developer-supplied version. Commit
     # checks must read the identity recorded in the installed build.
     override = (

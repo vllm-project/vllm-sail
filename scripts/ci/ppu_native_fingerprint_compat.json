@@ -1,14 +1,14 @@
 {
   ".github/workflows/_ppu-build.yaml": {
-    "current": "b618d99448fd26830f1609495b49a0819f20823f3f8ff7f92db1fc226dedb9b3",
-    "previous": "cce4c5efc3299d688dca53eb43c2ddbd244704130d47ac1959f081329da1292e"
+    "current": "9da205decb9df71a7e47502b8e0699238cbeefd928d2bbcc8e915fe9e5c610fa",
+    "previous": "b618d99448fd26830f1609495b49a0819f20823f3f8ff7f92db1fc226dedb9b3"
   },
   "scripts/ci/build_ppu_wheels.sh": {
-    "current": "6e48c98567d899cd9662cd061e1d42269c7745b30c991ac3fa3ddec645518602",
-    "previous": "39a9a9aa6688ca65d1f9499b8324301f3a6de45b98195edadfc977f4ae86aead"
+    "current": "d2eb6c5075a6ca4af75c0d2449ffe769e46003d5bbad4251912ff3ab38d5fea0",
+    "previous": "6e48c98567d899cd9662cd061e1d42269c7745b30c991ac3fa3ddec645518602"
   },
   "scripts/ci/ppu_wheel_manifest.py": {
-    "current": "9cf6a2c5bc78df6db442fcc8f9580dc0085e6de1e72f6264261e497ba7f40494",
-    "previous": "b4fb93e09a6178db328c44cde4333a1cc8abeb8d3662b869dae262ca7cde6069"
+    "current": "6c9099fe7ebb52aca0636cc1cd518e39b0adadf87d481cf52458e92ac67ab2c3",
+    "previous": "9cf6a2c5bc78df6db442fcc8f9580dc0085e6de1e72f6264261e497ba7f40494"
   }
 }

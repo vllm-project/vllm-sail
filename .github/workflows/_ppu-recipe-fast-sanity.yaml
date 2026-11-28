@@ -29,6 +29,10 @@ on:
         description: Unix epoch when wheels became ready for Fast Sanity queueing
         type: string
         default: ""
+      vllm_ref:
+        description: Upstream vLLM commit SHA override (blank uses .github/vllm-main-verified.commit)
+        type: string
+        default: ""
 
 permissions:
   contents: read
@@ -189,6 +193,7 @@ jobs:
           PPU_CI_DEVICE_COUNT: ${{ matrix.model.ppu_count }}
           PPU_CI_REQUIRE_PR_ARTIFACT: ${{ inputs.pr_mode }}
           PPU_CI_WHEEL_SOURCE_SHA: ${{ inputs.wheel_source_sha || inputs.pr_head_sha || github.sha }}
+          VLLM_REF_OVERRIDE: ${{ inputs.vllm_ref }}
           MODEL_ID: ${{ matrix.model.model_id }}
           RECIPE_PATH: ${{ matrix.model.recipe_path }}
           POLICY_PATH: ${{ matrix.model.policy_path }}
@@ -196,6 +201,13 @@ jobs:
           PPU_CI_QUEUE_S: ${{ steps.runtime.outputs.queue_s }}
         run: |
           umask 077
+          if [[ -n "${VLLM_REF_OVERRIDE:-}" ]]; then
+            verified="$(tr -d '[:space:]' < "${PPU_CI_SOURCE_DIR}/.github/vllm-main-verified.commit")"
+            export PPU_CI_EXPECTED_VLLM_COMMIT="${VLLM_REF_OVERRIDE}"
+            if [[ "${VLLM_REF_OVERRIDE}" != "${verified}" ]]; then
+              export PPU_CI_CANDIDATE_UPSTREAM_COMMIT="${VLLM_REF_OVERRIDE}"
+            fi
+          fi
           bash "${PPU_CI_SOURCE_DIR}/scripts/ci/ppu_runtime_container.sh" recipe-sanity \
             >"${PPU_CI_ARTIFACT_DIR}/launcher.log" 2>&1
 

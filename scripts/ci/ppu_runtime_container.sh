@@ -36,6 +36,17 @@ git -C "${source_dir}" rev-parse --is-inside-work-tree >/dev/null
 wheels_dir=""
 expected_vllm_commit=""
 expected_sail_commit=""
+candidate_vllm_commit="${PPU_CI_CANDIDATE_UPSTREAM_COMMIT:-}"
+if [[ -n "${candidate_vllm_commit}" ]]; then
+    [[ "${candidate_vllm_commit}" =~ ^[0-9a-f]{40}$ ]] || {
+        echo "PPU_CI_CANDIDATE_UPSTREAM_COMMIT must be an immutable SHA-1 value" >&2
+        exit 2
+    }
+    if [[ -n "${PPU_CI_EXPECTED_VLLM_COMMIT:-}" && "${PPU_CI_EXPECTED_VLLM_COMMIT}" != "${candidate_vllm_commit}" ]]; then
+        echo "PPU_CI_EXPECTED_VLLM_COMMIT must match PPU_CI_CANDIDATE_UPSTREAM_COMMIT" >&2
+        exit 2
+    fi
+fi
 if [[ "${skip_wheel_install}" == "true" ]]; then
     [[ "${mode}" == "recipe-sanity" || "${mode}" == "model-accuracy" ]] || {
         echo "PPU_CI_SKIP_WHEEL_INSTALL is only supported for recipe-sanity and model-accuracy" >&2
@@ -49,6 +60,10 @@ if [[ "${skip_wheel_install}" == "true" ]]; then
         echo "PPU_CI_WHEELS_DIR must be unset when PPU_CI_SKIP_WHEEL_INSTALL is true" >&2
         exit 2
     }
+    [[ -z "${candidate_vllm_commit}" && -z "${PPU_CI_EXPECTED_VLLM_COMMIT:-}" ]] || {
+        echo "PPU_CI_CANDIDATE_UPSTREAM_COMMIT and PPU_CI_EXPECTED_VLLM_COMMIT are not allowed when PPU_CI_SKIP_WHEEL_INSTALL is true" >&2
+        exit 2
+    }
     [[ "${PPU_CI_SOURCE_SHA}" =~ ^[0-9a-f]{40}$ ]] || {
         echo "PPU CI expected commits must be immutable SHA-1 values" >&2
         exit 2
@@ -57,9 +72,10 @@ else
     : "${PPU_CI_WHEELS_DIR:?PPU_CI_WHEELS_DIR is required}"
     wheels_dir=$(realpath "${PPU_CI_WHEELS_DIR}")
     [[ -d "${wheels_dir}" ]] || { echo "PPU CI wheel directory is missing" >&2; exit 2; }
-    expected_vllm_commit=$(tr -d '[:space:]' < "${source_dir}/.github/vllm-main-verified.commit")
+    verified_vllm_commit=$(tr -d '[:space:]' < "${source_dir}/.github/vllm-main-verified.commit")
+    expected_vllm_commit="${PPU_CI_EXPECTED_VLLM_COMMIT:-${candidate_vllm_commit:-${verified_vllm_commit}}}"
     expected_sail_commit="${PPU_CI_WHEEL_SOURCE_SHA:-${PPU_CI_SOURCE_SHA}}"
-    for commit in "${expected_vllm_commit}" "${expected_sail_commit}"; do
+    for commit in "${verified_vllm_commit}" "${expected_vllm_commit}" "${expected_sail_commit}"; do
         [[ "${commit}" =~ ^[0-9a-f]{40}$ ]] || {
             echo "PPU CI expected commits must be immutable SHA-1 values" >&2
             exit 2
@@ -166,6 +182,9 @@ if [[ "${skip_wheel_install}" == "false" ]]; then
         --env EXPECTED_VLLM_COMMIT="${expected_vllm_commit}"
         --env EXPECTED_SAIL_COMMIT="${expected_sail_commit}"
     )
+    if [[ -n "${candidate_vllm_commit}" ]]; then
+        create+=(--env VLLM_SAIL_CANDIDATE_UPSTREAM_COMMIT="${candidate_vllm_commit}")
+    fi
 fi
 create+=("${device_args[@]}")
 

@@ -23,6 +23,10 @@ on:
         description: Look for verified native donors before building a PR
         type: boolean
         default: false
+      diagnostics_mode:
+        description: Diagnostics mode (blank retains full logs; public redacts console and artifacts)
+        type: string
+        default: ""
     secrets:
       ci_registry_username:
         required: false
@@ -129,6 +133,12 @@ jobs:
               [ -n "${section}" ] || continue
               git config --${scope} --unset-all "${section}.insteadOf" 2>/dev/null || true
             done < <(git config --${scope} --get-regexp '^url\..*\.insteadof$' 2>/dev/null | awk '$2 ~ /github\.com/ {sub(/\.insteadof$/, "", $1); print $1}')
+          done
+          for scope in system global; do
+            if git config --${scope} --get-regexp '^url\..*\.insteadof$' 2>/dev/null | awk '$2 ~ /github\.com/ {found=1} END {exit !found}'; then
+              echo "::error::github.com insteadOf rewrite still active in ${scope} git config"
+              exit 1
+            fi
           done
 
       - name: Require disabled cache access
@@ -253,22 +263,30 @@ jobs:
           SOURCE_1: ${{ steps.donor-1.outcome == 'success' && steps.donors.outputs.source_1 || '' }}
           SOURCE_2: ${{ steps.donor-2.outcome == 'success' && steps.donors.outputs.source_2 || '' }}
           SOURCE_3: ${{ steps.donor-3.outcome == 'success' && steps.donors.outputs.source_3 || '' }}
+          VLLM_SAIL_SANITIZE_PUBLIC_BUILD: ${{ inputs.diagnostics_mode == 'public' && '1' || '0' }}
           SOURCE_UPSTREAM: ${{ steps.donor-upstream.outcome == 'success' && steps.donors.outputs.source_upstream || '' }}
           VLLM_SAIL_BUILD_IMAGE_ID: ${{ steps.build-image-id.outputs.image_id }}
         run: |
-          set -euo pipefail
+          set -eu
+          verified="$(tr -d '[:space:]' < .github/vllm-main-verified.commit)"
+          if [ -n "${VLLM_REF:-}" ] && [ "${VLLM_REF}" != "${verified}" ]; then
+            export VLLM_SAIL_CANDIDATE_UPSTREAM_COMMIT="${VLLM_REF}"
+          fi
           slot=0
-          for source in "$SOURCE_1" "$SOURCE_2" "$SOURCE_3"; do
+          for source in "${SOURCE_1:-}" "${SOURCE_2:-}" "${SOURCE_3:-}"; do
             slot=$((slot + 1))
-            if [[ "$source" =~ ^[0-9a-f]{40}$ ]]; then
+            if [ -n "${source}" ] && printf '%s' "${source}" | grep -Eq '^[0-9a-f]{40}$'; then
+              mkdir -p "${VLLM_SAIL_NATIVE_REUSE_ROOT}"
               printf '%s\n' "$source" > "$VLLM_SAIL_NATIVE_REUSE_ROOT/$slot.source"
             fi
           done
-          if [[ "$SOURCE_UPSTREAM" =~ ^[0-9a-f]{40}$ ]]; then
-            printf '%s\n' "$SOURCE_UPSTREAM" > "$VLLM_SAIL_NATIVE_REUSE_ROOT/upstream.source"
+          source="${SOURCE_UPSTREAM:-}"
+          if printf '%s' "$source" | grep -Eq '^[0-9a-f]{40}$'; then
+            mkdir -p "${VLLM_SAIL_NATIVE_REUSE_ROOT}"
+            printf '%s\n' "$source" > "$VLLM_SAIL_NATIVE_REUSE_ROOT/upstream.source"
           fi
           # Older checkouts still understand the single-donor input.
-          if [[ -f "$VLLM_SAIL_NATIVE_REUSE_ROOT/1.source" ]]; then
+          if [ -n "${VLLM_SAIL_NATIVE_REUSE_ROOT:-}" ] && [ -f "$VLLM_SAIL_NATIVE_REUSE_ROOT/1.source" ]; then
             export VLLM_SAIL_NATIVE_REUSE_DIR="$VLLM_SAIL_NATIVE_REUSE_ROOT/1"
           fi
           bash scripts/ci/build_ppu_wheels.sh
@@ -288,8 +306,28 @@ jobs:
         if: success()
         run: printf 'ready_epoch=%s\n' "$(date +%s)" >> "$GITHUB_OUTPUT"
 
+      - name: Sanitize public build diagnostics
+        id: sanitize_diagnostics
+        if: always() && inputs.diagnostics_mode == 'public'
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf artifacts/logs
+          raw_tmp="$(mktemp "${RUNNER_TEMP:-/tmp}/raw-build-manifest.XXXXXX")"
+          if [ -f artifacts/build-manifest.txt ]; then
+            mv artifacts/build-manifest.txt "${raw_tmp}"
+          else
+            : > "${raw_tmp}"
+          fi
+          rm -f artifacts/build-manifest.txt
+          python_bin="$(command -v python3 || command -v python)"
+          "${python_bin}" scripts/ci/ppu_upstream_post_merge.py sanitize-build-manifest \
+            --input "${raw_tmp}" \
+            --output artifacts/build-manifest.txt
+          rm -f "${raw_tmp}"
+
       - name: Upload build diagnostics
-        if: always()
+        if: always() && inputs.diagnostics_mode != 'public'
         uses: actions/upload-artifact@v4
         with:
           name: ppu-build-diagnostics-${{ github.run_id }}
@@ -297,5 +335,15 @@ jobs:
           path: |
             artifacts/logs/**
             artifacts/build-manifest.txt
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Upload sanitized public build diagnostics
+        if: always() && inputs.diagnostics_mode == 'public' && steps.sanitize_diagnostics.outcome == 'success'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ppu-build-diagnostics-${{ github.run_id }}
+          overwrite: true
+          path: artifacts/build-manifest.txt
           if-no-files-found: warn
           retention-days: 14

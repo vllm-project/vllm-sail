@@ -45,6 +45,8 @@ def _format_values(spec: envs.EnvSpec) -> str:
         return "positive integer"
     if spec.kind == "int":
         return "integer"
+    if spec.kind == "sha1_commit":
+        return "40-hex commit SHA"
     return "path" if spec.name == "PPU_SDK" else "string"
 
 

@@ -25,6 +25,21 @@ MANIFEST="${ARTIFACT_DIR}/build-manifest.txt"
 
 VLLM_REPOSITORY="${VLLM_REPOSITORY:-https://github.com/vllm-project/vllm.git}"
 VLLM_REF="${VLLM_REF:-$(tr -d '[:space:]' < "${ROOT_DIR}/.github/vllm-main-verified.commit")}"
+CANDIDATE_VLLM_COMMIT="${VLLM_SAIL_CANDIDATE_UPSTREAM_COMMIT:-}"
+if [[ -n "${CANDIDATE_VLLM_COMMIT}" ]]; then
+    [[ "${CANDIDATE_VLLM_COMMIT}" =~ ^[0-9a-f]{40}$ ]] || {
+        printf 'VLLM_SAIL_CANDIDATE_UPSTREAM_COMMIT must be a 40-character lowercase hex SHA\n' >&2
+        exit 2
+    }
+    [[ "${VLLM_REF}" == "${CANDIDATE_VLLM_COMMIT}" ]] || {
+        printf 'VLLM_REF must match VLLM_SAIL_CANDIDATE_UPSTREAM_COMMIT\n' >&2
+        exit 2
+    }
+    export VLLM_SAIL_CANDIDATE_UPSTREAM_COMMIT="${CANDIDATE_VLLM_COMMIT}"
+    unset VLLM_PPU_CANDIDATE_UPSTREAM_COMMIT
+else
+    unset VLLM_SAIL_CANDIDATE_UPSTREAM_COMMIT VLLM_PPU_CANDIDATE_UPSTREAM_COMMIT
+fi
 PYTORCH_SAIL_ARCH="${PYTORCH_SAIL_ARCH:-ppu_15;ppu_10}"
 # Building the native PPU kernels is memory-heavy (~2 GiB per compile job). The
 # The CI build environment exposes many cores but a smaller memory limit, so an unbounded
@@ -56,7 +71,12 @@ BUILD_JOBS="${BUILD_JOBS:-${default_jobs}}"
 
 mkdir -p "${VLLM_WHEEL_DIR}" "${SAIL_WHEEL_DIR}" "${LOG_DIR}"
 : >"${MANIFEST}"
-exec > >(tee -a "${LOG_DIR}/build.log") 2>&1
+SANITIZE_PUBLIC_BUILD="${VLLM_SAIL_SANITIZE_PUBLIC_BUILD:-0}"
+if [[ "${SANITIZE_PUBLIC_BUILD}" == "1" ]]; then
+    exec 3>&1 >"${LOG_DIR}/build.log" 2>&1
+else
+    exec > >(tee -a "${LOG_DIR}/build.log") 2>&1
+fi
 
 WORK_DIR="$(mktemp -d)"
 cleanup() {
@@ -66,6 +86,9 @@ on_error() {
     local status=$?
     trap - ERR
     printf 'status=failed\nexit_code=%s\n' "${status}" >>"${MANIFEST}"
+    if [[ "${SANITIZE_PUBLIC_BUILD}" == "1" ]]; then
+        printf 'build_ppu_wheels status=failed exit_code=%s\n' "${status}" >&3
+    fi
     exit "${status}"
 }
 trap cleanup EXIT
@@ -148,6 +171,7 @@ VLLM_SRC="${WORK_DIR}/vllm"
 NATIVE_REUSE_ROOT="${VLLM_SAIL_NATIVE_REUSE_ROOT:-}"
 NATIVE_REUSE_DIR="${VLLM_SAIL_NATIVE_REUSE_DIR:-}"
 NATIVE_REUSE=0
+SAIL_NATIVE_REUSE=0
 VLLM_REUSE=0
 vllm_fingerprint=""
 build_image="${VLLM_SAIL_BUILD_IMAGE:-}"
@@ -172,7 +196,9 @@ fi
 
 # A native-reuse artifact is only a hint from the trusted controller. Every
 # donor operation is guarded so malformed or legacy artifacts fall back to a
-# full compile instead of failing the CI run.
+# full compile instead of failing the CI run. When SAIL native inputs and
+# csrc/upstream/manifest.toml match, verified SAIL .so extensions may still be
+# reused across candidate upstream vLLM commits while vLLM itself is compiled.
 fingerprint_args=(
     --build-image "${build_image}"
     --pytorch-sail-arch "${PYTORCH_SAIL_ARCH}"
@@ -192,12 +218,28 @@ prepare_native_reuse() {
         "${fingerprint_args[@]}" --vllm-fingerprint "${vllm_fingerprint}" "$@"; then
         PREBUILT_EXT_DIR="${donor_extensions}"
         NATIVE_REUSE=1
+        SAIL_NATIVE_REUSE=1
         printf 'reuse_mode=native\nreuse_source=%s\n' \
             "${donor_dir}" >>"${MANIFEST}"
         echo "Native fingerprint matched; reusing vLLM wheel and SAIL extensions"
         return 0
     fi
     rm -rf "${donor_extensions}"
+    if [[ -n "${CANDIDATE_VLLM_COMMIT:-}" ]]; then
+        donor_extensions="$(mktemp -d "${WORK_DIR}/donor.XXXXXX")" || return 1
+        if python "${ROOT_DIR}/scripts/ci/ppu_wheel_manifest.py" reuse-native \
+            "${donor_dir}" --sail-only --sail-source "${ROOT_DIR}" \
+            --output "${donor_extensions}" "${fingerprint_args[@]}" "$@"; then
+            PREBUILT_EXT_DIR="${donor_extensions}"
+            NATIVE_REUSE=0
+            SAIL_NATIVE_REUSE=1
+            printf 'reuse_mode=sail-native\nreuse_source=%s\n' \
+                "${donor_dir}" >>"${MANIFEST}"
+            echo "Native fingerprint matched across candidate vLLM; reusing SAIL extensions and compiling vLLM"
+            return 0
+        fi
+        rm -rf "${donor_extensions}"
+    fi
     echo "Native reuse donor rejected: ${donor_dir}"
     return 1
 }
@@ -242,13 +284,13 @@ try_donors() {
 
 if [[ "${VLLM_REF}" =~ ^[0-9a-f]{40}$ ]] &&
     { ((immutable_image)) || [[ -z "${build_image}" ]]; }; then
-    if try_donors prepare_native_reuse 1 2 3; then
+    if try_donors prepare_native_reuse 1 2 3 && ((NATIVE_REUSE)); then
         VLLM_REUSE=1
         # A legacy paired donor may lack an independent vLLM fingerprint.
         vllm_fingerprint=""
     elif [[ -n "${vllm_fingerprint}" ]] && try_donors prepare_vllm_reuse 1 2 3 upstream; then
         VLLM_REUSE=1
-    elif [[ -n "${NATIVE_REUSE_ROOT}${NATIVE_REUSE_DIR}" ]]; then
+    elif ((SAIL_NATIVE_REUSE == 0)) && [[ -n "${NATIVE_REUSE_ROOT}${NATIVE_REUSE_DIR}" ]]; then
         echo "Native reuse unavailable or invalid; compiling"
     fi
 fi
@@ -268,7 +310,7 @@ if ((VLLM_REUSE == 0)); then
         sleep "$((2 ** (attempt - 1)))"
     done
     git -C "${VLLM_SRC}" checkout --detach FETCH_HEAD
-    if [[ "${VLLM_REF}" =~ ^[0-9a-f]{40}$ ]]; then
+    if ((PREPARED_ENV)) || [[ "${VLLM_REF}" =~ ^[0-9a-f]{40}$ ]]; then
         [[ "$(git -C "${VLLM_SRC}" rev-parse HEAD)" == "${VLLM_REF}" ]] || fail "fetched vLLM commit differs from the checkout's pin"
     fi
     (
@@ -357,7 +399,7 @@ python -m pip install --force-reinstall --no-deps "${vllm_wheels[0]}"
 # and supplied by the separate CUDA-compatible runtime image, so install only
 # the dependencies needed to compile or repackage the plugin here.
 python -m pip install -r "${ROOT_DIR}/requirements/build.txt"
-if ((NATIVE_REUSE == 0)); then
+if ((SAIL_NATIVE_REUSE == 0)); then
     (
         cd "${ROOT_DIR}"
         python - <<'PY'
@@ -418,12 +460,19 @@ python "${ROOT_DIR}/scripts/ci/ppu_image_stack.py" verify \
     printf 'status=succeeded\n'
     printf 'python=%s\n' "$(python --version 2>&1)"
     printf 'hgcc=%s\n' "$("${HGCC}" --version 2>&1 | head -n 1)"
-    if ((NATIVE_REUSE == 1)); then
+    if ((SAIL_NATIVE_REUSE && VLLM_REUSE)); then
         printf 'reuse_mode=native\n'
+    elif ((SAIL_NATIVE_REUSE == 1)); then
+        printf 'reuse_mode=sail-native\n'
     elif ((VLLM_REUSE == 1)); then
         printf 'reuse_mode=vllm-only\n'
     else
         printf 'reuse_mode=full\n'
+    fi
+    if [[ -n "${CANDIDATE_VLLM_COMMIT}" ]]; then
+        printf 'candidate_vllm_commit=%s\n' "${CANDIDATE_VLLM_COMMIT}"
+    fi
+    if ((VLLM_REUSE == 0)); then
         printf 'rustc=%s\n' "$(cat "${LOG_DIR}/rustc-version.log")"
         printf 'cargo=%s\n' "$(cat "${LOG_DIR}/cargo-version.log")"
     fi
@@ -434,3 +483,6 @@ python "${ROOT_DIR}/scripts/ci/ppu_image_stack.py" verify \
 } >>"${MANIFEST}"
 printf 'Build succeeded.\nvLLM: %s\nvLLM SAIL: %s\nManifest: %s\n' \
     "${vllm_wheels[0]}" "${sail_wheels[0]}" "${MANIFEST}"
+if [[ "${SANITIZE_PUBLIC_BUILD}" == "1" ]]; then
+    printf 'build_ppu_wheels status=succeeded vllm_commit=%s\n' "${VLLM_COMMIT}" >&3
+fi

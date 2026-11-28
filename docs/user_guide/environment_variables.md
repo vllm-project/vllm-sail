@@ -29,6 +29,7 @@ python tools/render_env_docs.py --check
 | --- | --- | --- | --- | --- |
 | `PPU_SDK` | `/usr/local/PPU_SDK` | path | — | SAIL SDK root used at runtime. |
 | `VLLM_SAIL_STRICT_COMPAT` | `0` | `0`, `1` | `VLLM_PPU_STRICT_COMPAT` | Fail closed when the installed vLLM build does not match the verified upstream ref in the packaged kernel manifest (default: warn). |
+| `VLLM_SAIL_CANDIDATE_UPSTREAM_COMMIT` | Unset | 40-hex commit SHA | `VLLM_PPU_CANDIDATE_UPSTREAM_COMMIT` | Exact 40-character lowercase hexadecimal upstream vLLM commit SHA authorized for post-merge candidate validation without rewriting `csrc/upstream/manifest.toml`. |
 
 ## Backend selection
 

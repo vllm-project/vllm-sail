@@ -140,6 +140,102 @@ def test_patch_loader_keeps_errors_and_returns_a_snapshot(monkeypatch, failure):
     assert calls == ["register"]
 
 
+def test_check_patch_drift_distinguishes_known_soft_drift_from_incremental_drift(
+    tmp_path, monkeypatch, capsys
+):
+    import hashlib
+    import json
+
+    src_a = "def fn(x):\n    return x + 1\n"
+    src_b = "def fn(y):\n    return y\n"
+    sha_a = hashlib.sha256(src_a.encode("utf-8")).hexdigest()
+    sha_b = hashlib.sha256(src_b.encode("utf-8")).hexdigest()
+
+    records = [
+        SimpleNamespace(
+            target="vllm.a.fn",
+            original_source=src_a,
+            reason="soft",
+            remove_when="later",
+        ),
+        SimpleNamespace(
+            target="vllm.b.fn",
+            original_source=src_b,
+            reason="stable",
+            remove_when="later",
+        ),
+    ]
+    monkeypatch.setattr(
+        check_patch_drift, "load_patch_records", lambda label: list(records)
+    )
+
+    baseline = tmp_path / "baseline.json"
+    baseline.write_text(
+        json.dumps({"vllm.a.fn": "0" * 64, "vllm.b.fn": sha_b}) + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(check_patch_drift, "BASELINE", baseline)
+
+    prev_cursor = tmp_path / "cursor.json"
+    prev_cursor.write_text(
+        json.dumps(
+            {
+                "schema": 1,
+                "patch_fingerprints": {"vllm.a.fn": sha_a, "vllm.b.fn": sha_b},
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    out_json = tmp_path / "drift-report.json"
+
+    # Known soft drift with --allow-known-soft-drift exits 0.
+    assert (
+        check_patch_drift.main(
+            [
+                "--previous-baseline",
+                str(prev_cursor),
+                "--allow-known-soft-drift",
+                "--json-output",
+                str(out_json),
+            ]
+        )
+        == 0
+    )
+    assert "KNOWN_SOFT_DRIFT" in capsys.readouterr().out
+    assert (
+        json.loads(out_json.read_text(encoding="utf-8"))["status"] == "known_soft_drift"
+    )
+
+    # Without --allow-known-soft-drift, default check still exits 1.
+    assert check_patch_drift.main(["--previous-baseline", str(prev_cursor)]) == 1
+    capsys.readouterr()
+
+    # Incremental drift on vllm.b.fn exits 1 even with --allow-known-soft-drift.
+    records[1] = SimpleNamespace(
+        target="vllm.b.fn",
+        original_source="def fn(y):\n    return y * 2\n",
+        reason="stable",
+        remove_when="later",
+    )
+    assert (
+        check_patch_drift.main(
+            [
+                "--previous-baseline",
+                str(prev_cursor),
+                "--allow-known-soft-drift",
+                "--json-output",
+                str(out_json),
+            ]
+        )
+        == 1
+    )
+    assert "DRIFTED vllm.b.fn" in capsys.readouterr().out
+    assert json.loads(out_json.read_text(encoding="utf-8"))["incremental_drifted"] == [
+        "vllm.b.fn"
+    ]
+
+
 def test_render_env_docs_cli_stdout_write_and_check(tmp_path, capsys):
     assert render_env_docs.main(["--output", "-"]) == 0
     rendered = capsys.readouterr().out

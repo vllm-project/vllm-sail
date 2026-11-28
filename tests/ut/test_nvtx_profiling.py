@@ -287,6 +287,7 @@ def _install_profiling(
             fakes=fake_vllm,
             nvtx_calls=nvtx_stub,
             registry_before=registry_before,
+            dp_scope_first=request.param,
         )
     finally:
         PATCH_REGISTRY[:] = saved_registry
@@ -507,6 +508,9 @@ def test_v2_execute_model_forwards_dummy_runs_unprofiled(
 def test_v2_profiling_preserves_dp_scope(
     installed_with_dp_scope, monkeypatch, dummy_run, raises
 ) -> None:
+    if not installed.dp_scope_first:
+        pytest.skip("requires DP scope installed before profiling")
+
     from vllm_sail.patch.bugfix import dp_idle_mtp_dummy_batch as dp
 
     recording_nvtx = _record_nvtx(monkeypatch)

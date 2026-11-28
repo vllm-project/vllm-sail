@@ -663,8 +663,15 @@ def build_fingerprint(
             wheel_manifest.get("commits", {}).get(package) == expected,
             f"Wheel identity mismatch: {package}",
         )
+    expected_digest = "sha256:" + build_image.rsplit("@sha256:", 1)[1]
+    observed_image = diagnostics.get("build_image")
     require(
-        diagnostics.get("build_image") == build_image, "Observed build image mismatch"
+        observed_image == build_image
+        or (
+            observed_image is None
+            and diagnostics.get("build_image_digest") == expected_digest
+        ),
+        "Observed build image mismatch",
     )
     result = {"build_image": build_image, "vllm_commit": expected_vllm_commit}
     for key in ("sdk_sha256", "torch_sha256"):

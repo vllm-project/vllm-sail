@@ -23,3 +23,8 @@ model:
 variants:
   default:
     precision: bf16
+  tp1:
+    precision: bf16
+    extra_args:
+      - --tensor-parallel-size
+      - "1"

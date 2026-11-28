@@ -72,6 +72,7 @@ if TYPE_CHECKING:
     VLLM_SAIL_PPU_KV_MXFP8: bool = False
     VLLM_SAIL_PPU_KV_NVFP4: bool = False
     VLLM_SAIL_FUSED_ATTN_PER_TOKEN_SCALE: bool = False
+    VLLM_SAIL_CANDIDATE_UPSTREAM_COMMIT: str | None = None
     VLLM_DEEPEPLL_RECV_HOOK: bool = True
     VLLM_GDN_DECODE_KERNEL: str = "auto"
 
@@ -106,6 +107,7 @@ if TYPE_CHECKING:
     VLLM_PPU_PPU_KV_MXFP8: bool = False
     VLLM_PPU_PPU_KV_NVFP4: bool = False
     VLLM_PPU_FUSED_ATTN_PER_TOKEN_SCALE: bool = False
+    VLLM_PPU_CANDIDATE_UPSTREAM_COMMIT: str | None = None
 
 _TRUTHY = ("true", "1", "yes", "on")
 
@@ -196,6 +198,24 @@ def _positive_int(name: str, default: int) -> Callable[[], int]:
             raise ValueError(f"Expected an integer for {source}, got {raw!r}.") from exc
         if value <= 0:
             raise ValueError(f"{source} must be positive, got {value}.")
+        return value
+
+    return _get
+
+
+def _sha1_commit(name: str, default: str | None = None) -> Callable[[], str | None]:
+    """Read an exact 40-character lowercase hexadecimal Git commit SHA."""
+
+    def _get() -> str | None:
+        source, raw = _read_env(name)
+        if raw is None:
+            return default
+        value = raw.strip()
+        if len(value) != 40 or any(c not in "0123456789abcdef" for c in value):
+            raise ValueError(
+                f"Invalid value {raw!r} for {source}. Expected an exact "
+                "40-character lowercase hexadecimal commit SHA."
+            )
         return value
 
     return _get
@@ -306,6 +326,27 @@ def _positive_int_spec(
     )
 
 
+def _sha1_commit_spec(
+    name: str,
+    *,
+    section: str,
+    default: str | None = None,
+    description: str,
+    default_display: str | None = None,
+    extra_aliases: tuple[str, ...] = (),
+) -> EnvSpec:
+    return EnvSpec(
+        name=name,
+        section=section,
+        kind="sha1_commit",
+        default=default,
+        description=description,
+        getter=_sha1_commit(name, default),
+        default_display=default_display,
+        extra_aliases=extra_aliases,
+    )
+
+
 ENVIRONMENT_SPECS: tuple[EnvSpec, ...] = (
     # -- Runtime environment -----------------------------------------------
     _str_spec(
@@ -321,6 +362,17 @@ ENVIRONMENT_SPECS: tuple[EnvSpec, ...] = (
         description=(
             "Fail closed when the installed vLLM build does not match the "
             "verified upstream ref in the packaged kernel manifest (default: warn)."
+        ),
+    ),
+    _sha1_commit_spec(
+        "VLLM_SAIL_CANDIDATE_UPSTREAM_COMMIT",
+        section="Runtime environment",
+        default=None,
+        default_display="Unset",
+        description=(
+            "Exact 40-character lowercase hexadecimal upstream vLLM commit SHA "
+            "authorized for post-merge candidate validation without rewriting "
+            "`csrc/upstream/manifest.toml`."
         ),
     ),
     # -- Backend selection -------------------------------------------------

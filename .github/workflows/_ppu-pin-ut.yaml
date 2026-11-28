@@ -17,6 +17,10 @@ on:
         description: PPU CI build run supplying ppu-wheels-<run_id>
         required: true
         type: string
+      vllm_ref:
+        description: Upstream vLLM commit SHA override (blank uses .github/vllm-main-verified.commit)
+        type: string
+        default: ""
 
 permissions:
   contents: read
@@ -81,10 +85,18 @@ jobs:
         id: upstream
         env:
           SOURCE_DIR: ${{ steps.runtime.outputs.source }}
+          VLLM_REF_OVERRIDE: ${{ inputs.vllm_ref }}
         run: |
-          pin="$(tr -d '[:space:]' < "$SOURCE_DIR/.github/vllm-main-verified.commit")"
-          [[ "$pin" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::Invalid upstream pin"; exit 1; }
+          verified="$(tr -d '[:space:]' < "$SOURCE_DIR/.github/vllm-main-verified.commit")"
+          [[ "$verified" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::Invalid upstream pin"; exit 1; }
+          pin="${VLLM_REF_OVERRIDE:-$verified}"
+          [[ "$pin" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::Invalid upstream ref override"; exit 1; }
+          candidate=""
+          if [[ "$pin" != "$verified" ]]; then
+            candidate="$pin"
+          fi
           echo "ref=$pin" >> "$GITHUB_OUTPUT"
+          echo "candidate=$candidate" >> "$GITHUB_OUTPUT"
 
       - name: Check out pinned upstream source
         uses: actions/checkout@v4
@@ -127,6 +139,8 @@ jobs:
           PPU_CI_DEVICE_COUNT: "1"
           PPU_CI_REQUIRE_PR_ARTIFACT: ${{ inputs.pr_mode }}
           PPU_CI_WHEEL_SOURCE_SHA: ${{ inputs.wheel_source_sha || inputs.pr_head_sha || github.sha }}
+          PPU_CI_EXPECTED_VLLM_COMMIT: ${{ steps.upstream.outputs.ref }}
+          PPU_CI_CANDIDATE_UPSTREAM_COMMIT: ${{ steps.upstream.outputs.candidate }}
         run: bash "${PPU_CI_SOURCE_DIR}/scripts/ci/ppu_runtime_container.sh" pin-ut
 
       - name: Upload pin UT diagnostics
