@@ -77,6 +77,7 @@ def qsa_select_paged_decode(
     compress_ratio: int,
     decode_query_len: int,
     block_indices: torch.Tensor,
+    topk_backend: str = "auto",
 ) -> None:
     """Score compressed decode blocks with the paged FP4 average kernel.
 
@@ -92,7 +93,11 @@ def qsa_select_paged_decode(
     smaller contiguous pages instead would copy the whole cache on every call:
     71 MB per indexer call at production ``num_blocks``, twelve times per
     iteration, which is what dominated the fp4 arm's decode regression.
+
+    ``topk_backend`` is accepted for upstream parity; this PPU MXFP4 scorer
+    always selects BF16 logits through ``DeepSelect``.
     """
+    del topk_backend
     assert token_topk % compress_ratio == 0
     assert block_indices.shape == (q.shape[0], token_topk // compress_ratio)
     assert decode_query_len > 0 and q.shape[0] % decode_query_len == 0
@@ -148,6 +153,7 @@ def qsa_select_paged_prefill(
     max_query_len: int,
     block_indices: torch.Tensor,
     max_seq_len: int,
+    topk_backend: str = "auto",
 ) -> None:
     """Score compressed prefill blocks with the non-paged FP4 average kernel.
 
@@ -161,8 +167,10 @@ def qsa_select_paged_prefill(
     Every derived size comes from ``max_seq_len`` and tensor shapes, so the
     per-request offsets are built on device and nothing here synchronizes.
     ``max_query_len`` is unused — this launch is not chunked over query rows.
+    ``topk_backend`` is accepted for upstream parity; this PPU MXFP4 scorer
+    always selects BF16 logits through ``DeepSelect``.
     """
-    del max_query_len
+    del max_query_len, topk_backend
     assert token_topk % compress_ratio == 0
     assert block_indices.shape == (q.shape[0], token_topk // compress_ratio)
     assert query_start_loc.shape == (page_table.shape[0] + 1,)

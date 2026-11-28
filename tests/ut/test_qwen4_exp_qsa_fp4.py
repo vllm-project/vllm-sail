@@ -441,15 +441,41 @@ def test_scoring_wrappers_delegate_on_the_chip_generation(
 
 
 def test_wrappers_are_installed_on_every_target(qsa_fp4_patch):
+    import inspect
+
     from vllm.models.qwen4_exp.nvidia import qsa_indexer as indexer_alias
     from vllm.models.qwen4_exp.nvidia.ops import qsa_indexer as ops
     from vllm.models.qwen4_exp.nvidia.ops import qsa_prepare as prepare_ops
+
+    from vllm_sail.models.qwen4_exp.ops import fp4_select
 
     assert prepare_ops.qsa_prepare is qsa_fp4_patch.qsa_prepare
     assert indexer_alias.qsa_prepare is qsa_fp4_patch.qsa_prepare
     assert ops.qsa_select_paged_decode is qsa_fp4_patch.qsa_select_paged_decode
     assert ops.qsa_select_paged_prefill is qsa_fp4_patch.qsa_select_paged_prefill
     assert ops.warmup_qsa_mqa_paged_decode is qsa_fp4_patch.warmup_qsa_mqa_paged_decode
+
+    for fp4_fn, upstream_fn in (
+        (
+            fp4_select.qsa_select_paged_decode,
+            qsa_fp4_patch._upstream_select_paged_decode,
+        ),
+        (
+            fp4_select.qsa_select_paged_prefill,
+            qsa_fp4_patch._upstream_select_paged_prefill,
+        ),
+        (
+            fp4_select.warmup_qsa_mqa_paged_decode,
+            qsa_fp4_patch._upstream_warmup_paged_decode,
+        ),
+    ):
+        assert [
+            (p.name, p.kind, p.default)
+            for p in inspect.signature(fp4_fn).parameters.values()
+        ] == [
+            (p.name, p.kind, p.default)
+            for p in inspect.signature(upstream_fn).parameters.values()
+        ]
 
 
 def test_compressed_cache_init_publishes_an_mxfp4_row(qsa_fp4_patch, monkeypatch):
@@ -565,3 +591,42 @@ def test_every_patch_point_gates_on_the_same_generation_predicate():
     source = PATCH_FILE.read_text(encoding="utf-8")
     assert source.count("if not is_ppu_15():") == 6
     assert "current_platform" not in source
+
+
+def test_fp4_select_public_signatures_accept_topk_backend():
+    """Match upstream ``QSAIndexer.forward`` positional ``topk_backend`` args."""
+    fp4_select_path = (
+        ROOT / "vllm_sail" / "models" / "qwen4_exp" / "ops" / "fp4_select.py"
+    )
+    tree = ast.parse(fp4_select_path.read_text(encoding="utf-8"))
+    funcs = {node.name: node for node in tree.body if isinstance(node, ast.FunctionDef)}
+
+    decode_fn = funcs["qsa_select_paged_decode"]
+    assert [a.arg for a in decode_fn.args.args] == [
+        "q",
+        "k_cache",
+        "page_table",
+        "visible_blocks",
+        "token_topk",
+        "compress_ratio",
+        "decode_query_len",
+        "block_indices",
+        "topk_backend",
+    ]
+    assert ast.literal_eval(decode_fn.args.defaults[-1]) == "auto"
+
+    prefill_fn = funcs["qsa_select_paged_prefill"]
+    assert [a.arg for a in prefill_fn.args.args] == [
+        "q",
+        "k_cache",
+        "page_table",
+        "query_start_loc",
+        "visible_blocks",
+        "token_topk",
+        "compress_ratio",
+        "max_query_len",
+        "block_indices",
+        "max_seq_len",
+        "topk_backend",
+    ]
+    assert ast.literal_eval(prefill_fn.args.defaults[-1]) == "auto"
